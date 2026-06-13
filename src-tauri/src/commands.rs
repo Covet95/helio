@@ -3,6 +3,7 @@ use crate::db::Database;
 use crate::models::{ApiProfile, TargetApp};
 use serde::{Serialize, Deserialize};
 use std::sync::Mutex;
+use std::path::PathBuf;
 use tauri::State;
 
 pub struct AppState {
@@ -27,6 +28,146 @@ pub struct DatabaseInfo {
     pub size: u64,
     pub profile_count: usize,
     pub path: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct McpServerConfig {
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: Option<std::collections::HashMap<String, String>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LocalConfigInfo {
+    pub mcp_servers: std::collections::HashMap<String, McpServerConfig>,
+    pub skills: Vec<String>,
+    pub hooks: serde_json::Value,
+    pub permissions: serde_json::Value,
+}
+
+// 新增：扫描本地 MCP 配置
+#[tauri::command]
+pub async fn scan_local_mcp_servers(
+    target_app: String,
+) -> Result<std::collections::HashMap<String, McpServerConfig>, String> {
+    let target = TargetApp::from_str(&target_app)
+        .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
+
+    use crate::adapters::get_adapter;
+    let adapter = get_adapter(target);
+    let config_path = adapter.config_path();
+
+    if !config_path.exists() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    // 读取配置文件
+    let content = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("Failed to read config: {}", e))?;
+
+    let config: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse config: {}", e))?;
+
+    // 提取 MCP 服务器配置
+    let mcp_servers = config
+        .get("mcpServers")
+        .or_else(|| config.get("mcp_servers"))
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+
+    Ok(mcp_servers)
+}
+
+// 新增：扫描本地 Skills
+#[tauri::command]
+pub async fn scan_local_skills(
+    target_app: String,
+) -> Result<Vec<String>, String> {
+    let target = TargetApp::from_str(&target_app)
+        .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
+
+    // Claude Code skills 路径: ~/.claude/skills/
+    // Codex skills 路径: ~/.codex/skills/
+    let skills_dir = if target == TargetApp::ClaudeCode {
+        dirs::home_dir()
+            .ok_or("Failed to get home directory")?
+            .join(".claude")
+            .join("skills")
+    } else {
+        dirs::home_dir()
+            .ok_or("Failed to get home directory")?
+            .join(".codex")
+            .join("skills")
+    };
+
+    if !skills_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut skills = Vec::new();
+    for entry in std::fs::read_dir(&skills_dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if entry.path().is_dir() {
+            if let Some(name) = entry.file_name().to_str() {
+                skills.push(name.to_string());
+            }
+        }
+    }
+
+    Ok(skills)
+}
+
+// 新增：获取完整的本地配置信息
+#[tauri::command]
+pub async fn get_local_config_info(
+    target_app: String,
+) -> Result<LocalConfigInfo, String> {
+    let target = TargetApp::from_str(&target_app)
+        .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
+
+    use crate::adapters::get_adapter;
+    let adapter = get_adapter(target);
+    let config_path = adapter.config_path();
+
+    let mut info = LocalConfigInfo {
+        mcp_servers: std::collections::HashMap::new(),
+        skills: Vec::new(),
+        hooks: serde_json::json!({}),
+        permissions: serde_json::json!({}),
+    };
+
+    if !config_path.exists() {
+        return Ok(info);
+    }
+
+    // 读取配置文件
+    let content = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("Failed to read config: {}", e))?;
+
+    let config: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse config: {}", e))?;
+
+    // MCP Servers
+    info.mcp_servers = config
+        .get("mcpServers")
+        .or_else(|| config.get("mcp_servers"))
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+
+    // Skills
+    info.skills = scan_local_skills(target_app.clone()).await?;
+
+    // Hooks
+    if let Some(hooks) = config.get("hooks") {
+        info.hooks = hooks.clone();
+    }
+
+    // Permissions
+    if let Some(permissions) = config.get("permissions") {
+        info.permissions = permissions.clone();
+    }
+
+    Ok(info)
 }
 
 #[tauri::command]

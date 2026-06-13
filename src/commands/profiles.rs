@@ -94,3 +94,52 @@ pub async fn switch_profile(
 
     Ok(())
 }
+
+// 新增：导出数据库
+#[tauri::command]
+pub async fn export_database(
+    output_path: String,
+    state: State<'_, AppState>
+) -> Result<(), String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+
+    // 获取数据库文件路径
+    let db_path = dirs::home_dir()
+        .ok_or("Failed to get home directory")?
+        .join(".switch-api")
+        .join("db.sqlite");
+
+    // 复制数据库文件
+    std::fs::copy(&db_path, &output_path)
+        .map_err(|e| format!("Failed to export database: {}", e))?;
+
+    Ok(())
+}
+
+// 新增：导入数据库
+#[tauri::command]
+pub async fn import_database(
+    input_path: String,
+    state: State<'_, AppState>
+) -> Result<(), String> {
+    let db_path = dirs::home_dir()
+        .ok_or("Failed to get home directory")?
+        .join(".switch-api")
+        .join("db.sqlite");
+
+    // 备份当前数据库
+    let backup_path = db_path.with_extension("sqlite.backup");
+    if db_path.exists() {
+        std::fs::copy(&db_path, &backup_path)
+            .map_err(|e| format!("Failed to backup database: {}", e))?;
+    }
+
+    // 复制新数据库
+    std::fs::copy(&input_path, &db_path)
+        .map_err(|e| format!("Failed to import database: {}", e))?;
+
+    // 重新加载数据库
+    drop(state.db.lock().map_err(|e| e.to_string())?);
+
+    Ok(())
+}

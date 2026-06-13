@@ -39,6 +39,11 @@ pub fn run() {
             commands::get_shared_config,
             commands::save_shared_config,
             commands::get_status,
+            commands::export_database,
+            commands::import_database,
+            commands::scan_local_mcp_servers,
+            commands::scan_local_skills,
+            commands::get_local_config_info,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
