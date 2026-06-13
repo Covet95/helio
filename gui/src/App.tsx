@@ -5,6 +5,7 @@ import Sidebar from './components/layout/Sidebar';
 import ProfilesPage from './pages/ProfilesPage';
 import ConfigPage from './pages/ConfigPage';
 import StatusPage from './pages/StatusPage';
+import ExportPage from './pages/ExportPage';
 
 function App() {
   const { fetchProfiles, fetchStatus } = useStore();
@@ -24,6 +25,7 @@ function App() {
             <Route path="/profiles" element={<ProfilesPage />} />
             <Route path="/config" element={<ConfigPage />} />
             <Route path="/status" element={<StatusPage />} />
+            <Route path="/export" element={<ExportPage />} />
           </Routes>
         </main>
       </div>

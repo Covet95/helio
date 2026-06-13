@@ -31,4 +31,26 @@ export const tauriApi = {
   // 状态查询
   getStatus: () =>
     invoke<StatusInfo>('get_status'),
+
+  // 数据库导入导出
+  exportDatabase: (outputPath: string) =>
+    invoke<void>('export_database', { outputPath }),
+
+  importDatabase: (inputPath: string) =>
+    invoke<void>('import_database', { inputPath }),
+
+  // MCP 和 Skills
+  scanLocalMcpServers: (targetApp: TargetApp) =>
+    invoke<Record<string, any>>('scan_local_mcp_servers', { targetApp }),
+
+  scanLocalSkills: (targetApp: TargetApp) =>
+    invoke<string[]>('scan_local_skills', { targetApp }),
+
+  getLocalConfigInfo: (targetApp: TargetApp) =>
+    invoke<{
+      mcp_servers: Record<string, any>;
+      skills: string[];
+      hooks: any;
+      permissions: any;
+    }>('get_local_config_info', { targetApp }),
 };

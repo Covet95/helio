@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom';
-import { Database, Settings, Activity } from 'lucide-react';
+import { Database, Settings, Activity, Download } from 'lucide-react';
 
 export default function Sidebar() {
   const linkClass = ({ isActive }: { isActive: boolean }) =>
@@ -28,6 +28,10 @@ export default function Sidebar() {
         <NavLink to="/status" className={linkClass}>
           <Activity size={20} />
           <span>Status</span>
+        </NavLink>
+        <NavLink to="/export" className={linkClass}>
+          <Download size={20} />
+          <span>Export/Import</span>
         </NavLink>
       </nav>
 
