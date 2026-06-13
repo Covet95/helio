@@ -12,32 +12,31 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
       <button
         ref={ref}
         className={cn(
-          'inline-flex items-center justify-center rounded-lg font-medium',
-          'transition-all focus:outline-none focus:ring-2 focus:ring-offset-2',
-          'disabled:opacity-50 disabled:pointer-events-none',
+          'no-drag inline-flex items-center justify-center gap-2 rounded-lg font-medium',
+          'transition-all duration-200 outline-none',
+          'focus-visible:ring-2 focus-visible:ring-accent/50',
+          'disabled:opacity-40 disabled:pointer-events-none active:scale-[0.98]',
           {
-            'bg-primary text-white hover:bg-blue-600 focus:ring-primary':
+            'bg-accent text-white shadow-[0_2px_12px_-2px_rgb(59_130_246/0.5)] hover:bg-accent-soft':
               variant === 'primary',
-            'bg-gray-100 text-gray-900 hover:bg-gray-200 focus:ring-gray-300':
+            'bg-elevated text-ink border border-line hover:border-line-strong hover:bg-line/40':
               variant === 'secondary',
-            'bg-transparent hover:bg-gray-100 text-gray-700':
+            'bg-transparent text-ink-dim hover:bg-elevated hover:text-ink':
               variant === 'ghost',
-            'bg-success text-white hover:bg-green-600 focus:ring-success':
-              variant === 'success',
-            'bg-error text-white hover:bg-red-600 focus:ring-error':
-              variant === 'danger',
+            'bg-ok text-white hover:brightness-110': variant === 'success',
+            'bg-danger/90 text-white hover:bg-danger': variant === 'danger',
           },
           {
-            'px-3 py-1.5 text-sm': size === 'sm',
-            'px-4 py-2 text-base': size === 'md',
-            'px-6 py-3 text-lg': size === 'lg',
+            'px-3 py-1.5 text-[13px]': size === 'sm',
+            'px-4 py-2 text-sm': size === 'md',
+            'px-6 py-3 text-base': size === 'lg',
           },
-          className
+          className,
         )}
         {...props}
       />
     );
-  }
+  },
 );
 
 Button.displayName = 'Button';

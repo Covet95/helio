@@ -1,84 +1,70 @@
-import { useState } from 'react';
-import { useStore } from '../store';
+import { useState, useRef, useEffect } from 'react';import { useStore } from '../store';
 import { Button } from '../components/common/Button';
 import { Spinner } from '../components/common/Spinner';
-import { Database, Plus, Edit2, Trash2 } from 'lucide-react';
+import { PageHeader } from '../components/common/PageHeader';
+import { Modal, Field } from '../components/common/Modal';
+import { Plus, Pencil, Trash2, ArrowLeftRight, Check, Layers } from 'lucide-react';
 import type { ApiProfile, TargetApp } from '../types';
 import { SUPPORTED_TOOLS } from '../types';
+import { maskApiKey } from '../lib/utils';
 
 export default function ProfilesPage() {
-  const { profiles, loadingProfiles, addProfile, updateProfile, deleteProfile, switchProfile } = useStore();
+  const { profiles, loadingProfiles, fetchProfiles, addProfile, updateProfile, deleteProfile, switchProfile } = useStore();
   const [showModal, setShowModal] = useState(false);
-  const [editingProfile, setEditingProfile] = useState<ApiProfile | null>(null);
+  const [editing, setEditing] = useState<ApiProfile | null>(null);
+  const [switched, setSwitched] = useState<string | null>(null);
 
-  const handleAdd = () => {
-    setEditingProfile(null);
-    setShowModal(true);
+  useEffect(() => { fetchProfiles(); }, [fetchProfiles]);
+
+  const handleSwitch = async (app: TargetApp, name: string) => {
+    await switchProfile(app, name);
+    setSwitched(`${name}→${app}`);
+    setTimeout(() => setSwitched(null), 1600);
   };
-
-  const handleEdit = (profile: ApiProfile) => {
-    setEditingProfile(profile);
-    setShowModal(true);
-  };
-
-  const handleDelete = async (name: string) => {
-    if (confirm(`确定要删除 Profile "${name}" 吗？`)) {
-      await deleteProfile(name);
-    }
-  };
-
-  const handleSwitch = async (targetApp: TargetApp, profileName: string) => {
-    await switchProfile(targetApp, profileName);
-  };
-
-  if (loadingProfiles) {
-    return (
-      <div className="flex items-center justify-center h-full">
-        <Spinner size="lg" />
-      </div>
-    );
-  }
 
   return (
-    <div className="p-8">
-      <div className="flex justify-between items-center mb-6">
-        <h2 className="text-2xl font-bold text-gray-900">API Profiles</h2>
-        <Button onClick={handleAdd} className="gap-2">
-          <Plus size={18} />
-          添加 Profile
-        </Button>
-      </div>
+    <div className="min-h-full">
+      <PageHeader
+        title="API Profiles"
+        subtitle="切换时只替换 API URL 与 Key，其余共享配置（permissions / hooks / MCP / skills）完整保留"
+        actions={
+          <Button onClick={() => { setEditing(null); setShowModal(true); }}>
+            <Plus size={16} strokeWidth={2.5} />
+            New Profile
+          </Button>
+        }
+      />
 
-      {profiles.length === 0 ? (
-        <div className="text-center py-12 text-gray-500">
-          <Database size={48} className="mx-auto mb-4 opacity-50" />
-          <p>还没有任何 Profile</p>
-          <p className="text-sm mt-2">点击"添加 Profile"开始</p>
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {profiles.map((profile) => (
-            <ProfileCard
-              key={profile.name}
-              profile={profile}
-              onEdit={() => handleEdit(profile)}
-              onDelete={() => handleDelete(profile.name)}
-              onSwitch={handleSwitch}
-            />
-          ))}
-        </div>
-      )}
+      <div className="px-8 py-6">
+        {loadingProfiles ? (
+          <div className="grid place-items-center py-32"><Spinner size="lg" /></div>
+        ) : profiles.length === 0 ? (
+          <EmptyState onAdd={() => { setEditing(null); setShowModal(true); }} />
+        ) : (
+          <div className="space-y-3 max-w-4xl">
+            {profiles.map((p, i) => (
+              <ProfileCard
+                key={p.name}
+                profile={p}
+                index={i}
+                justSwitched={switched?.startsWith(`${p.name}→`) ?? false}
+                onEdit={() => { setEditing(p); setShowModal(true); }}
+                onDelete={async () => {
+                  if (confirm(`删除 Profile "${p.name}"？`)) await deleteProfile(p.name);
+                }}
+                onSwitch={handleSwitch}
+              />
+            ))}
+          </div>
+        )}
+      </div>
 
       {showModal && (
         <ProfileModal
-          profile={editingProfile}
+          profile={editing}
           onClose={() => setShowModal(false)}
-          onSave={async (profile) => {
-            if (editingProfile) {
-              await updateProfile(profile);
-            } else {
-              await addProfile(profile);
-            }
+          onSave={async (p) => {
+            if (editing) await updateProfile(p); else await addProfile(p);
             setShowModal(false);
           }}
         />
@@ -87,152 +73,171 @@ export default function ProfilesPage() {
   );
 }
 
-function ProfileCard({
-  profile,
-  onEdit,
-  onDelete,
-  onSwitch,
-}: {
-  profile: ApiProfile;
-  onEdit: () => void;
-  onDelete: () => void;
-  onSwitch: (app: TargetApp, name: string) => void;
-}) {
+function EmptyState({ onAdd }: { onAdd: () => void }) {
   return (
-    <div className="bg-white rounded-lg shadow p-4 hover:shadow-md transition-shadow">
-      <div className="flex justify-between items-start mb-3">
-        <div>
-          <h3 className="font-semibold text-lg">{profile.name}</h3>
-          <p className="text-sm text-gray-500">{profile.provider}</p>
-        </div>
-        <div className="flex gap-2">
-          <button
-            onClick={onEdit}
-            className="p-1 text-gray-400 hover:text-primary"
-            title="编辑"
-          >
-            <Edit2 size={16} />
-          </button>
-          <button
-            onClick={onDelete}
-            className="p-1 text-gray-400 hover:text-error"
-            title="删除"
-          >
-            <Trash2 size={16} />
-          </button>
-        </div>
+    <div className="max-w-4xl rounded-2xl border border-dashed border-line bg-surface/40 py-20 text-center">
+      <div className="mx-auto grid place-items-center h-14 w-14 rounded-2xl bg-elevated border border-line mb-5">
+        <Layers size={24} className="text-ink-faint" />
       </div>
-
-      <div className="text-sm text-gray-600 mb-3">
-        <p className="truncate">URL: {profile.api_url}</p>
-        <p className="truncate">Key: {profile.api_key.slice(0, 10)}...</p>
-      </div>
-
-      <div className="space-y-2">
-        <p className="text-xs text-gray-400 font-medium">切换到：</p>
-        <div className="grid grid-cols-2 gap-2">
-          {SUPPORTED_TOOLS.map((tool) => (
-            <Button
-              key={tool.id}
-              size="sm"
-              variant="secondary"
-              onClick={() => onSwitch(tool.id, profile.name)}
-            >
-              {tool.displayName}
-            </Button>
-          ))}
-        </div>
-      </div>
+      <p className="text-ink font-medium">还没有任何 Profile</p>
+      <p className="mt-1.5 text-[13px] text-ink-dim">添加一个 API Profile 开始管理多工具切换</p>
+      <Button onClick={onAdd} className="mt-6 mx-auto"><Plus size={16} strokeWidth={2.5} />New Profile</Button>
     </div>
   );
 }
 
+function ProfileCard({
+  profile, index, justSwitched, onEdit, onDelete, onSwitch,
+}: {
+  profile: ApiProfile;
+  index: number;
+  justSwitched: boolean;
+  onEdit: () => void;
+  onDelete: () => void;
+  onSwitch: (app: TargetApp, name: string) => void;
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, []);
+
+  // derive an icon mark + tint from the profile's provider, fallback to neutral
+  const tint = providerTint(profile.provider);
+
+  return (
+    <div
+      className="group relative overflow-hidden rounded-xl border border-line bg-card px-4 py-3.5 transition-all duration-300 hover:border-line-strong hover:bg-elevated/40 animate-fade-up"
+      style={{ animationDelay: `${index * 45}ms` }}
+    >
+      {/* success flash overlay */}
+      <div className={`pointer-events-none absolute inset-0 bg-gradient-to-r from-ok/10 to-transparent transition-opacity duration-500 ${justSwitched ? 'opacity-100' : 'opacity-0'}`} />
+
+      <div className="relative flex items-center gap-4">
+        {/* icon tile */}
+        <div
+          className="grid place-items-center h-11 w-11 shrink-0 rounded-xl border border-line font-mono text-[13px] font-bold transition-transform duration-300 group-hover:scale-105"
+          style={{ background: `${tint}1a`, color: tint, borderColor: `${tint}33` }}
+        >
+          {profile.name.slice(0, 2).toUpperCase()}
+        </div>
+
+        {/* info */}
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <h3 className="truncate text-[15px] font-semibold text-ink">{profile.name}</h3>
+            <span className="rounded-md border border-line bg-surface px-1.5 py-0.5 text-[10px] font-medium text-ink-dim">
+              {profile.provider}
+            </span>
+          </div>
+          <div className="mt-1 flex items-center gap-3 text-[12px] text-ink-dim">
+            <span className="truncate font-mono">{profile.api_url}</span>
+            <span className="shrink-0 font-mono text-ink-faint">{maskApiKey(profile.api_key)}</span>
+          </div>
+        </div>
+
+        {/* actions: hidden until hover */}
+        <div className="flex items-center gap-1.5 opacity-0 pointer-events-none transition-opacity duration-200 group-hover:opacity-100 group-hover:pointer-events-auto">
+          <IconBtn label="编辑" onClick={onEdit}><Pencil size={15} /></IconBtn>
+          <IconBtn label="删除" danger onClick={onDelete}><Trash2 size={15} /></IconBtn>
+        </div>
+
+        {/* switch dropdown — always visible */}
+        <div className="relative" ref={ref}>
+          <button
+            onClick={() => setMenuOpen((v) => !v)}
+            className="no-drag flex items-center gap-1.5 rounded-lg border border-line bg-surface px-3 py-2 text-[13px] font-medium text-ink-dim transition-all hover:border-accent/50 hover:text-ink"
+          >
+            <ArrowLeftRight size={14} />
+            Switch
+          </button>
+          {menuOpen && (
+            <div className="absolute right-0 top-full z-20 mt-1.5 w-48 overflow-hidden rounded-xl border border-line bg-card shadow-card animate-fade-up">
+              <div className="px-3 py-2 text-[11px] font-medium text-ink-faint border-b border-line/70">应用到工具</div>
+              {SUPPORTED_TOOLS.map((tool) => (
+                <button
+                  key={tool.id}
+                  onClick={() => { onSwitch(tool.id, profile.name); setMenuOpen(false); }}
+                  className="flex w-full items-center gap-2.5 px-3 py-2.5 text-left text-[13px] text-ink-dim transition-colors hover:bg-elevated hover:text-ink"
+                >
+                  <span className="grid place-items-center h-6 w-6 rounded-md font-mono text-[10px] font-bold"
+                        style={{ background: `${tool.color}22`, color: tool.color }}>
+                    {tool.short}
+                  </span>
+                  <span className="flex-1">{tool.displayName}</span>
+                  <span className="font-mono text-[10px] text-ink-faint">{tool.format}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {justSwitched && (
+        <div className="relative mt-2 flex items-center gap-1.5 text-[12px] font-medium text-ok">
+          <Check size={13} /> 已切换
+        </div>
+      )}
+    </div>
+  );
+}
+
+function IconBtn({ children, label, danger, onClick }: { children: React.ReactNode; label: string; danger?: boolean; onClick: () => void }) {
+  return (
+    <button
+      title={label}
+      onClick={onClick}
+      className={`no-drag grid place-items-center h-8 w-8 rounded-lg border border-line bg-surface transition-all hover:bg-elevated ${
+        danger ? 'text-ink-faint hover:text-danger hover:border-danger/40' : 'text-ink-faint hover:text-ink'
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function providerTint(provider: string): string {
+  const p = provider.toLowerCase();
+  if (p.includes('anthropic')) return '#D97757';
+  if (p.includes('openai')) return '#10B981';
+  if (p.includes('google')) return '#4F8DF6';
+  return '#A78BFA';
+}
+
 function ProfileModal({
-  profile,
-  onClose,
-  onSave,
+  profile, onClose, onSave,
 }: {
   profile: ApiProfile | null;
   onClose: () => void;
-  onSave: (profile: ApiProfile) => void;
+  onSave: (p: ApiProfile) => void;
 }) {
-  const [formData, setFormData] = useState<ApiProfile>(
-    profile || {
-      name: '',
-      provider: 'Anthropic',
-      api_url: 'https://api.anthropic.com',
-      api_key: '',
-    }
+  const [form, setForm] = useState<ApiProfile>(
+    profile || { name: '', provider: 'anthropic', api_url: 'https://api.anthropic.com', api_key: '' },
   );
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    onSave(formData);
-  };
-
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div className="bg-white rounded-lg p-6 w-full max-w-md">
-        <h3 className="text-xl font-bold mb-4">
-          {profile ? '编辑 Profile' : '添加 Profile'}
-        </h3>
-
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium mb-1">名称</label>
-            <input
-              type="text"
-              value={formData.name}
-              onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-              className="w-full px-3 py-2 border rounded-lg"
-              required
-              disabled={!!profile}
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium mb-1">Provider</label>
-            <input
-              type="text"
-              value={formData.provider}
-              onChange={(e) => setFormData({ ...formData, provider: e.target.value })}
-              className="w-full px-3 py-2 border rounded-lg"
-              required
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium mb-1">API URL</label>
-            <input
-              type="url"
-              value={formData.api_url}
-              onChange={(e) => setFormData({ ...formData, api_url: e.target.value })}
-              className="w-full px-3 py-2 border rounded-lg"
-              required
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium mb-1">API Key</label>
-            <input
-              type="password"
-              value={formData.api_key}
-              onChange={(e) => setFormData({ ...formData, api_key: e.target.value })}
-              className="w-full px-3 py-2 border rounded-lg"
-              required
-            />
-          </div>
-
-          <div className="flex gap-2 justify-end mt-6">
-            <Button type="button" variant="secondary" onClick={onClose}>
-              取消
-            </Button>
-            <Button type="submit">
-              {profile ? '保存' : '添加'}
-            </Button>
-          </div>
-        </form>
-      </div>
-    </div>
+    <Modal title={profile ? '编辑 Profile' : '新建 Profile'} onClose={onClose}>
+      <form
+        onSubmit={(e) => { e.preventDefault(); onSave(form); }}
+        className="space-y-4"
+      >
+        <Field label="名称" value={form.name} disabled={!!profile} required
+               onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="my-proxy" />
+        <Field label="Provider" value={form.provider} required
+               onChange={(e) => setForm({ ...form, provider: e.target.value })} placeholder="anthropic / openai / google" />
+        <Field label="API URL" type="url" value={form.api_url} required mono
+               onChange={(e) => setForm({ ...form, api_url: e.target.value })} />
+        <Field label="API Key" type="password" value={form.api_key} required mono
+               onChange={(e) => setForm({ ...form, api_key: e.target.value })} placeholder="sk-..." />
+        <div className="flex justify-end gap-2.5 pt-2">
+          <Button type="button" variant="ghost" onClick={onClose}>取消</Button>
+          <Button type="submit">{profile ? '保存' : '创建'}</Button>
+        </div>
+      </form>
+    </Modal>
   );
 }

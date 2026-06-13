@@ -17,9 +17,9 @@ function App() {
 
   return (
     <BrowserRouter>
-      <div className="w-full h-full flex bg-gray-50">
+      <div className="app-bg w-full h-full flex text-ink">
         <Sidebar />
-        <main className="flex-1 overflow-auto">
+        <main className="flex-1 overflow-y-auto overflow-x-hidden">
           <Routes>
             <Route path="/" element={<Navigate to="/profiles" replace />} />
             <Route path="/profiles" element={<ProfilesPage />} />
