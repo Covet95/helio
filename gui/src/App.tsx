@@ -1,8 +1,13 @@
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useEffect } from 'react';
 import { useStore } from './store';
+import Sidebar from './components/layout/Sidebar';
+import ProfilesPage from './pages/ProfilesPage';
+import ConfigPage from './pages/ConfigPage';
+import StatusPage from './pages/StatusPage';
 
 function App() {
-  const { fetchProfiles, fetchStatus, profiles, status } = useStore();
+  const { fetchProfiles, fetchStatus } = useStore();
 
   useEffect(() => {
     fetchProfiles();
@@ -10,19 +15,19 @@ function App() {
   }, [fetchProfiles, fetchStatus]);
 
   return (
-    <div className="w-full h-full bg-gray-50 flex items-center justify-center">
-      <div className="text-center">
-        <h1 className="text-3xl font-bold text-gray-900 mb-4">
-          Switch API GUI
-        </h1>
-        <p className="text-gray-600 mb-2">
-          Profiles: {profiles.length}
-        </p>
-        <p className="text-gray-600">
-          Database: {status?.database?.profile_count || 0} profiles
-        </p>
+    <BrowserRouter>
+      <div className="w-full h-full flex bg-gray-50">
+        <Sidebar />
+        <main className="flex-1 overflow-auto">
+          <Routes>
+            <Route path="/" element={<Navigate to="/profiles" replace />} />
+            <Route path="/profiles" element={<ProfilesPage />} />
+            <Route path="/config" element={<ConfigPage />} />
+            <Route path="/status" element={<StatusPage />} />
+          </Routes>
+        </main>
       </div>
-    </div>
+    </BrowserRouter>
   );
 }
 
