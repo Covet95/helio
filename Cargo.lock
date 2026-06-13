@@ -3343,12 +3343,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "colored",
  "dirs 5.0.1",
  "rusqlite",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
+ "tempfile",
 ]
 
 [[package]]

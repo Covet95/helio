@@ -18,6 +18,8 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 dirs = "5.0"
 anyhow = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
+colored = "2.1"
+tempfile = "3.10"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
