@@ -4,6 +4,49 @@ import { Button } from '../components/common/Button';
 import { Spinner } from '../components/common/Spinner';
 import { RefreshCw, Database, HardDrive, CheckCircle, XCircle } from 'lucide-react';
 import { formatBytes } from '../lib/utils';
+import { SUPPORTED_TOOLS } from '../types';
+import type { StatusInfo, TargetStatus } from '../types';
+
+function ToolStatusCard({ name, status }: { name: string; status?: TargetStatus }) {
+  return (
+    <div className="bg-white rounded-lg shadow p-6">
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-lg font-semibold">{name}</h3>
+        {status?.connected ? (
+          <CheckCircle className="text-success" size={24} />
+        ) : (
+          <XCircle className="text-gray-400" size={24} />
+        )}
+      </div>
+
+      {status?.profile ? (
+        <div className="space-y-2 text-sm">
+          <div className="flex justify-between">
+            <span className="text-gray-600">当前 Profile:</span>
+            <span className="font-medium">{status.profile.name}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-gray-600">Provider:</span>
+            <span className="font-medium">{status.profile.provider}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-gray-600">API URL:</span>
+            <span className="font-medium truncate ml-2">{status.profile.api_url}</span>
+          </div>
+        </div>
+      ) : (
+        <p className="text-gray-500 text-sm">未配置</p>
+      )}
+    </div>
+  );
+}
+
+// 把 TargetApp id 映射到 StatusInfo 的字段名
+function statusForTool(status: StatusInfo | null, id: string): TargetStatus | undefined {
+  if (!status) return undefined;
+  const key = id.replace('-', '_') as keyof StatusInfo;
+  return status[key] as TargetStatus | undefined;
+}
 
 export default function StatusPage() {
   const { status, loadingStatus, fetchStatus } = useStore();
@@ -35,67 +78,13 @@ export default function StatusPage() {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
-        {/* Claude Code Status */}
-        <div className="bg-white rounded-lg shadow p-6">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-semibold">Claude Code</h3>
-            {status?.claude_code?.connected ? (
-              <CheckCircle className="text-success" size={24} />
-            ) : (
-              <XCircle className="text-gray-400" size={24} />
-            )}
-          </div>
-
-          {status?.claude_code?.profile ? (
-            <div className="space-y-2 text-sm">
-              <div className="flex justify-between">
-                <span className="text-gray-600">当前 Profile:</span>
-                <span className="font-medium">{status.claude_code.profile.name}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-gray-600">Provider:</span>
-                <span className="font-medium">{status.claude_code.profile.provider}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-gray-600">API URL:</span>
-                <span className="font-medium truncate ml-2">{status.claude_code.profile.api_url}</span>
-              </div>
-            </div>
-          ) : (
-            <p className="text-gray-500 text-sm">未配置</p>
-          )}
-        </div>
-
-        {/* Codex Status */}
-        <div className="bg-white rounded-lg shadow p-6">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-semibold">Codex</h3>
-            {status?.codex?.connected ? (
-              <CheckCircle className="text-success" size={24} />
-            ) : (
-              <XCircle className="text-gray-400" size={24} />
-            )}
-          </div>
-
-          {status?.codex?.profile ? (
-            <div className="space-y-2 text-sm">
-              <div className="flex justify-between">
-                <span className="text-gray-600">当前 Profile:</span>
-                <span className="font-medium">{status.codex.profile.name}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-gray-600">Provider:</span>
-                <span className="font-medium">{status.codex.profile.provider}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-gray-600">API URL:</span>
-                <span className="font-medium truncate ml-2">{status.codex.profile.api_url}</span>
-              </div>
-            </div>
-          ) : (
-            <p className="text-gray-500 text-sm">未配置</p>
-          )}
-        </div>
+        {SUPPORTED_TOOLS.map((tool) => (
+          <ToolStatusCard
+            key={tool.id}
+            name={tool.displayName}
+            status={statusForTool(status, tool.id)}
+          />
+        ))}
       </div>
 
       {/* Database Info */}

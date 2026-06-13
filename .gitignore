@@ -1,5 +1,7 @@
 .DS_Store
 target/
+gui/dist/
+gui/node_modules/
 *.db
 *.sqlite
 *.backup

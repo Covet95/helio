@@ -1,8 +1,8 @@
 // Tauri commands and state management
+mod adapters;
 mod commands;
 mod db;
 mod models;
-mod adapters;
 mod utils;
 
 use commands::AppState;
@@ -26,9 +26,8 @@ pub fn run() {
     let db = Database::open(&db_path).expect("Failed to open database");
 
     tauri::Builder::default()
-        .manage(AppState {
-            db: Mutex::new(db),
-        })
+        .plugin(tauri_plugin_dialog::init())
+        .manage(AppState { db: Mutex::new(db) })
         .invoke_handler(tauri::generate_handler![
             commands::list_profiles,
             commands::get_profile,

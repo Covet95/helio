@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react';
-import { useStore } from '../store';
 import { Button } from '../components/common/Button';
 import { Spinner } from '../components/common/Spinner';
 import type { TargetApp } from '../types';
+import { SUPPORTED_TOOLS } from '../types';
 
 export default function ConfigPage() {
   const [targetApp, setTargetApp] = useState<TargetApp>('claude-code');
@@ -63,27 +63,20 @@ export default function ConfigPage() {
         <h2 className="text-2xl font-bold text-gray-900">共享配置</h2>
 
         <div className="flex gap-4 items-center">
-          <div className="flex gap-2">
-            <button
-              onClick={() => setTargetApp('claude-code')}
-              className={`px-4 py-2 rounded-lg transition-colors ${
-                targetApp === 'claude-code'
-                  ? 'bg-primary text-white'
-                  : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-              }`}
-            >
-              Claude Code
-            </button>
-            <button
-              onClick={() => setTargetApp('codex')}
-              className={`px-4 py-2 rounded-lg transition-colors ${
-                targetApp === 'codex'
-                  ? 'bg-primary text-white'
-                  : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-              }`}
-            >
-              Codex
-            </button>
+          <div className="flex gap-2 flex-wrap">
+            {SUPPORTED_TOOLS.map((tool) => (
+              <button
+                key={tool.id}
+                onClick={() => setTargetApp(tool.id)}
+                className={`px-4 py-2 rounded-lg transition-colors ${
+                  targetApp === tool.id
+                    ? 'bg-primary text-white'
+                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                }`}
+              >
+                {tool.displayName}
+              </button>
+            ))}
           </div>
 
           <Button

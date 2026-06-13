@@ -398,6 +398,9 @@ fn cmd_switch(db: &Database, target_app: TargetApp, profile_name: String, backup
     // 6. 写入配置
     adapter.write_config(&merged)?;
 
+    // 6.5 应用工具特定的 API 凭据（如 Gemini 的 .env）
+    adapter.apply_api_credentials(&api_profile)?;
+
     // 7. 更新活动记录
     db.set_active_profile(target_app, api_profile.id.unwrap())?;
 

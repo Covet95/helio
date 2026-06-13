@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Button } from '../components/common/Button';
-import { Download, Upload, Database, Info } from 'lucide-react';
+import { Download, Upload, Info } from 'lucide-react';
 
 export default function ExportPage() {
   const [importing, setImporting] = useState(false);

@@ -1,9 +1,8 @@
 // Tauri commands
 use crate::db::Database;
 use crate::models::{ApiProfile, TargetApp};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
-use std::path::PathBuf;
 use tauri::State;
 
 pub struct AppState {
@@ -14,6 +13,8 @@ pub struct AppState {
 pub struct StatusInfo {
     pub claude_code: Option<TargetStatus>,
     pub codex: Option<TargetStatus>,
+    pub gemini: Option<TargetStatus>,
+    pub opencode: Option<TargetStatus>,
     pub database: DatabaseInfo,
 }
 
@@ -65,8 +66,8 @@ pub async fn scan_local_mcp_servers(
     let content = std::fs::read_to_string(&config_path)
         .map_err(|e| format!("Failed to read config: {}", e))?;
 
-    let config: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse config: {}", e))?;
+    let config: serde_json::Value =
+        serde_json::from_str(&content).map_err(|e| format!("Failed to parse config: {}", e))?;
 
     // 提取 MCP 服务器配置
     let mcp_servers = config
@@ -80,9 +81,7 @@ pub async fn scan_local_mcp_servers(
 
 // 新增：扫描本地 Skills
 #[tauri::command]
-pub async fn scan_local_skills(
-    target_app: String,
-) -> Result<Vec<String>, String> {
+pub async fn scan_local_skills(target_app: String) -> Result<Vec<String>, String> {
     let target = TargetApp::from_str(&target_app)
         .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
 
@@ -119,9 +118,7 @@ pub async fn scan_local_skills(
 
 // 新增：获取完整的本地配置信息
 #[tauri::command]
-pub async fn get_local_config_info(
-    target_app: String,
-) -> Result<LocalConfigInfo, String> {
+pub async fn get_local_config_info(target_app: String) -> Result<LocalConfigInfo, String> {
     let target = TargetApp::from_str(&target_app)
         .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
 
@@ -144,8 +141,8 @@ pub async fn get_local_config_info(
     let content = std::fs::read_to_string(&config_path)
         .map_err(|e| format!("Failed to read config: {}", e))?;
 
-    let config: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse config: {}", e))?;
+    let config: serde_json::Value =
+        serde_json::from_str(&content).map_err(|e| format!("Failed to parse config: {}", e))?;
 
     // MCP Servers
     info.mcp_servers = config
@@ -155,7 +152,7 @@ pub async fn get_local_config_info(
         .unwrap_or_default();
 
     // Skills
-    info.skills = scan_local_skills(target_app.clone()).await?;
+    info.skills = read_local_skills(target)?;
 
     // Hooks
     if let Some(hooks) = config.get("hooks") {
@@ -171,45 +168,31 @@ pub async fn get_local_config_info(
 }
 
 #[tauri::command]
-pub async fn list_profiles(
-    state: State<'_, AppState>
-) -> Result<Vec<ApiProfile>, String> {
+pub async fn list_profiles(state: State<'_, AppState>) -> Result<Vec<ApiProfile>, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.list_profiles().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn get_profile(
-    name: String,
-    state: State<'_, AppState>
-) -> Result<ApiProfile, String> {
+pub async fn get_profile(name: String, state: State<'_, AppState>) -> Result<ApiProfile, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.get_profile_by_name(&name).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn add_profile(
-    profile: ApiProfile,
-    state: State<'_, AppState>
-) -> Result<i64, String> {
+pub async fn add_profile(profile: ApiProfile, state: State<'_, AppState>) -> Result<i64, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.add_profile(&profile).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn update_profile(
-    profile: ApiProfile,
-    state: State<'_, AppState>
-) -> Result<(), String> {
+pub async fn update_profile(profile: ApiProfile, state: State<'_, AppState>) -> Result<(), String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.update_profile(&profile).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn delete_profile(
-    name: String,
-    state: State<'_, AppState>
-) -> Result<bool, String> {
+pub async fn delete_profile(name: String, state: State<'_, AppState>) -> Result<bool, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.delete_profile(&name).map_err(|e| e.to_string())
 }
@@ -218,27 +201,36 @@ pub async fn delete_profile(
 pub async fn switch_profile(
     target_app: String,
     profile_name: String,
-    state: State<'_, AppState>
+    state: State<'_, AppState>,
 ) -> Result<(), String> {
     use crate::adapters::get_adapter;
 
     let target = TargetApp::from_str(&target_app)
         .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
 
+    // 获取适配器
+    let adapter = get_adapter(target);
+
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
     // 获取 API Profile
-    let api_profile = db.get_profile_by_name(&profile_name)
+    let api_profile = db
+        .get_profile_by_name(&profile_name)
         .map_err(|e| e.to_string())?;
 
-    // 获取共享配置
-    let shared_config = db.get_shared_config(target)
-        .map_err(|e| e.to_string())?
-        .map(|c| c.config)
-        .unwrap_or_else(|| serde_json::json!({}));
-
-    // 获取适配器
-    let adapter = get_adapter(target);
+    // 切换前先提取当前文件中的共享配置，避免覆盖 permissions/hooks/MCP 等字段。
+    let shared_config = if adapter.config_path().exists() {
+        let current_config = adapter.read_config().map_err(|e| e.to_string())?;
+        let extracted = adapter.extract_shared_config(&current_config);
+        db.save_shared_config(target, extracted.clone())
+            .map_err(|e| e.to_string())?;
+        extracted
+    } else {
+        db.get_shared_config(target)
+            .map_err(|e| e.to_string())?
+            .map(|c| c.config)
+            .unwrap_or_else(|| serde_json::json!({}))
+    };
 
     // 备份当前配置
     if adapter.config_path().exists() {
@@ -251,6 +243,11 @@ pub async fn switch_profile(
     // 写入配置
     adapter.write_config(&merged).map_err(|e| e.to_string())?;
 
+    // 应用工具特定的 API 凭据（如 Gemini 的 .env）
+    adapter
+        .apply_api_credentials(&api_profile)
+        .map_err(|e| e.to_string())?;
+
     // 更新活动记录
     db.set_active_profile(target, api_profile.id.unwrap())
         .map_err(|e| e.to_string())?;
@@ -261,7 +258,7 @@ pub async fn switch_profile(
 #[tauri::command]
 pub async fn get_shared_config(
     target_app: String,
-    state: State<'_, AppState>
+    state: State<'_, AppState>,
 ) -> Result<Option<serde_json::Value>, String> {
     let target = TargetApp::from_str(&target_app)
         .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
@@ -277,24 +274,62 @@ pub async fn get_shared_config(
 pub async fn save_shared_config(
     target_app: String,
     config: serde_json::Value,
-    state: State<'_, AppState>
+    state: State<'_, AppState>,
 ) -> Result<(), String> {
     let target = TargetApp::from_str(&target_app)
         .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
 
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
-    db.save_shared_config(target, config).map_err(|e| e.to_string())
+    db.save_shared_config(target, config)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn get_status(
-    state: State<'_, AppState>
-) -> Result<StatusInfo, String> {
+pub async fn export_database(
+    output_path: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let _db = state.db.lock().map_err(|e| e.to_string())?;
+    let db_path = default_db_path()?;
+
+    std::fs::copy(&db_path, &output_path)
+        .map_err(|e| format!("Failed to export database: {}", e))?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn import_database(input_path: String, state: State<'_, AppState>) -> Result<(), String> {
+    let db_path = default_db_path()?;
+
+    if !std::path::Path::new(&input_path).exists() {
+        return Err(format!("Input file does not exist: {}", input_path));
+    }
+
+    let mut db = state.db.lock().map_err(|e| e.to_string())?;
+
+    if db_path.exists() {
+        let backup_path = db_path.with_extension("backup");
+        std::fs::copy(&db_path, &backup_path)
+            .map_err(|e| format!("Failed to backup database: {}", e))?;
+    }
+
+    std::fs::copy(&input_path, &db_path)
+        .map_err(|e| format!("Failed to import database: {}", e))?;
+
+    *db = Database::open(&db_path).map_err(|e| format!("Failed to reload database: {}", e))?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_status(state: State<'_, AppState>) -> Result<StatusInfo, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
     // Claude Code status
-    let claude_code_profile = db.get_active_profile_full(TargetApp::ClaudeCode)
+    let claude_code_profile = db
+        .get_active_profile_full(TargetApp::ClaudeCode)
         .map_err(|e| e.to_string())?;
     let claude_code = Some(TargetStatus {
         profile: claude_code_profile,
@@ -302,10 +337,29 @@ pub async fn get_status(
     });
 
     // Codex status
-    let codex_profile = db.get_active_profile_full(TargetApp::Codex)
+    let codex_profile = db
+        .get_active_profile_full(TargetApp::Codex)
         .map_err(|e| e.to_string())?;
     let codex = Some(TargetStatus {
         profile: codex_profile,
+        connected: false,
+    });
+
+    // Gemini status
+    let gemini_profile = db
+        .get_active_profile_full(TargetApp::Gemini)
+        .map_err(|e| e.to_string())?;
+    let gemini = Some(TargetStatus {
+        profile: gemini_profile,
+        connected: false,
+    });
+
+    // OpenCode status
+    let opencode_profile = db
+        .get_active_profile_full(TargetApp::OpenCode)
+        .map_err(|e| e.to_string())?;
+    let opencode = Some(TargetStatus {
+        profile: opencode_profile,
         connected: false,
     });
 
@@ -315,17 +369,49 @@ pub async fn get_status(
         .unwrap()
         .join(".switch-api")
         .join("db.sqlite");
-    let size = std::fs::metadata(&db_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
 
     Ok(StatusInfo {
         claude_code,
         codex,
+        gemini,
+        opencode,
         database: DatabaseInfo {
             size,
             profile_count: profiles.len(),
             path: db_path.to_string_lossy().to_string(),
         },
     })
+}
+
+fn read_local_skills(target: TargetApp) -> Result<Vec<String>, String> {
+    let home = dirs::home_dir().ok_or("Failed to get home directory")?;
+    let skills_dir = match target {
+        TargetApp::ClaudeCode => home.join(".claude").join("skills"),
+        TargetApp::Codex => home.join(".codex").join("skills"),
+        TargetApp::Gemini => home.join(".gemini").join("skills"),
+        TargetApp::OpenCode => home.join(".config").join("opencode").join("skills"),
+    };
+
+    if !skills_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut skills = Vec::new();
+    for entry in std::fs::read_dir(&skills_dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if entry.path().is_dir() {
+            if let Some(name) = entry.file_name().to_str() {
+                skills.push(name.to_string());
+            }
+        }
+    }
+
+    Ok(skills)
+}
+
+fn default_db_path() -> Result<std::path::PathBuf, String> {
+    dirs::home_dir()
+        .ok_or("Failed to get home directory".to_string())
+        .map(|home| home.join(".switch-api").join("db.sqlite"))
 }

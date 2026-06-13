@@ -67,18 +67,36 @@ API Profile (只存 API 信息)
     ↓
 Shared Config (permissions, hooks, MCP, skills)
     ↓
-适配器 (Claude Code, Codex)
+适配器 (Claude Code / Codex / Gemini CLI / OpenCode)
     ↓
 配置文件 (原子写入)
 ```
+
+## 🧩 支持的工具
+
+| 工具 | 配置文件 | 格式 | API 凭据位置 |
+|------|---------|------|-------------|
+| Claude Code | `~/.claude/settings.local.json` | JSON | `env.ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` |
+| Codex | `~/.codex/config.toml` | TOML | `api_key` + `model_providers.<id>.base_url` |
+| Gemini CLI | `~/.gemini/settings.json` + `.env` | JSON + env | **`.env` 的 `GEMINI_API_KEY` / `GOOGLE_GEMINI_BASE_URL`** |
+| OpenCode | `~/.config/opencode/opencode.json` | JSON | `provider.<id>.options.apiKey` / `baseURL` |
+
+**工具特定说明：**
+
+- **Gemini CLI**：API key 存储在 `~/.gemini/.env`（不在 settings.json）。切换时只重写 `.env` 中的 `GEMINI_API_KEY` 和 `GOOGLE_GEMINI_BASE_URL`，保留其他环境变量；settings.json（mcpServers、model、security）完全不动。需确保 `security.auth.selectedType` 已设为 `gemini-api-key`。
+- **OpenCode**：profile 的 `provider` 字段（小写）作为 OpenCode 的 provider id，写入 `provider.<id>.options`。切换一个 provider 不影响其他 provider，mcp/permission/tools/agent 全部保留。
+- **Codex**：TOML 往返会规范化格式并**丢失注释**（注释可在 `config.backup.*.toml` 备份中找回）。
 
 ## 🔮 路线图
 
 - [x] CLI 核心功能
 - [x] Claude Code 适配器
-- [ ] GUI 界面（Tauri）← 进行中
-- [ ] Codex 完整支持
-- [ ] 更多工具适配
+- [x] Codex 适配器（TOML）
+- [x] Gemini CLI 适配器（settings.json + .env）
+- [x] OpenCode 适配器（多 provider）
+- [x] GUI 界面（Tauri）
+- [ ] OpenClaw / Hermes 适配器
+- [ ] MCP 统一管理面板 / Proxy 模式 / Usage 统计
 
 ## 📄 许可证
 

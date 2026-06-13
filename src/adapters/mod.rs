@@ -27,15 +27,26 @@ pub trait ConfigAdapter {
 
     /// 清理旧备份
     fn cleanup_old_backups(&self, keep: usize) -> Result<()>;
+
+    /// 应用 API 凭据到工具特定的位置（默认无操作）。
+    /// 大多数工具的 API 凭据通过 merge_config 写入主配置文件即可。
+    /// Gemini 等工具的 API key 存储在独立的 .env 文件，需要重写此方法。
+    fn apply_api_credentials(&self, _api_profile: &ApiProfile) -> Result<()> {
+        Ok(())
+    }
 }
 
 pub mod claude_code;
 pub mod codex;
+pub mod gemini;
+pub mod opencode;
 
 /// 获取适配器
 pub fn get_adapter(target_app: TargetApp) -> Box<dyn ConfigAdapter> {
     match target_app {
         TargetApp::ClaudeCode => Box::new(claude_code::ClaudeCodeAdapter::new()),
         TargetApp::Codex => Box::new(codex::CodexAdapter::new()),
+        TargetApp::Gemini => Box::new(gemini::GeminiAdapter::new()),
+        TargetApp::OpenCode => Box::new(opencode::OpenCodeAdapter::new()),
     }
 }

@@ -2,8 +2,9 @@ import { useState } from 'react';
 import { useStore } from '../store';
 import { Button } from '../components/common/Button';
 import { Spinner } from '../components/common/Spinner';
-import { Plus, Edit2, Trash2, Check } from 'lucide-react';
-import type { ApiProfile } from '../types';
+import { Database, Plus, Edit2, Trash2 } from 'lucide-react';
+import type { ApiProfile, TargetApp } from '../types';
+import { SUPPORTED_TOOLS } from '../types';
 
 export default function ProfilesPage() {
   const { profiles, loadingProfiles, addProfile, updateProfile, deleteProfile, switchProfile } = useStore();
@@ -26,7 +27,7 @@ export default function ProfilesPage() {
     }
   };
 
-  const handleSwitch = async (targetApp: 'claude-code' | 'codex', profileName: string) => {
+  const handleSwitch = async (targetApp: TargetApp, profileName: string) => {
     await switchProfile(targetApp, profileName);
   };
 
@@ -95,7 +96,7 @@ function ProfileCard({
   profile: ApiProfile;
   onEdit: () => void;
   onDelete: () => void;
-  onSwitch: (app: 'claude-code' | 'codex', name: string) => void;
+  onSwitch: (app: TargetApp, name: string) => void;
 }) {
   return (
     <div className="bg-white rounded-lg shadow p-4 hover:shadow-md transition-shadow">
@@ -127,23 +128,20 @@ function ProfileCard({
         <p className="truncate">Key: {profile.api_key.slice(0, 10)}...</p>
       </div>
 
-      <div className="flex gap-2">
-        <Button
-          size="sm"
-          variant="secondary"
-          onClick={() => onSwitch('claude-code', profile.name)}
-          className="flex-1"
-        >
-          切换到 Claude Code
-        </Button>
-        <Button
-          size="sm"
-          variant="secondary"
-          onClick={() => onSwitch('codex', profile.name)}
-          className="flex-1"
-        >
-          切换到 Codex
-        </Button>
+      <div className="space-y-2">
+        <p className="text-xs text-gray-400 font-medium">切换到：</p>
+        <div className="grid grid-cols-2 gap-2">
+          {SUPPORTED_TOOLS.map((tool) => (
+            <Button
+              key={tool.id}
+              size="sm"
+              variant="secondary"
+              onClick={() => onSwitch(tool.id, profile.name)}
+            >
+              {tool.displayName}
+            </Button>
+          ))}
+        </div>
       </div>
     </div>
   );
