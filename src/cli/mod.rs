@@ -367,14 +367,24 @@ fn cmd_switch(db: &Database, target_app: TargetApp, profile_name: String, backup
     // 1. 获取 API Profile
     let api_profile = db.get_profile_by_name(&profile_name)?;
 
-    // 2. 获取共享配置
-    let shared_config = db
-        .get_shared_config(target_app)?
-        .map(|c| c.config)
-        .unwrap_or_else(|| serde_json::json!({}));
-
-    // 3. 获取适配器
+    // 2. 获取适配器
     let adapter = get_adapter(target_app);
+
+    // 3. 读取当前配置文件（如果存在）并提取共享部分
+    let shared_config = if adapter.config_path().exists() {
+        let current_config = adapter.read_config()?;
+        let extracted = adapter.extract_shared_config(&current_config);
+
+        // 同步到数据库（自动保存）
+        db.save_shared_config(target_app, extracted.clone())?;
+
+        extracted
+    } else {
+        // 如果配置文件不存在，从数据库获取
+        db.get_shared_config(target_app)?
+            .map(|c| c.config)
+            .unwrap_or_else(|| serde_json::json!({}))
+    };
 
     // 4. 备份现有配置
     if backup && adapter.config_path().exists() {
@@ -382,7 +392,7 @@ fn cmd_switch(db: &Database, target_app: TargetApp, profile_name: String, backup
         utils::success(&format!("已备份到: {}", backup_path.display()));
     }
 
-    // 5. 合并配置
+    // 5. 合并配置（只替换 API 字段）
     let merged = adapter.merge_config(&api_profile, &shared_config);
 
     // 6. 写入配置
