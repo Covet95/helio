@@ -7,13 +7,17 @@ edition = "2021"
 tauri-build = { version = "2.1", features = [] }
 
 [dependencies]
-tauri = { version = "2.1", features = ["protocol-asset"] }
+tauri = { version = "2.1", features = [] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1", features = ["full"] }
 
-# 引用主项目，启用 GUI feature
-switch-api = { path = "..", features = ["gui"] }
+# Database
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Utilities
+dirs = "5.0"
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
