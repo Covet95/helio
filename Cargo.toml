@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "src-tauri"]
+
 [package]
 name = "switch-api"
 version = "0.1.0"
@@ -41,6 +44,9 @@ uuid = { version = "1.10", features = ["v4", "serde"] }
 assert_fs = "1.1"
 predicates = "3.1"
 tempfile = "3.10"
+
+[features]
+gui = []
 
 [profile.release]
 opt-level = 3
