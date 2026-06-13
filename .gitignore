@@ -1,0 +1,6 @@
+.DS_Store
+target/
+*.db
+*.sqlite
+*.backup
+.switch-api/
