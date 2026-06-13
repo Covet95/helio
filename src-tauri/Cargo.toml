@@ -12,6 +12,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1", features = ["full"] }
 
+# 引用主项目，启用 GUI feature
+switch-api = { path = "..", features = ["gui"] }
+
 [features]
 custom-protocol = ["tauri/custom-protocol"]
 
