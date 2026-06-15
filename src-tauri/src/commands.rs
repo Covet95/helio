@@ -410,11 +410,38 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
         }
         TargetApp::OpenCode => {
             // OpenCode: provider.<id>.options.{apiKey,baseURL}，取第一个 provider
+            let mut provider_id = String::new();
             if let Some(providers) = cfg.get("provider").and_then(|v| v.as_object()) {
-                if let Some((_pid, pv)) = providers.iter().next() {
+                if let Some((pid, pv)) = providers.iter().next() {
+                    provider_id = pid.clone();
                     if let Some(opts) = pv.get("options") {
                         url = str_field(opts, "baseURL");
                         key = str_field(opts, "apiKey");
+                    }
+                }
+            }
+            // key 缺失或是文件/环境引用占位（{file:...} / {env:...}）时，
+            // 从 ~/.local/share/opencode/auth.json 读真实 key。
+            if key.is_empty() || key.starts_with("{file:") || key.starts_with("{env:") {
+                if let Some(home) = dirs::home_dir() {
+                    let auth = home
+                        .join(".local")
+                        .join("share")
+                        .join("opencode")
+                        .join("auth.json");
+                    if let Ok(c) = std::fs::read_to_string(&auth) {
+                        if let Ok(j) = serde_json::from_str::<serde_json::Value>(&c) {
+                            // 优先按 provider id 匹配，否则取第一个 api 类型条目
+                            let entry = j
+                                .get(&provider_id)
+                                .or_else(|| j.as_object().and_then(|m| m.values().next()));
+                            if let Some(e) = entry {
+                                let k = str_field(e, "key");
+                                if !k.is_empty() {
+                                    key = k;
+                                }
+                            }
+                        }
                     }
                 }
             }

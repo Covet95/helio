@@ -129,10 +129,21 @@ impl ConfigAdapter for OpenCodeAdapter {
         }
 
         if let Some(providers) = config.get_mut("provider").and_then(|v| v.as_object_mut()) {
+            let is_new = !providers.contains_key(&provider_id);
             let entry = providers
                 .entry(provider_id.clone())
                 .or_insert_with(|| serde_json::json!({}));
             if let Some(p) = entry.as_object_mut() {
+                // 全新 provider：补上 OpenCode 加载所必需的 npm 适配器与显示名。
+                // 缺 npm 时 OpenCode 无法加载该 provider，切换会失效。
+                // 已有 provider 的 npm / name / models 保留不动，只更新凭据。
+                if is_new {
+                    p.entry("npm".to_string()).or_insert_with(|| {
+                        serde_json::Value::String("@ai-sdk/openai-compatible".to_string())
+                    });
+                    p.entry("name".to_string())
+                        .or_insert_with(|| serde_json::Value::String(provider_id.clone()));
+                }
                 let options = p
                     .entry("options".to_string())
                     .or_insert_with(|| serde_json::json!({}));
@@ -294,9 +305,41 @@ mod tests {
             merged["provider"]["anthropic"]["options"]["baseURL"],
             "https://api.example.com/v1"
         );
+        // 全新 provider 必须补 npm（否则 OpenCode 加载不了该 provider）
+        assert_eq!(
+            merged["provider"]["anthropic"]["npm"],
+            "@ai-sdk/openai-compatible"
+        );
+        // 补显示名（默认用 provider id）
+        assert_eq!(merged["provider"]["anthropic"]["name"], "anthropic");
         // 共享配置保留
         assert_eq!(merged["mcp"]["fs"]["type"], "local");
         assert_eq!(merged["permission"]["edit"], "ask");
+    }
+
+    #[test]
+    fn test_merge_preserves_existing_provider_npm_and_models() {
+        let adapter = OpenCodeAdapter::new();
+        // 已有同名 provider，带自定义 npm / name / models
+        let shared = serde_json::json!({
+            "provider": {
+                "anthropic": {
+                    "npm": "@ai-sdk/openai",
+                    "name": "我的代理",
+                    "models": { "gpt-5.5": { "name": "GPT-5.5" } },
+                    "options": { "baseURL": "https://old.com/v1" }
+                }
+            }
+        });
+
+        let merged = adapter.merge_config(&sample_profile(), &shared);
+
+        // 只更新凭据，保留已有 npm / name / models
+        assert_eq!(merged["provider"]["anthropic"]["npm"], "@ai-sdk/openai");
+        assert_eq!(merged["provider"]["anthropic"]["name"], "我的代理");
+        assert_eq!(merged["provider"]["anthropic"]["models"]["gpt-5.5"]["name"], "GPT-5.5");
+        assert_eq!(merged["provider"]["anthropic"]["options"]["baseURL"], "https://api.example.com/v1");
+        assert_eq!(merged["provider"]["anthropic"]["options"]["apiKey"], "sk-test-key");
     }
 
     #[test]
