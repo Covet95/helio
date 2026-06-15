@@ -4,6 +4,7 @@ mod commands;
 mod db;
 mod models;
 mod model_fetch;
+mod session_history;
 
 use commands::AppState;
 use db::Database;
