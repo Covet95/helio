@@ -174,14 +174,69 @@ impl SessionReader for CodexSessionReader {
         out
     }
 
-    fn read_preview(&self, _id: &str, _max_chars: usize) -> anyhow::Result<Vec<PreviewMessage>> {
-        // Task 6 实现
-        Ok(Vec::new())
+    fn read_preview(&self, id: &str, max_chars: usize) -> anyhow::Result<Vec<PreviewMessage>> {
+        let path = self
+            .resolve_path(id)
+            .ok_or_else(|| anyhow::anyhow!("session not found: {id}"))?;
+        let file = File::open(&path)?;
+        let mut out = Vec::new();
+        for line in BufReader::new(file).lines().map_while(Result::ok) {
+            let v: serde_json::Value = match serde_json::from_str(&line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let payload = v.get("payload");
+            let is_message = payload
+                .and_then(|p| p.get("type"))
+                .and_then(|t| t.as_str())
+                == Some("message");
+            if !is_message {
+                continue;
+            }
+            let role = payload
+                .and_then(|p| p.get("role"))
+                .and_then(|r| r.as_str())
+                .unwrap_or("")
+                .to_string();
+            let text = extract_text(payload, max_chars);
+            if !text.is_empty() {
+                out.push(PreviewMessage { role, text });
+            }
+        }
+        Ok(out)
     }
 
     fn resolve_path(&self, id: &str) -> Option<PathBuf> {
-        // Task 7 实现
-        let _ = id;
+        if !self.sessions_dir.exists() {
+            return None;
+        }
+        for entry in WalkDir::new(&self.sessions_dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            // 文件名包含 id，或首行 session_meta.id == id
+            let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            let mut matched = name.contains(id);
+            if !matched {
+                if let Ok(file) = File::open(path) {
+                    let mut first = String::new();
+                    if BufReader::new(file).read_line(&mut first).is_ok() {
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&first) {
+                            if v.pointer("/payload/id").and_then(|x| x.as_str()) == Some(id) {
+                                matched = true;
+                            }
+                        }
+                    }
+                }
+            }
+            if matched && is_within_root(&self.root(), path) {
+                return Some(path.to_path_buf());
+            }
+        }
         None
     }
 }
@@ -191,6 +246,25 @@ fn count_lines(path: &Path) -> usize {
     File::open(path)
         .map(|f| BufReader::new(f).lines().count())
         .unwrap_or(0)
+}
+
+/// 从 message.payload 的 content 数组提取文本，按 max_chars 截断
+fn extract_text(payload: Option<&serde_json::Value>, max_chars: usize) -> String {
+    let mut buf = String::new();
+    if let Some(content) = payload
+        .and_then(|p| p.get("content"))
+        .and_then(|c| c.as_array())
+    {
+        for seg in content {
+            if let Some(t) = seg.get("text").and_then(|x| x.as_str()) {
+                buf.push_str(t);
+            }
+        }
+    }
+    if buf.chars().count() > max_chars {
+        buf = buf.chars().take(max_chars).collect::<String>() + "…";
+    }
+    buf
 }
 
 /// 解析 ISO8601 时间为 unix 秒
@@ -233,6 +307,27 @@ mod tests {
         assert_eq!(list[0].cwd, "/Users/u/proj");
         assert!(list[0].parseable);
         assert!(list[0].message_count >= 1);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn test_codex_read_preview_extracts_messages() {
+        let root = temp_dir("codex-prev");
+        let day = root.join("2026/06/03");
+        fs::create_dir_all(&day).unwrap();
+        fs::write(day.join("rollout-p-1.jsonl"),
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"p1\",\"cwd\":\"/p\"}}\n\
+             {\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hello world\"}]}}\n\
+             {\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi there\"}]}}\n").unwrap();
+
+        let reader = CodexSessionReader { sessions_dir: root.clone() };
+        let msgs = reader.read_preview("p1", 1000).unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].role, "user");
+        assert!(msgs[0].text.contains("hello world"));
+        assert_eq!(msgs[1].role, "assistant");
+        assert!(msgs[1].text.contains("hi there"));
 
         fs::remove_dir_all(&root).ok();
     }
