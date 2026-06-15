@@ -529,7 +529,7 @@ pub async fn list_sessions(tool: Option<String>, search: Option<String>) -> Resu
     let mut all = Vec::new();
     for r in all_readers() { all.extend(r.list_sessions()); }
     // 默认按修改时间倒序
-    all.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+    all.sort_by_key(|b| std::cmp::Reverse(b.modified_at));
     Ok(apply_filters(all, tool.as_deref(), search.as_deref()))
 }
 
@@ -662,7 +662,7 @@ mod tests {
         let list = reader.list_sessions();
         assert_eq!(list.len(), 2, "损坏文件仍应被列出");
         let bad = list.iter().find(|m| !m.parseable).expect("应有不可解析项");
-        assert_eq!(bad.parseable, false);
+        assert!(!bad.parseable);
 
         fs::remove_dir_all(&root).ok();
     }

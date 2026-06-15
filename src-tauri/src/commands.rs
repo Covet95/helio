@@ -182,7 +182,21 @@ pub async fn add_profile(profile: ApiProfile, state: State<'_, AppState>) -> Res
 #[tauri::command]
 pub async fn update_profile(profile: ApiProfile, state: State<'_, AppState>) -> Result<(), String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.update_profile(&profile).map_err(|e| e.to_string())
+    db.update_profile(&profile).map_err(|e| e.to_string())?;
+    if let Some(id) = profile.id {
+        for target in db
+            .get_active_targets_for_profile(id)
+            .map_err(|e| e.to_string())?
+        {
+            if let Some(api_profile) = db
+                .get_active_profile_full(target)
+                .map_err(|e| e.to_string())?
+            {
+                apply_profile_config(&db, target, &api_profile)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -197,13 +211,8 @@ pub async fn switch_profile(
     profile_name: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    use crate::adapters::get_adapter;
-
     let target = TargetApp::from_str(&target_app)
         .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
-
-    // 获取适配器
-    let adapter = get_adapter(target);
 
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
@@ -212,30 +221,35 @@ pub async fn switch_profile(
         .get_profile_by_name(&profile_name)
         .map_err(|e| e.to_string())?;
 
-    // 切换前先提取当前实际配置中的共享配置（read_config 自带 local→global 回退），
-    // 避免 settings.local.json 不存在时取空、丢掉 permissions/hooks/其他 env。
+    apply_profile_config(&db, target, &api_profile)?;
+
+    // 更新活动记录
+    db.set_active_profile(target, api_profile.id.unwrap())
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+fn apply_profile_config(
+    db: &Database,
+    target: TargetApp,
+    api_profile: &ApiProfile,
+) -> Result<(), String> {
+    use crate::adapters::get_adapter;
+
+    let adapter = get_adapter(target);
     let current_config = adapter.read_config().unwrap_or_else(|_| serde_json::json!({}));
     let shared_config = adapter.extract_shared_config(&current_config);
     let _ = db.save_shared_config(target, shared_config.clone());
 
-    // 备份当前配置
     if adapter.config_path().exists() {
         adapter.backup_config().map_err(|e| e.to_string())?;
     }
 
-    // 合并配置
-    let merged = adapter.merge_config(&api_profile, &shared_config);
-
-    // 写入配置
+    let merged = adapter.merge_config(api_profile, &shared_config);
     adapter.write_config(&merged).map_err(|e| e.to_string())?;
-
-    // 应用工具特定的 API 凭据（如 Gemini 的 .env）
     adapter
-        .apply_api_credentials(&api_profile)
-        .map_err(|e| e.to_string())?;
-
-    // 更新活动记录
-    db.set_active_profile(target, api_profile.id.unwrap())
+        .apply_api_credentials(api_profile)
         .map_err(|e| e.to_string())?;
 
     Ok(())

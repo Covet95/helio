@@ -325,6 +325,22 @@ impl Database {
             Ok(None)
         }
     }
+
+    /// 获取某个 Profile 当前被哪些工具启用。
+    #[cfg(feature = "tauri-gui")]
+    pub fn get_active_targets_for_profile(&self, profile_id: i64) -> Result<Vec<TargetApp>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT target_app FROM active_profiles WHERE profile_id = ?1 ORDER BY target_app",
+        )?;
+
+        let targets = stmt
+            .query_map(params![profile_id], |row| row.get::<_, String>(0))?
+            .filter_map(|row| row.ok())
+            .filter_map(|target| TargetApp::from_str(&target))
+            .collect();
+
+        Ok(targets)
+    }
 }
 
 #[cfg(test)]
@@ -406,6 +422,29 @@ mod tests {
         let active = db.get_active_profile(TargetApp::ClaudeCode)?;
         assert!(active.is_some());
         assert_eq!(active.unwrap().profile_id, id);
+
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "tauri-gui")]
+    fn test_get_active_targets_for_profile_returns_all_matches() -> Result<()> {
+        let db = Database::open(":memory:")?;
+
+        let profile = ApiProfile {
+            name: "shared".to_string(),
+            provider: "anthropic".to_string(),
+            api_url: "https://api.example.com/v1".to_string(),
+            api_key: "sk-test-key".to_string(),
+            ..Default::default()
+        };
+
+        let id = db.add_profile(&profile)?;
+        db.set_active_profile(TargetApp::ClaudeCode, id)?;
+        db.set_active_profile(TargetApp::OpenCode, id)?;
+
+        let targets = db.get_active_targets_for_profile(id)?;
+        assert_eq!(targets, vec![TargetApp::ClaudeCode, TargetApp::OpenCode]);
 
         Ok(())
     }

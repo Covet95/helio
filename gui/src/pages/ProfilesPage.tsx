@@ -30,9 +30,12 @@ export default function ProfilesPage() {
   const selectedTool = toolById(targetApp)!;
   const activeProfile = activeProfileFor(status, targetApp);
   const normalizedQuery = query.trim().toLowerCase();
+  const toolProfiles = useMemo(() => {
+    // 只看当前工具可见的档案：当前工具绑定的 + 通用档案
+    return profiles.filter((p) => !p.target_app || p.target_app === targetApp);
+  }, [profiles, targetApp]);
   const filteredProfiles = useMemo(() => {
-    // 按工具过滤：target_app 匹配当前工具，或未绑定（通用）的都显示
-    let list = profiles.filter((p) => !p.target_app || p.target_app === targetApp);
+    let list = toolProfiles;
     if (normalizedQuery) {
       list = list.filter((p) => (
         p.name.toLowerCase().includes(normalizedQuery) ||
@@ -41,13 +44,13 @@ export default function ProfilesPage() {
       ));
     }
     return list;
-  }, [profiles, targetApp, normalizedQuery]);
+  }, [toolProfiles, normalizedQuery]);
 
-  // 重复检测：按 api_url（去尾斜杠）+ api_key 分组，每组除首个外都是待清理的重复
+  // 重复检测：只在当前工具可见范围内，按 target_app + api_url + api_key 分组
   const dupExtras = useMemo(() => {
     const groups = new Map<string, ApiProfile[]>();
-    for (const p of profiles) {
-      const key = `${(p.api_url || '').replace(/\/+$/, '')}::${p.api_key || ''}`;
+    for (const p of toolProfiles) {
+      const key = `${p.target_app ?? 'shared'}::${(p.api_url || '').replace(/\/+$/, '')}::${p.api_key || ''}`;
       const arr = groups.get(key);
       if (arr) arr.push(p);
       else groups.set(key, [p]);
@@ -57,7 +60,7 @@ export default function ProfilesPage() {
       if (arr.length > 1) extras.push(...arr.slice(1));
     }
     return extras;
-  }, [profiles]);
+  }, [toolProfiles]);
 
   const runDedup = async () => {
     setFeedback(null);
@@ -195,6 +198,7 @@ export default function ProfilesPage() {
       {showModal && (
         <ProfileModal
           profile={editing}
+          initialTool={targetApp}
           onClose={() => setShowModal(false)}
           onSave={async (p) => {
             if (editing) await updateProfile(p); else await addProfile(p);
@@ -224,7 +228,7 @@ export default function ProfilesPage() {
       {dedupConfirm && (
         <ConfirmDialog
           title="清理重复档案"
-          message={`将删除 ${dupExtras.length} 个重复档案（API URL + Key 相同、名字不同）：${dupExtras.map((p) => p.name).join('、')}。每组保留首个，不可撤销。`}
+          message={`将删除 ${dupExtras.length} 个当前工具内的重复档案（同一工具下 API URL + Key 相同、名字不同）：${dupExtras.map((p) => p.name).join('、')}。每组保留首个，不可撤销。`}
           confirmText={`删除 ${dupExtras.length} 个`}
           danger
           onCancel={() => setDedupConfirm(false)}
@@ -372,15 +376,17 @@ function activeProfileFor(status: StatusInfo | null, targetApp: TargetApp): ApiP
 }
 
 function ProfileModal({
-  profile, onClose, onSave,
+  profile, initialTool, onClose, onSave,
 }: {
   profile: ApiProfile | null;
+  initialTool: TargetApp;
   onClose: () => void;
   onSave: (p: ApiProfile) => void;
 }) {
-  const [tool, setTool] = useState<TargetApp>(profile?.target_app ?? 'claude-code');
+  const initialModalTool = profile?.target_app ?? initialTool;
+  const [tool, setTool] = useState<TargetApp>(initialModalTool);
   const [form, setForm] = useState<ApiProfile>(
-    profile || { name: '', provider: 'anthropic', api_url: 'https://api.anthropic.com', api_key: '' },
+    profile || emptyProfileForTool(initialModalTool),
   );
   const [models, setModels] = useState<FetchedModel[]>([]);
   const [loadingModels, setLoadingModels] = useState(false);
@@ -622,4 +628,16 @@ function ProfileModal({
       </form>
     </Modal>
   );
+}
+
+function emptyProfileForTool(tool: TargetApp): ApiProfile {
+  const preset = PROVIDER_PRESETS[tool]?.[0];
+  return {
+    name: '',
+    provider: preset?.provider ?? 'anthropic',
+    api_url: preset?.api_url ?? '',
+    api_key: '',
+    model: preset?.model,
+    target_app: tool,
+  };
 }
