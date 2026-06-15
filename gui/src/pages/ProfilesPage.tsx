@@ -573,19 +573,21 @@ function ProfileModal({
                 </div>
               )}
 
-              <label className="flex cursor-pointer items-center justify-between">
-                <div>
-                  <div className="text-[13px] font-medium text-ink">1M 上下文窗口</div>
-                  <div className="text-[11px] text-ink-faint">model_context_window</div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setForm({ ...form, context_1m: !form.context_1m })}
-                  className={`relative h-6 w-11 rounded-full transition-colors ${form.context_1m ? 'bg-accent' : 'bg-line-strong'}`}
-                >
-                  <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow-soft transition-transform ${form.context_1m ? 'translate-x-[22px]' : 'translate-x-0.5'}`} />
-                </button>
-              </label>
+              {(tool === 'claude-code' || tool === 'codex') && (
+                <label className="flex cursor-pointer items-center justify-between">
+                  <div>
+                    <div className="text-[13px] font-medium text-ink">1M 上下文窗口</div>
+                    <div className="text-[11px] text-ink-faint">model_context_window</div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setForm({ ...form, context_1m: !form.context_1m })}
+                    className={`relative h-6 w-11 rounded-full transition-colors ${form.context_1m ? 'bg-accent' : 'bg-line-strong'}`}
+                  >
+                    <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow-soft transition-transform ${form.context_1m ? 'translate-x-[22px]' : 'translate-x-0.5'}`} />
+                  </button>
+                </label>
+              )}
             </div>
           )}
       </form>
