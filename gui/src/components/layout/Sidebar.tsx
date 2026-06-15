@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom';
-import { Layers, SlidersHorizontal, Activity, ArrowLeftRight, FileDown } from 'lucide-react';
+import { Layers, SlidersHorizontal, Activity, ArrowLeftRight, FileDown, History } from 'lucide-react';
 
 const NAV = [
   { to: '/profiles', label: '配置档案', icon: Layers },
@@ -7,6 +7,7 @@ const NAV = [
   { to: '/status', label: '状态', icon: Activity },
   { to: '/import', label: '从本地导入', icon: FileDown },
   { to: '/export', label: '备份 / 恢复', icon: ArrowLeftRight },
+  { to: '/history', label: '会话历史', icon: History },
 ];
 
 export default function Sidebar() {

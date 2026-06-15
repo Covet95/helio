@@ -7,6 +7,7 @@ import ConfigPage from './pages/ConfigPage';
 import StatusPage from './pages/StatusPage';
 import ExportPage from './pages/ExportPage';
 import ImportPage from './pages/ImportPage';
+import HistoryPage from './pages/HistoryPage';
 
 function App() {
   const { fetchProfiles, fetchStatus } = useStore();
@@ -28,6 +29,7 @@ function App() {
             <Route path="/status" element={<StatusPage />} />
             <Route path="/import" element={<ImportPage />} />
             <Route path="/export" element={<ExportPage />} />
+            <Route path="/history" element={<HistoryPage />} />
           </Routes>
         </main>
       </div>
