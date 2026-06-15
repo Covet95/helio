@@ -23,6 +23,12 @@ impl CodexAdapter {
         self.config_dir.join("auth.json")
     }
 
+    /// Codex 内置（保留）的 provider id —— 不允许在 model_providers 中覆盖。
+    /// 参见 Codex 报错：`model_providers contains reserved built-in provider IDs`。
+    fn is_reserved_provider_id(id: &str) -> bool {
+        matches!(id, "openai" | "oss")
+    }
+
     /// 将 toml::Value 转换为 serde_json::Value
     fn toml_to_json(value: toml::Value) -> serde_json::Value {
         match value {
@@ -138,11 +144,18 @@ impl ConfigAdapter for CodexAdapter {
             config["model_providers"] = serde_json::json!({});
         }
 
-        // 使用 profile.provider 作为 provider id（默认沿用 "custom"）
-        let provider_id = if api_profile.provider.is_empty() {
+        // 使用 profile.provider 作为 provider id（默认沿用 "custom"）。
+        // Codex 保留了内置 provider id（如 `openai`），不允许在 model_providers
+        // 中覆盖；若撞上保留字则加 `-custom` 后缀（与 Codex 报错建议一致）。
+        let raw_id = if api_profile.provider.is_empty() {
             "custom".to_string()
         } else {
             api_profile.provider.to_lowercase()
+        };
+        let provider_id = if Self::is_reserved_provider_id(&raw_id) {
+            format!("{raw_id}-custom")
+        } else {
+            raw_id
         };
 
         // 写入 provider 配置：只改 base_url，保留该 provider 已有的 wire_api /
@@ -373,19 +386,43 @@ command = "npx"
 
         let merged = adapter.merge_config(&sample_profile(), &shared);
 
-        // base_url 写入对应 provider，model_provider 指向它
-        assert_eq!(merged["model_provider"], "openai");
+        // provider="openai" 是 Codex 保留字 → 自动改名 openai-custom
+        assert_eq!(merged["model_provider"], "openai-custom");
         assert_eq!(
-            merged["model_providers"]["openai"]["base_url"],
+            merged["model_providers"]["openai-custom"]["base_url"],
             "https://api.example.com/v1"
         );
         // 全新 provider 补上协议默认值
-        assert_eq!(merged["model_providers"]["openai"]["wire_api"], "responses");
+        assert_eq!(merged["model_providers"]["openai-custom"]["wire_api"], "responses");
+        // 不得创建被保留的 openai provider 块
+        assert!(merged["model_providers"].get("openai").is_none());
         // API key 绝不写进 config.toml（走 auth.json）
         assert!(merged.get("api_key").is_none());
-        assert!(merged["model_providers"]["openai"].get("env_key").is_none());
+        assert!(merged["model_providers"]["openai-custom"].get("env_key").is_none());
         // 共享配置保留
         assert_eq!(merged["mcp_servers"]["fs"]["command"], "npx");
+    }
+
+    #[test]
+    fn test_merge_avoids_reserved_provider_id() {
+        let adapter = CodexAdapter::new();
+        // 非保留字 provider 原样使用
+        let custom = ApiProfile {
+            provider: "myproxy".to_string(),
+            ..sample_profile()
+        };
+        let merged = adapter.merge_config(&custom, &serde_json::json!({}));
+        assert_eq!(merged["model_provider"], "myproxy");
+        assert!(merged["model_providers"]["myproxy"].is_object());
+
+        // 保留字 oss 同样被改名
+        let oss = ApiProfile {
+            provider: "OSS".to_string(),
+            ..sample_profile()
+        };
+        let merged = adapter.merge_config(&oss, &serde_json::json!({}));
+        assert_eq!(merged["model_provider"], "oss-custom");
+        assert!(merged["model_providers"].get("oss").is_none());
     }
 
     #[test]
