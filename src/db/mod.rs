@@ -306,6 +306,33 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
+    fn test_open_rejects_garbage_file_accepts_valid_db() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static CTR: AtomicU64 = AtomicU64::new(0);
+        let n = CTR.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("helio-db-open-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 垃圾文件（非 SQLite）：Database::open 应失败（init_schema 执行 SQL 时读到非法文件头）
+        let garbage = dir.join("garbage.db");
+        std::fs::write(&garbage, b"this is not a sqlite database, just text\n").unwrap();
+        assert!(
+            Database::open(&garbage).is_err(),
+            "导入前验证：垃圾文件必须被 Database::open 拒绝"
+        );
+
+        // 合法库：先建一个真实库，再 open 应成功
+        let valid = dir.join("valid.db");
+        Database::open(&valid).unwrap(); // 建库 + init_schema
+        assert!(
+            Database::open(&valid).is_ok(),
+            "合法 Helio 库应能被 open 验证通过"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_database_operations() -> Result<()> {
         let db = Database::open(":memory:")?;
 

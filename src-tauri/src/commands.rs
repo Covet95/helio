@@ -485,10 +485,18 @@ pub async fn import_database(input_path: String, state: State<'_, AppState>) -> 
         return Err(format!("Input file does not exist: {}", input_path));
     }
 
+    // 覆盖当前库之前，先验证输入文件是可打开的合法数据库，
+    // 避免选错文件（损坏 / 非 SQLite）时把现有数据覆盖掉才发现。
+    Database::open(&input_path)
+        .map_err(|e| format!("Invalid database file: {}", e))?;
+
     let mut db = state.db.lock().map_err(|e| e.to_string())?;
 
+    // 覆盖前自动备份当前库。备份文件名带时间戳，保留历史备份不互相覆盖，
+    // 以便多次导入后仍能回退到任意一次导入前的状态。
     if db_path.exists() {
-        let backup_path = db_path.with_extension("backup");
+        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+        let backup_path = db_path.with_file_name(format!("db.backup.{}.sqlite", timestamp));
         std::fs::copy(&db_path, &backup_path)
             .map_err(|e| format!("Failed to backup database: {}", e))?;
     }

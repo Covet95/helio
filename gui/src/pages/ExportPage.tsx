@@ -88,7 +88,7 @@ export default function ExportPage() {
       {confirmImport && (
         <ConfirmDialog
           title="导入数据库"
-          message="当前数据库会被覆盖，导入前会自动备份。"
+          message="当前数据库会被覆盖。导入前会自动备份当前库（带时间戳保留，可回退），且仅在所选文件是合法数据库时才执行。"
           confirmText="导入"
           danger
           onCancel={() => setConfirmImport(false)}
