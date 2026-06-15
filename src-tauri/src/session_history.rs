@@ -495,6 +495,87 @@ fn parse_iso8601(s: &str) -> Option<i64> {
         .map(|dt| dt.timestamp())
 }
 
+/// 全部 reader
+fn all_readers() -> Vec<Box<dyn SessionReader>> {
+    vec![
+        Box::new(CodexSessionReader::new()),
+        Box::new(ClaudeSessionReader::new()),
+    ]
+}
+
+/// 按 tool / search 过滤（search 命中 cwd 或 title）
+pub(crate) fn apply_filters(metas: Vec<SessionMeta>, tool: Option<&str>, search: Option<&str>) -> Vec<SessionMeta> {
+    metas.into_iter().filter(|m| {
+        if let Some(t) = tool { if m.tool != t { return false; } }
+        if let Some(q) = search {
+            if q.is_empty() { return true; }
+            let hit = m.cwd.contains(q) || m.title.as_deref().map(|t| t.contains(q)).unwrap_or(false);
+            if !hit { return false; }
+        }
+        true
+    }).collect()
+}
+
+fn reader_for(tool: &str) -> Option<Box<dyn SessionReader>> {
+    match tool {
+        "codex" => Some(Box::new(CodexSessionReader::new())),
+        "claude-code" => Some(Box::new(ClaudeSessionReader::new())),
+        _ => None,
+    }
+}
+
+#[tauri::command]
+pub async fn list_sessions(tool: Option<String>, search: Option<String>) -> Result<Vec<SessionMeta>, String> {
+    let mut all = Vec::new();
+    for r in all_readers() { all.extend(r.list_sessions()); }
+    // 默认按修改时间倒序
+    all.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+    Ok(apply_filters(all, tool.as_deref(), search.as_deref()))
+}
+
+#[tauri::command]
+pub async fn read_session_preview(tool: String, id: String) -> Result<Vec<PreviewMessage>, String> {
+    let reader = reader_for(&tool).ok_or_else(|| format!("未知工具: {tool}"))?;
+    reader.read_preview(&id, 4000).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn delete_session(tool: String, id: String) -> Result<DeleteResult, String> {
+    let reader = reader_for(&tool).ok_or_else(|| format!("未知工具: {tool}"))?;
+    Ok(delete_one(reader.as_ref(), &id))
+}
+
+#[derive(serde::Deserialize)]
+pub struct DeleteItem { pub tool: String, pub id: String }
+
+#[tauri::command]
+pub async fn delete_sessions(items: Vec<DeleteItem>) -> Result<Vec<DeleteResult>, String> {
+    let mut out = Vec::new();
+    for it in items {
+        match reader_for(&it.tool) {
+            Some(r) => out.push(delete_one(r.as_ref(), &it.id)),
+            None => out.push(DeleteResult { id: it.id, tool: it.tool, ok: false, error: Some("未知工具".into()) }),
+        }
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+pub async fn cleanup_sessions(tool: Option<String>, older_than_days: i64) -> Result<Vec<DeleteResult>, String> {
+    let now = chrono::Utc::now().timestamp();
+    let cutoff = now - older_than_days * 86400;
+    let mut out = Vec::new();
+    for r in all_readers() {
+        if let Some(t) = &tool { if r.tool() != t { continue; } }
+        for m in r.list_sessions() {
+            if m.modified_at < cutoff {
+                out.push(delete_one(r.as_ref(), &m.id));
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -624,6 +705,20 @@ mod tests {
         assert_eq!(list[0].title.as_deref(), Some("修复登录bug"));
 
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn test_filter_by_search() {
+        let metas = vec![
+            SessionMeta { id:"a".into(), tool:"codex".into(), cwd:"/x/proj".into(), title:None,
+                started_at:0, modified_at:0, size_bytes:0, message_count:0, parseable:true },
+            SessionMeta { id:"b".into(), tool:"codex".into(), cwd:"/y/other".into(), title:Some("登录".into()),
+                started_at:0, modified_at:0, size_bytes:0, message_count:0, parseable:true },
+        ];
+        let r = apply_filters(metas.clone(), None, Some("proj"));
+        assert_eq!(r.len(), 1); assert_eq!(r[0].id, "a");
+        let r2 = apply_filters(metas, None, Some("登录"));
+        assert_eq!(r2.len(), 1); assert_eq!(r2[0].id, "b");
     }
 
     #[test]
