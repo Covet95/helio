@@ -562,6 +562,9 @@ pub async fn delete_sessions(items: Vec<DeleteItem>) -> Result<Vec<DeleteResult>
 
 #[tauri::command]
 pub async fn cleanup_sessions(tool: Option<String>, older_than_days: i64) -> Result<Vec<DeleteResult>, String> {
+    if older_than_days <= 0 {
+        return Ok(Vec::new());
+    }
     let now = chrono::Utc::now().timestamp();
     let cutoff = now - older_than_days * 86400;
     let mut out = Vec::new();
