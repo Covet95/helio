@@ -246,4 +246,24 @@ mod tests {
         assert!(!is_within_root(root, Path::new("/home/u/.codex/../evil.jsonl")));
         assert!(!is_within_root(root, Path::new("/etc/passwd")));
     }
+
+    #[test]
+    fn test_codex_list_corrupt_file_marked_unparseable() {
+        let root = temp_dir("codex-corrupt");
+        let day = root.join("2026/06/03");
+        fs::create_dir_all(&day).unwrap();
+        // 合法
+        fs::write(day.join("rollout-good-1.jsonl"),
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"g1\",\"cwd\":\"/p\"}}\n").unwrap();
+        // 损坏
+        fs::write(day.join("rollout-bad-2.jsonl"), "this is not json\n").unwrap();
+
+        let reader = CodexSessionReader { sessions_dir: root.clone() };
+        let list = reader.list_sessions();
+        assert_eq!(list.len(), 2, "损坏文件仍应被列出");
+        let bad = list.iter().find(|m| !m.parseable).expect("应有不可解析项");
+        assert_eq!(bad.parseable, false);
+
+        fs::remove_dir_all(&root).ok();
+    }
 }
