@@ -7,6 +7,8 @@ export interface ApiProfile {
   model_mapping?: Record<string, string>;
   /** 默认模型 */
   model?: string;
+  /** OpenCode 专用：provider 下挂载的模型列表（多选） */
+  models?: string[];
   /** 推理强度 low/medium/high/xhigh */
   reasoning_effort?: string;
   /** 1M 上下文 */

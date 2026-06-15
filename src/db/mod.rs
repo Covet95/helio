@@ -54,6 +54,7 @@ impl Database {
         let _ = self.conn.execute("ALTER TABLE api_profiles ADD COLUMN reasoning_effort TEXT", []);
         let _ = self.conn.execute("ALTER TABLE api_profiles ADD COLUMN context_1m INTEGER", []);
         let _ = self.conn.execute("ALTER TABLE api_profiles ADD COLUMN target_app TEXT", []);
+        let _ = self.conn.execute("ALTER TABLE api_profiles ADD COLUMN models TEXT", []);
 
         Ok(())
     }
@@ -68,10 +69,15 @@ impl Database {
             .as_ref()
             .map(serde_json::to_string)
             .transpose()?;
+        let models_json = profile
+            .models
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
 
         self.conn.execute(
-            "INSERT INTO api_profiles (name, provider, api_url, api_key, model_mapping, model, reasoning_effort, context_1m, target_app, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT INTO api_profiles (name, provider, api_url, api_key, model_mapping, model, reasoning_effort, context_1m, target_app, models, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 &profile.name,
                 &profile.provider,
@@ -82,6 +88,7 @@ impl Database {
                 &profile.reasoning_effort,
                 profile.context_1m.map(|b| b as i64),
                 profile.target_app.as_ref().map(|t| t.as_str()),
+                models_json,
                 now,
                 now
             ],
@@ -93,7 +100,7 @@ impl Database {
     /// 根据名称获取 API Profile
     pub fn get_profile_by_name(&self, name: &str) -> Result<ApiProfile> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, provider, api_url, api_key, model_mapping, model, reasoning_effort, context_1m, created_at, updated_at, target_app
+            "SELECT id, name, provider, api_url, api_key, model_mapping, model, reasoning_effort, context_1m, created_at, updated_at, target_app, models
              FROM api_profiles WHERE name = ?1",
         )?;
 
@@ -107,6 +114,12 @@ impl Database {
             let context_1m: Option<i64> = row.get(8)?;
             let target_app_str: Option<String> = row.get(11)?;
             let target_app = target_app_str.as_deref().and_then(TargetApp::from_str);
+            let models_str: Option<String> = row.get(12)?;
+            let models = models_str
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
             Ok(ApiProfile {
                 id: Some(row.get(0)?),
@@ -116,6 +129,7 @@ impl Database {
                 api_key: row.get(4)?,
                 model_mapping,
                 model: row.get(6)?,
+                models,
                 reasoning_effort: row.get(7)?,
                 context_1m: context_1m.map(|v| v != 0),
                 created_at: Some(row.get(9)?),
@@ -130,7 +144,7 @@ impl Database {
     /// 列出所有 API Profiles
     pub fn list_profiles(&self) -> Result<Vec<ApiProfile>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, provider, api_url, api_key, model_mapping, model, reasoning_effort, context_1m, created_at, updated_at, target_app
+            "SELECT id, name, provider, api_url, api_key, model_mapping, model, reasoning_effort, context_1m, created_at, updated_at, target_app, models
              FROM api_profiles ORDER BY name",
         )?;
 
@@ -145,6 +159,12 @@ impl Database {
                 let context_1m: Option<i64> = row.get(8)?;
                 let target_app_str: Option<String> = row.get(11)?;
                 let target_app = target_app_str.as_deref().and_then(TargetApp::from_str);
+                let models_str: Option<String> = row.get(12)?;
+                let models = models_str
+                    .as_deref()
+                    .map(serde_json::from_str)
+                    .transpose()
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
                 Ok(ApiProfile {
                     id: Some(row.get(0)?),
@@ -154,6 +174,7 @@ impl Database {
                     api_key: row.get(4)?,
                     model_mapping,
                     model: row.get(6)?,
+                    models,
                     reasoning_effort: row.get(7)?,
                     context_1m: context_1m.map(|v| v != 0),
                     created_at: Some(row.get(9)?),
@@ -174,10 +195,15 @@ impl Database {
             .as_ref()
             .map(serde_json::to_string)
             .transpose()?;
+        let models_json = profile
+            .models
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
 
         self.conn.execute(
             "UPDATE api_profiles SET provider = ?1, api_url = ?2, api_key = ?3,
-             model_mapping = ?4, model = ?5, reasoning_effort = ?6, context_1m = ?7, target_app = ?8, updated_at = ?9 WHERE name = ?10",
+             model_mapping = ?4, model = ?5, reasoning_effort = ?6, context_1m = ?7, target_app = ?8, models = ?9, updated_at = ?10 WHERE name = ?11",
             params![
                 &profile.provider,
                 &profile.api_url,
@@ -187,6 +213,7 @@ impl Database {
                 &profile.reasoning_effort,
                 profile.context_1m.map(|b| b as i64),
                 profile.target_app.as_ref().map(|t| t.as_str()),
+                models_json,
                 now,
                 &profile.name
             ],

@@ -509,6 +509,35 @@ function ProfileModal({
                 {models.length > 0 && <div className="mt-1 text-[11px] text-ink-faint">已加载 {models.length} 个模型；也可在上方输入框自定义</div>}
               </div>
 
+              {tool === 'opencode' && models.length > 0 && (
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[12px] font-medium text-ink-dim">
+                      provider 模型 <span className="font-normal text-ink-faint">（勾选要挂载到 OpenCode 的模型）</span>
+                    </span>
+                    <span className="text-[11px] text-ink-faint">已选 {(form.models || []).length}</span>
+                  </div>
+                  <div className="max-h-40 overflow-y-auto rounded-md border border-line bg-card p-1.5">
+                    {models.map((m) => {
+                      const selected = (form.models || []).includes(m.id);
+                      const toggle = () => {
+                        const cur = form.models || [];
+                        setForm({
+                          ...form,
+                          models: selected ? cur.filter((x) => x !== m.id) : [...cur, m.id],
+                        });
+                      };
+                      return (
+                        <label key={m.id} className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 hover:bg-elevated/60">
+                          <input type="checkbox" checked={selected} onChange={toggle} />
+                          <span className="truncate font-mono text-[12px] text-ink">{m.id}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
               {tool === 'claude-code' && (
                 <div className="space-y-2">
                   <div className="text-[12px] font-medium text-ink-dim">

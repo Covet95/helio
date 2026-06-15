@@ -158,21 +158,37 @@ impl ConfigAdapter for OpenCodeAdapter {
                     );
                 }
 
-                // 默认模型：profile 设了 model 时，确保它在 provider 的 models 里
-                // 声明（否则 OpenCode 选不到该模型），并设顶层 model = provider/model。
-                if let Some(model) = api_profile
+                // 模型列表：把 profile.models（多选）里的每个模型写进 provider 的
+                // models 声明，加上默认模型 model（OpenCode 要列出/切换这些模型）。
+                let mut model_ids: Vec<String> = Vec::new();
+                if let Some(list) = api_profile.models.as_ref() {
+                    for m in list {
+                        let m = m.trim();
+                        if !m.is_empty() {
+                            model_ids.push(m.to_string());
+                        }
+                    }
+                }
+                if let Some(default_model) = api_profile
                     .model
                     .as_deref()
                     .map(str::trim)
                     .filter(|m| !m.is_empty())
                 {
+                    if !model_ids.iter().any(|m| m == default_model) {
+                        model_ids.push(default_model.to_string());
+                    }
+                }
+                if !model_ids.is_empty() {
                     let models = p
                         .entry("models".to_string())
                         .or_insert_with(|| serde_json::json!({}));
                     if let Some(models_obj) = models.as_object_mut() {
-                        models_obj
-                            .entry(model.to_string())
-                            .or_insert_with(|| serde_json::json!({ "name": model }));
+                        for m in &model_ids {
+                            models_obj
+                                .entry(m.clone())
+                                .or_insert_with(|| serde_json::json!({ "name": m }));
+                        }
                     }
                 }
             }
@@ -343,6 +359,28 @@ mod tests {
         // 共享配置保留
         assert_eq!(merged["mcp"]["fs"]["type"], "local");
         assert_eq!(merged["permission"]["edit"], "ask");
+    }
+
+    #[test]
+    fn test_merge_writes_multiple_models() {
+        let adapter = OpenCodeAdapter::new();
+        let profile = ApiProfile {
+            model: Some("claude-opus-4-8".to_string()),
+            models: Some(vec![
+                "claude-sonnet-4-6".to_string(),
+                "claude-haiku-4-5".to_string(),
+            ]),
+            ..sample_profile()
+        };
+        let merged = adapter.merge_config(&profile, &serde_json::json!({}));
+
+        let models = &merged["provider"]["anthropic"]["models"];
+        // 多选的两个 + 默认模型，共 3 个都在 provider.models
+        assert!(models["claude-sonnet-4-6"].is_object());
+        assert!(models["claude-haiku-4-5"].is_object());
+        assert!(models["claude-opus-4-8"].is_object(), "默认模型也应在 models 里");
+        // 顶层默认 model
+        assert_eq!(merged["model"], "anthropic/claude-opus-4-8");
     }
 
     #[test]

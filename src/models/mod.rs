@@ -14,6 +14,10 @@ pub struct ApiProfile {
     /// 默认模型（如 gpt-5.5 / claude-opus-4）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// OpenCode 专用：provider 下挂载的模型 id 列表（多选）。
+    /// 写入 opencode.json 的 provider.<id>.models，让 OpenCode 能列出/切换这些模型。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<Vec<String>>,
     /// 推理强度（Codex: low/medium/high/xhigh）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
@@ -105,6 +109,7 @@ impl ApiProfile {
             api_key,
             model_mapping,
             model: None,
+            models: None,
             reasoning_effort: None,
             context_1m: None,
             target_app: None,
