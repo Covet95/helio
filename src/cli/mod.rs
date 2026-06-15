@@ -278,12 +278,11 @@ fn cmd_profile_list(db: &Database, verbose: bool) -> Result<()> {
 }
 
 fn cmd_profile_delete(db: &Database, name: String, force: bool) -> Result<()> {
-    if !force {
-        if !utils::confirm(&format!("确定要删除 Profile '{}'？", name))? {
+    if !force
+        && !utils::confirm(&format!("确定要删除 Profile '{}'？", name))? {
             utils::info("已取消");
             return Ok(());
         }
-    }
 
     if db.delete_profile(&name)? {
         utils::success(&format!("已删除 API Profile: {}", name));

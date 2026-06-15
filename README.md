@@ -12,10 +12,22 @@ AI CLI 工具的 API 配置切换器。把 API 凭据与共享配置（权限 / 
 
 ## 安装
 
-```bash
-./install.sh
+### 桌面应用（Helio GUI，推荐）
 
-# 或手动
+```bash
+./run.sh   # 打包 .app 并打开（构建产物在 target/release/bundle/）
+```
+
+或手动打包 `.dmg` / `.app`：
+
+```bash
+cd src-tauri && cargo tauri build
+# 安装包：target/release/bundle/dmg/Helio_<版本>_aarch64.dmg
+```
+
+### 命令行（CLI）
+
+```bash
 cargo build --release
 sudo cp target/release/switch-api /usr/local/bin/
 ```
@@ -35,7 +47,7 @@ switch-api export --output backup.db
 | 工具 | 配置文件 | 格式 | API 凭据位置 |
 |------|---------|------|-------------|
 | Claude Code | `~/.claude/settings.local.json` | JSON | `env.ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` |
-| Codex | `~/.codex/config.toml` | TOML | `api_key` + `model_providers.<id>.base_url` |
+| Codex | `~/.codex/config.toml` + `auth.json` | TOML + JSON | `auth.json` 的 `OPENAI_API_KEY` + `model_providers.<id>.base_url` |
 | Gemini CLI | `~/.gemini/settings.json` + `.env` | JSON + env | `.env` 的 `GEMINI_API_KEY` / `GOOGLE_GEMINI_BASE_URL` |
 | OpenCode | `~/.config/opencode/opencode.json` | JSON | `provider.<id>.options.apiKey` / `baseURL` |
 
@@ -43,7 +55,7 @@ switch-api export --output backup.db
 
 - **Gemini CLI**：API key 存在 `~/.gemini/.env`（不在 settings.json）。切换时只重写 `.env` 中的 `GEMINI_API_KEY` 和 `GOOGLE_GEMINI_BASE_URL`，保留其他环境变量；settings.json（mcpServers、model、security）不动。需先设 `security.auth.selectedType` 为 `gemini-api-key`。
 - **OpenCode**：profile 的 `provider` 字段（小写）作为 provider id，写入 `provider.<id>.options`。切换某个 provider 不影响其他 provider，mcp/permission/tools/agent 全部保留。
-- **Codex**：TOML 往返会规范化格式并丢失注释（注释可在 `config.backup.*.toml` 中找回）。
+- **Codex**：API key 存在 `~/.codex/auth.json` 的 `OPENAI_API_KEY`（不在 config.toml）。切换时只重写 auth.json 的 key 与 `config.toml` 中对应 provider 的 `base_url`，保留 `wire_api` 等协议字段、MCP servers、projects 等共享配置。TOML 往返会规范化格式并丢失注释（可在 `config.backup.*.toml` 中找回）。
 
 ## 架构
 

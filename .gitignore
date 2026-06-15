@@ -6,3 +6,7 @@ gui/node_modules/
 *.sqlite
 *.backup
 .switch-api/
+
+# 开发过程产物（brainstorm / 计划），不纳入版本库
+.planning/
+.superpowers/

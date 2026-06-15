@@ -66,7 +66,7 @@ impl Database {
         let model_mapping_json = profile
             .model_mapping
             .as_ref()
-            .map(|m| serde_json::to_string(m))
+            .map(serde_json::to_string)
             .transpose()?;
 
         self.conn.execute(
@@ -101,7 +101,7 @@ impl Database {
             let model_mapping_str: Option<String> = row.get(5)?;
             let model_mapping = model_mapping_str
                 .as_deref()
-                .map(|s| serde_json::from_str(s))
+                .map(serde_json::from_str)
                 .transpose()
                 .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
             let context_1m: Option<i64> = row.get(8)?;
@@ -139,7 +139,7 @@ impl Database {
                 let model_mapping_str: Option<String> = row.get(5)?;
                 let model_mapping = model_mapping_str
                     .as_deref()
-                    .map(|s| serde_json::from_str(s))
+                    .map(serde_json::from_str)
                     .transpose()
                     .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
                 let context_1m: Option<i64> = row.get(8)?;
@@ -172,7 +172,7 @@ impl Database {
         let model_mapping_json = profile
             .model_mapping
             .as_ref()
-            .map(|m| serde_json::to_string(m))
+            .map(serde_json::to_string)
             .transpose()?;
 
         self.conn.execute(
