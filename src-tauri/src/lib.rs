@@ -4,6 +4,7 @@ mod commands;
 mod db;
 mod models;
 mod model_fetch;
+mod session_history;
 
 use commands::AppState;
 use db::Database;
@@ -48,6 +49,11 @@ pub fn run() {
             commands::scan_cc_switch,
             commands::import_cc_switch,
             model_fetch::fetch_models,
+            session_history::list_sessions,
+            session_history::read_session_preview,
+            session_history::delete_session,
+            session_history::delete_sessions,
+            session_history::cleanup_sessions,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
