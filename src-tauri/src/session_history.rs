@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 /// 会话元数据（列表展示用）
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -47,4 +47,41 @@ pub trait SessionReader {
 
     /// id -> 文件路径；返回的路径 MUST 仍在 root() 内，否则返回 None（路径安全）
     fn resolve_path(&self, id: &str) -> Option<PathBuf>;
+}
+
+/// 校验 candidate 归一化后仍在 root 内。拒绝 `..` 越界。
+pub(crate) fn is_within_root(root: &Path, candidate: &Path) -> bool {
+    let norm = normalize_lexical(candidate);
+    let root_norm = normalize_lexical(root);
+    norm.starts_with(&root_norm)
+}
+
+/// 词法归一化：解析 `.` 与 `..`，不触碰文件系统。
+fn normalize_lexical(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_within_root_rejects_escape() {
+        let root = Path::new("/home/u/.codex/sessions");
+        // 正常子路径
+        assert!(is_within_root(root, Path::new("/home/u/.codex/sessions/2026/a.jsonl")));
+        // 越界
+        assert!(!is_within_root(root, Path::new("/home/u/.codex/../evil.jsonl")));
+        assert!(!is_within_root(root, Path::new("/etc/passwd")));
+    }
 }
