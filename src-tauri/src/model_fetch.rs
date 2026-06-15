@@ -87,10 +87,19 @@ pub async fn fetch_models(api_url: String, api_key: String) -> Result<Vec<Fetche
         urls.push(u);
     }
     urls.extend(candidates(&api_url));
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| e.to_string())?;
+    // 用户常开 macOS 系统代理（HTTP/SOCKS 指向 127.0.0.1）。reqwest 默认读系统
+    // 代理，会把本地服务（如 127.0.0.1:8317 的代理网关）也转发到系统代理导致
+    // 连接失败。这里对本地地址绕过代理，其余仍走系统代理（境外 provider 可能需要）。
+    let is_local = {
+        let lower = api_url.to_lowercase();
+        lower.contains("127.0.0.1") || lower.contains("localhost") || lower.contains("0.0.0.0")
+    };
+    let mut builder =
+        reqwest::Client::builder().timeout(std::time::Duration::from_secs(15));
+    if is_local {
+        builder = builder.no_proxy();
+    }
+    let client = builder.build().map_err(|e| e.to_string())?;
     let mut last_err = String::from("无候选端点");
     for url in &urls {
         let res = client
