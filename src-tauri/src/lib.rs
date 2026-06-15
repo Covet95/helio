@@ -3,7 +3,7 @@ mod adapters;
 mod commands;
 mod db;
 mod models;
-mod utils;
+mod model_fetch;
 
 use commands::AppState;
 use db::Database;
@@ -43,6 +43,11 @@ pub fn run() {
             commands::scan_local_mcp_servers,
             commands::scan_local_skills,
             commands::get_local_config_info,
+            commands::scan_local_api,
+            commands::import_shared_config,
+            commands::scan_cc_switch,
+            commands::import_cc_switch,
+            model_fetch::fetch_models,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

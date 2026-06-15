@@ -33,8 +33,13 @@ pub struct DatabaseInfo {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct McpServerConfig {
+    #[serde(default)]
     pub command: String,
+    #[serde(default)]
     pub args: Vec<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
     pub env: Option<std::collections::HashMap<String, String>>,
 }
 
@@ -56,24 +61,11 @@ pub async fn scan_local_mcp_servers(
 
     use crate::adapters::get_adapter;
     let adapter = get_adapter(target);
-    let config_path = adapter.config_path();
-
-    if !config_path.exists() {
-        return Ok(std::collections::HashMap::new());
-    }
-
-    // 读取配置文件
-    let content = std::fs::read_to_string(&config_path)
-        .map_err(|e| format!("Failed to read config: {}", e))?;
-
-    let config: serde_json::Value =
-        serde_json::from_str(&content).map_err(|e| format!("Failed to parse config: {}", e))?;
-
-    // 提取 MCP 服务器配置
-    let mcp_servers = config
-        .get("mcpServers")
-        .or_else(|| config.get("mcp_servers"))
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
+    // MCP 来源因工具而异（Claude 在 ~/.claude.json），交给适配器决定
+    let mcp_servers = adapter
+        .read_mcp_servers_raw()
+        .map_err(|e| format!("Failed to read MCP servers: {}", e))?
+        .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default();
 
     Ok(mcp_servers)
@@ -124,7 +116,6 @@ pub async fn get_local_config_info(target_app: String) -> Result<LocalConfigInfo
 
     use crate::adapters::get_adapter;
     let adapter = get_adapter(target);
-    let config_path = adapter.config_path();
 
     let mut info = LocalConfigInfo {
         mcp_servers: std::collections::HashMap::new(),
@@ -133,35 +124,38 @@ pub async fn get_local_config_info(target_app: String) -> Result<LocalConfigInfo
         permissions: serde_json::json!({}),
     };
 
-    if !config_path.exists() {
-        return Ok(info);
-    }
+    // 直接用适配器读取配置（read_config 自带 local→global 回退、TOML/JSON 分派）。
+    // 不要先检查 config_path().exists()——Claude 的 local 文件可能不存在但 global 存在。
+    let config = match adapter.read_config() {
+        Ok(c) => c,
+        Err(_) => return Ok(info), // 读取失败返回空，不报错
+    };
 
-    // 读取配置文件
-    let content = std::fs::read_to_string(&config_path)
-        .map_err(|e| format!("Failed to read config: {}", e))?;
-
-    let config: serde_json::Value =
-        serde_json::from_str(&content).map_err(|e| format!("Failed to parse config: {}", e))?;
-
-    // MCP Servers
-    info.mcp_servers = config
-        .get("mcpServers")
-        .or_else(|| config.get("mcp_servers"))
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
+    // MCP Servers —— 来源因工具而异（Claude 在 ~/.claude.json），交给适配器
+    info.mcp_servers = adapter
+        .read_mcp_servers_raw()
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default();
 
     // Skills
     info.skills = read_local_skills(target)?;
 
-    // Hooks
+    // Hooks（仅当存在且非空）
     if let Some(hooks) = config.get("hooks") {
-        info.hooks = hooks.clone();
+        let empty = hooks.as_object().map(|o| o.is_empty()).unwrap_or(false);
+        if !empty {
+            info.hooks = hooks.clone();
+        }
     }
 
-    // Permissions
+    // Permissions（仅当存在且非空）
     if let Some(permissions) = config.get("permissions") {
-        info.permissions = permissions.clone();
+        let empty = permissions.as_object().map(|o| o.is_empty()).unwrap_or(false);
+        if !empty {
+            info.permissions = permissions.clone();
+        }
     }
 
     Ok(info)
@@ -218,19 +212,11 @@ pub async fn switch_profile(
         .get_profile_by_name(&profile_name)
         .map_err(|e| e.to_string())?;
 
-    // 切换前先提取当前文件中的共享配置，避免覆盖 permissions/hooks/MCP 等字段。
-    let shared_config = if adapter.config_path().exists() {
-        let current_config = adapter.read_config().map_err(|e| e.to_string())?;
-        let extracted = adapter.extract_shared_config(&current_config);
-        db.save_shared_config(target, extracted.clone())
-            .map_err(|e| e.to_string())?;
-        extracted
-    } else {
-        db.get_shared_config(target)
-            .map_err(|e| e.to_string())?
-            .map(|c| c.config)
-            .unwrap_or_else(|| serde_json::json!({}))
-    };
+    // 切换前先提取当前实际配置中的共享配置（read_config 自带 local→global 回退），
+    // 避免 settings.local.json 不存在时取空、丢掉 permissions/hooks/其他 env。
+    let current_config = adapter.read_config().unwrap_or_else(|_| serde_json::json!({}));
+    let shared_config = adapter.extract_shared_config(&current_config);
+    let _ = db.save_shared_config(target, shared_config.clone());
 
     // 备份当前配置
     if adapter.config_path().exists() {
@@ -263,11 +249,36 @@ pub async fn get_shared_config(
     let target = TargetApp::from_str(&target_app)
         .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
 
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    // 先查数据库
+    let from_db = {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        db.get_shared_config(target)
+            .map(|opt| opt.map(|sc| sc.config))
+            .map_err(|e| e.to_string())?
+    };
 
-    db.get_shared_config(target)
-        .map(|opt| opt.map(|sc| sc.config))
-        .map_err(|e| e.to_string())
+    // 数据库里有非空配置则返回；否则回退到读取实时配置文件的共享部分
+    if let Some(cfg) = &from_db {
+        let is_empty = cfg.as_object().map(|o| o.is_empty()).unwrap_or(false);
+        if !is_empty {
+            return Ok(from_db);
+        }
+    }
+
+    // 回退：从实时配置文件提取共享配置（让用户能看到当前工具的真实配置）
+    use crate::adapters::get_adapter;
+    let adapter = get_adapter(target);
+    if adapter.config_path().exists() {
+        match adapter.read_config() {
+            Ok(live) => {
+                let shared = adapter.extract_shared_config(&live);
+                return Ok(Some(shared));
+            }
+            Err(_) => return Ok(from_db),
+        }
+    }
+
+    Ok(from_db)
 }
 
 #[tauri::command]
@@ -283,6 +294,173 @@ pub async fn save_shared_config(
 
     db.save_shared_config(target, config)
         .map_err(|e| e.to_string())
+}
+
+/// 从本地配置文件扫描出的 API 凭据（用于导入为 Profile）
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ScannedApi {
+    pub found: bool,
+    pub api_url: String,
+    pub api_key: String,
+    pub provider: String,
+    /// 来源配置文件路径，便于用户确认
+    pub source: String,
+}
+
+/// 读取某工具当前配置文件，提取其中的 API URL / Key（不写库，仅返回供预览）
+#[tauri::command]
+pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
+    use crate::adapters::get_adapter;
+    let target = TargetApp::from_str(&target_app)
+        .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
+    let adapter = get_adapter(target);
+    let source = adapter.config_path().to_string_lossy().to_string();
+    let cfg = adapter.read_config().map_err(|e| e.to_string())?;
+
+    let (mut url, mut key, provider) = (String::new(), String::new(), default_provider(target));
+
+    match target {
+        TargetApp::ClaudeCode => {
+            // Claude: API 在 env.ANTHROPIC_*。settings.local.json 优先，
+            // 但若 local 没有 API 字段，回退到 settings.json
+            if let Some(env) = cfg.get("env") {
+                url = str_field(env, "ANTHROPIC_BASE_URL");
+                key = str_field(env, "ANTHROPIC_AUTH_TOKEN");
+            }
+            if url.is_empty() || key.is_empty() {
+                if let Some(home) = dirs::home_dir() {
+                    let global = home.join(".claude").join("settings.json");
+                    if let Ok(c) = std::fs::read_to_string(&global) {
+                        if let Ok(j) = serde_json::from_str::<serde_json::Value>(&c) {
+                            if let Some(env) = j.get("env") {
+                                if url.is_empty() { url = str_field(env, "ANTHROPIC_BASE_URL"); }
+                                if key.is_empty() { key = str_field(env, "ANTHROPIC_AUTH_TOKEN"); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        TargetApp::Codex => {
+            // Codex: model_provider 字段指明当前 provider，base_url 在
+            // [model_providers.<id>] 块；api key 不在 config.toml（走 auth.json /
+            // OPENAI_API_KEY 环境变量），这里尽力读取。
+            let pid = str_field(&cfg, "model_provider");
+            if let Some(providers) = cfg.get("model_providers").and_then(|v| v.as_object()) {
+                // 优先用 model_provider 指定的块，否则取第一个
+                let block = providers
+                    .get(&pid)
+                    .or_else(|| providers.values().next());
+                if let Some(b) = block {
+                    url = str_field(b, "base_url");
+                    // 某些配置把 key 写在 provider 块里
+                    if key.is_empty() {
+                        key = str_field(b, "api_key");
+                    }
+                    // env_key 指向环境变量名
+                    let env_key = str_field(b, "env_key");
+                    if key.is_empty() && !env_key.is_empty() {
+                        key = std::env::var(&env_key).unwrap_or_default();
+                    }
+                }
+            }
+            // 顶层兜底
+            if url.is_empty() {
+                url = str_field(&cfg, "base_url");
+            }
+            // 从 auth.json 或常见环境变量读 key
+            if key.is_empty() {
+                if let Some(home) = dirs::home_dir() {
+                    let auth = home.join(".codex").join("auth.json");
+                    if let Ok(c) = std::fs::read_to_string(&auth) {
+                        if let Ok(j) = serde_json::from_str::<serde_json::Value>(&c) {
+                            key = str_field(&j, "OPENAI_API_KEY");
+                            if key.is_empty() {
+                                key = str_field(&j, "api_key");
+                            }
+                        }
+                    }
+                }
+            }
+            if key.is_empty() {
+                key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
+            }
+        }
+        TargetApp::Gemini => {
+            // Gemini: API 在 .env，adapter.read_config 返回 settings.json，
+            // 这里直接读 ~/.gemini/.env
+            if let Some(home) = dirs::home_dir() {
+                let env_path = home.join(".gemini").join(".env");
+                if let Ok(content) = std::fs::read_to_string(&env_path) {
+                    for line in content.lines() {
+                        if let Some((k, v)) = line.split_once('=') {
+                            let v = v.trim().trim_matches('"').to_string();
+                            match k.trim() {
+                                "GEMINI_API_KEY" | "GOOGLE_API_KEY" => key = v,
+                                "GOOGLE_GEMINI_BASE_URL" => url = v,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+            if url.is_empty() {
+                url = "https://generativelanguage.googleapis.com".to_string();
+            }
+        }
+        TargetApp::OpenCode => {
+            // OpenCode: provider.<id>.options.{apiKey,baseURL}，取第一个 provider
+            if let Some(providers) = cfg.get("provider").and_then(|v| v.as_object()) {
+                if let Some((_pid, pv)) = providers.iter().next() {
+                    if let Some(opts) = pv.get("options") {
+                        url = str_field(opts, "baseURL");
+                        key = str_field(opts, "apiKey");
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(ScannedApi {
+        found: !url.is_empty() || !key.is_empty(),
+        api_url: url,
+        api_key: key,
+        provider,
+        source,
+    })
+}
+
+/// 从某工具当前配置文件读取共享配置（permissions/hooks/MCP/skills 等），保存到数据库
+#[tauri::command]
+pub async fn import_shared_config(
+    target_app: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    use crate::adapters::get_adapter;
+    let target = TargetApp::from_str(&target_app)
+        .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
+    let adapter = get_adapter(target);
+    let cfg = adapter.read_config().map_err(|e| e.to_string())?;
+    let shared = adapter.extract_shared_config(&cfg);
+
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.save_shared_config(target, shared.clone())
+        .map_err(|e| e.to_string())?;
+    Ok(shared)
+}
+
+fn str_field(v: &serde_json::Value, key: &str) -> String {
+    v.get(key).and_then(|x| x.as_str()).unwrap_or("").to_string()
+}
+
+fn default_provider(target: TargetApp) -> String {
+    match target {
+        TargetApp::ClaudeCode => "anthropic",
+        TargetApp::Codex => "openai",
+        TargetApp::Gemini => "google",
+        TargetApp::OpenCode => "anthropic",
+    }
+    .to_string()
 }
 
 #[tauri::command]
@@ -414,4 +592,155 @@ fn default_db_path() -> Result<std::path::PathBuf, String> {
     dirs::home_dir()
         .ok_or("Failed to get home directory".to_string())
         .map(|home| home.join(".switch-api").join("db.sqlite"))
+}
+
+// ============ 从 cc-switch 导入 ============
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CcSwitchProvider {
+    pub name: String,
+    pub app_type: String,
+    pub api_url: String,
+    pub api_key: String,
+    pub provider: String,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub context_1m: bool,
+    pub is_current: bool,
+}
+
+/// 扫描 ~/.cc-switch/cc-switch.db，列出指定工具的 provider（供预览/选择导入）
+#[tauri::command]
+pub async fn scan_cc_switch(target_app: String) -> Result<Vec<CcSwitchProvider>, String> {
+    let home = dirs::home_dir().ok_or("无法获取主目录")?;
+    let db_path = home.join(".cc-switch").join("cc-switch.db");
+    if !db_path.exists() {
+        return Err(format!("未找到 cc-switch 数据库: {}", db_path.display()));
+    }
+
+    let conn = rusqlite::Connection::open(&db_path)
+        .map_err(|e| format!("打开 cc-switch 数据库失败: {}", e))?;
+
+    let mut stmt = conn
+        .prepare("SELECT name, settings_config, is_current FROM providers WHERE app_type = ?1 ORDER BY sort_index")
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map([&target_app], |row| {
+            let name: String = row.get(0)?;
+            let settings: String = row.get(1)?;
+            let is_current: i64 = row.get(2).unwrap_or(0);
+            Ok((name, settings, is_current != 0))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut out = Vec::new();
+    for r in rows {
+        let (name, settings, is_current) = r.map_err(|e| e.to_string())?;
+        let parsed = parse_cc_provider(&target_app, &settings);
+        out.push(CcSwitchProvider {
+            name,
+            app_type: target_app.clone(),
+            api_url: parsed.0,
+            api_key: parsed.1,
+            provider: parsed.2,
+            model: parsed.3,
+            reasoning_effort: parsed.4,
+            context_1m: parsed.5,
+            is_current,
+        });
+    }
+    Ok(out)
+}
+
+/// 将选中的 cc-switch provider 导入为我们的 ApiProfile
+#[tauri::command]
+pub async fn import_cc_switch(
+    target_app: String,
+    providers: Vec<CcSwitchProvider>,
+    state: State<'_, AppState>,
+) -> Result<usize, String> {
+    let target = TargetApp::from_str(&target_app)
+        .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let mut count = 0;
+    for p in providers {
+        // 名称冲突则加后缀
+        let mut name = p.name.clone();
+        if db.get_profile_by_name(&name).is_ok() {
+            name = format!("{}-cc", p.name);
+        }
+        let profile = ApiProfile {
+            name,
+            provider: p.provider,
+            api_url: p.api_url,
+            api_key: p.api_key,
+            model: p.model,
+            reasoning_effort: p.reasoning_effort,
+            context_1m: Some(p.context_1m),
+            target_app: Some(target),
+            ..Default::default()
+        };
+        if db.add_profile(&profile).is_ok() {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// 解析 cc-switch 的 settings_config，返回 (url, key, provider, model, reasoning, context_1m)
+fn parse_cc_provider(
+    app_type: &str,
+    settings: &str,
+) -> (String, String, String, Option<String>, Option<String>, bool) {
+    let v: serde_json::Value = serde_json::from_str(settings).unwrap_or(serde_json::json!({}));
+
+    match app_type {
+        "codex" => {
+            let key = v
+                .get("auth")
+                .and_then(|a| a.get("OPENAI_API_KEY"))
+                .and_then(|k| k.as_str())
+                .unwrap_or("")
+                .to_string();
+            let config_str = v.get("config").and_then(|c| c.as_str()).unwrap_or("");
+            // 解析 TOML
+            let toml_v: toml::Value = toml::from_str(config_str).unwrap_or(toml::Value::Table(Default::default()));
+            let cfg: serde_json::Value = serde_json::to_value(&toml_v).unwrap_or(serde_json::json!({}));
+
+            let url = cfg
+                .get("model_providers")
+                .and_then(|p| p.get("custom"))
+                .and_then(|c| c.get("base_url"))
+                .and_then(|u| u.as_str())
+                .unwrap_or("")
+                .to_string();
+            let model = cfg.get("model").and_then(|m| m.as_str()).map(String::from);
+            let reasoning = cfg
+                .get("model_reasoning_effort")
+                .and_then(|r| r.as_str())
+                .map(String::from);
+            let ctx_1m = cfg
+                .get("model_context_window")
+                .and_then(|w| w.as_i64())
+                .map(|w| w >= 1_000_000)
+                .unwrap_or(false);
+            (url, key, "openai".to_string(), model, reasoning, ctx_1m)
+        }
+        "claude" | "claude-code" => {
+            let env = v.get("settingsConfig").and_then(|s| s.get("env")).or_else(|| v.get("env"));
+            let url = env
+                .and_then(|e| e.get("ANTHROPIC_BASE_URL"))
+                .and_then(|u| u.as_str())
+                .unwrap_or("")
+                .to_string();
+            let key = env
+                .and_then(|e| e.get("ANTHROPIC_AUTH_TOKEN").or_else(|| e.get("ANTHROPIC_API_KEY")))
+                .and_then(|k| k.as_str())
+                .unwrap_or("")
+                .to_string();
+            (url, key, "anthropic".to_string(), None, None, false)
+        }
+        _ => (String::new(), String::new(), "custom".to_string(), None, None, false),
+    }
 }

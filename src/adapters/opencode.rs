@@ -1,5 +1,5 @@
 use super::ConfigAdapter;
-use crate::models::{ApiProfile, TargetApp};
+use crate::models::ApiProfile;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
@@ -84,10 +84,6 @@ impl OpenCodeAdapter {
 }
 
 impl ConfigAdapter for OpenCodeAdapter {
-    fn target_app(&self) -> TargetApp {
-        TargetApp::OpenCode
-    }
-
     fn config_path(&self) -> PathBuf {
         self.config_file_path()
     }
@@ -233,8 +229,7 @@ mod tests {
             api_url: "https://api.example.com/v1".to_string(),
             api_key: "sk-test-key".to_string(),
             model_mapping: None,
-            created_at: None,
-            updated_at: None,
+            ..Default::default()
         }
     }
 

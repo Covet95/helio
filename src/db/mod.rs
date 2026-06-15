@@ -1,5 +1,5 @@
 use crate::models::{ActiveProfile, ApiProfile, SharedConfig, TargetApp};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
@@ -48,6 +48,13 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_shared_configs_app ON shared_configs(target_app);
             "#,
         )?;
+
+        // 迁移：为已有数据库补充字段（幂等，忽略已存在错误）
+        let _ = self.conn.execute("ALTER TABLE api_profiles ADD COLUMN model TEXT", []);
+        let _ = self.conn.execute("ALTER TABLE api_profiles ADD COLUMN reasoning_effort TEXT", []);
+        let _ = self.conn.execute("ALTER TABLE api_profiles ADD COLUMN context_1m INTEGER", []);
+        let _ = self.conn.execute("ALTER TABLE api_profiles ADD COLUMN target_app TEXT", []);
+
         Ok(())
     }
 
@@ -63,14 +70,18 @@ impl Database {
             .transpose()?;
 
         self.conn.execute(
-            "INSERT INTO api_profiles (name, provider, api_url, api_key, model_mapping, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO api_profiles (name, provider, api_url, api_key, model_mapping, model, reasoning_effort, context_1m, target_app, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 &profile.name,
                 &profile.provider,
                 &profile.api_url,
                 &profile.api_key,
                 model_mapping_json,
+                &profile.model,
+                &profile.reasoning_effort,
+                profile.context_1m.map(|b| b as i64),
+                profile.target_app.as_ref().map(|t| t.as_str()),
                 now,
                 now
             ],
@@ -82,7 +93,7 @@ impl Database {
     /// 根据名称获取 API Profile
     pub fn get_profile_by_name(&self, name: &str) -> Result<ApiProfile> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, provider, api_url, api_key, model_mapping, created_at, updated_at
+            "SELECT id, name, provider, api_url, api_key, model_mapping, model, reasoning_effort, context_1m, created_at, updated_at, target_app
              FROM api_profiles WHERE name = ?1",
         )?;
 
@@ -93,6 +104,9 @@ impl Database {
                 .map(|s| serde_json::from_str(s))
                 .transpose()
                 .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            let context_1m: Option<i64> = row.get(8)?;
+            let target_app_str: Option<String> = row.get(11)?;
+            let target_app = target_app_str.as_deref().and_then(TargetApp::from_str);
 
             Ok(ApiProfile {
                 id: Some(row.get(0)?),
@@ -101,8 +115,12 @@ impl Database {
                 api_url: row.get(3)?,
                 api_key: row.get(4)?,
                 model_mapping,
-                created_at: Some(row.get(6)?),
-                updated_at: Some(row.get(7)?),
+                model: row.get(6)?,
+                reasoning_effort: row.get(7)?,
+                context_1m: context_1m.map(|v| v != 0),
+                created_at: Some(row.get(9)?),
+                updated_at: Some(row.get(10)?),
+                target_app,
             })
         })?;
 
@@ -112,7 +130,7 @@ impl Database {
     /// 列出所有 API Profiles
     pub fn list_profiles(&self) -> Result<Vec<ApiProfile>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, provider, api_url, api_key, model_mapping, created_at, updated_at
+            "SELECT id, name, provider, api_url, api_key, model_mapping, model, reasoning_effort, context_1m, created_at, updated_at, target_app
              FROM api_profiles ORDER BY name",
         )?;
 
@@ -124,6 +142,9 @@ impl Database {
                     .map(|s| serde_json::from_str(s))
                     .transpose()
                     .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let context_1m: Option<i64> = row.get(8)?;
+                let target_app_str: Option<String> = row.get(11)?;
+                let target_app = target_app_str.as_deref().and_then(TargetApp::from_str);
 
                 Ok(ApiProfile {
                     id: Some(row.get(0)?),
@@ -132,8 +153,12 @@ impl Database {
                     api_url: row.get(3)?,
                     api_key: row.get(4)?,
                     model_mapping,
-                    created_at: Some(row.get(6)?),
-                    updated_at: Some(row.get(7)?),
+                    model: row.get(6)?,
+                    reasoning_effort: row.get(7)?,
+                    context_1m: context_1m.map(|v| v != 0),
+                    created_at: Some(row.get(9)?),
+                    updated_at: Some(row.get(10)?),
+                    target_app,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -152,12 +177,16 @@ impl Database {
 
         self.conn.execute(
             "UPDATE api_profiles SET provider = ?1, api_url = ?2, api_key = ?3,
-             model_mapping = ?4, updated_at = ?5 WHERE name = ?6",
+             model_mapping = ?4, model = ?5, reasoning_effort = ?6, context_1m = ?7, target_app = ?8, updated_at = ?9 WHERE name = ?10",
             params![
                 &profile.provider,
                 &profile.api_url,
                 &profile.api_key,
                 model_mapping_json,
+                &profile.model,
+                &profile.reasoning_effort,
+                profile.context_1m.map(|b| b as i64),
+                profile.target_app.as_ref().map(|t| t.as_str()),
                 now,
                 &profile.name
             ],
@@ -168,6 +197,23 @@ impl Database {
 
     /// 删除 API Profile
     pub fn delete_profile(&self, name: &str) -> Result<bool> {
+        // 先查出 id，清理 active_profiles 里的引用（避免外键约束失败），再删 profile
+        let id: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM api_profiles WHERE name = ?1",
+                params![name],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        if let Some(pid) = id {
+            self.conn.execute(
+                "DELETE FROM active_profiles WHERE profile_id = ?1",
+                params![pid],
+            )?;
+        }
+
         let rows = self
             .conn
             .execute("DELETE FROM api_profiles WHERE name = ?1", params![name])?;
@@ -228,13 +274,12 @@ impl Database {
     pub fn get_active_profile(&self, target_app: TargetApp) -> Result<Option<ActiveProfile>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT target_app, profile_id FROM active_profiles WHERE target_app = ?1")?;
+            .prepare("SELECT profile_id FROM active_profiles WHERE target_app = ?1")?;
 
         let result = stmt
             .query_row(params![target_app.as_str()], |row| {
                 Ok(ActiveProfile {
-                    target_app,
-                    profile_id: row.get(1)?,
+                    profile_id: row.get(0)?,
                 })
             })
             .optional()?;
@@ -265,15 +310,18 @@ mod tests {
         let db = Database::open(":memory:")?;
 
         // 测试添加 Profile
-        let profile = ApiProfile::new(
-            "test-profile".to_string(),
-            "anthropic".to_string(),
-            "https://api.anthropic.com".to_string(),
-            "sk-test-key".to_string(),
-            Some(HashMap::from([
-                ("opus".to_string(), "claude-opus-4".to_string()),
-            ])),
-        );
+        let profile = ApiProfile {
+            name: "test-profile".to_string(),
+            provider: "anthropic".to_string(),
+            api_url: "https://api.anthropic.com".to_string(),
+            api_key: "sk-test-key".to_string(),
+            model_mapping: Some(HashMap::from([(
+                "opus".to_string(),
+                "claude-opus-4".to_string(),
+            )])),
+            target_app: Some(TargetApp::ClaudeCode),
+            ..Default::default()
+        };
 
         let id = db.add_profile(&profile)?;
         assert!(id > 0);
@@ -282,10 +330,12 @@ mod tests {
         let retrieved = db.get_profile_by_name("test-profile")?;
         assert_eq!(retrieved.name, "test-profile");
         assert_eq!(retrieved.api_url, "https://api.anthropic.com");
+        assert_eq!(retrieved.target_app, Some(TargetApp::ClaudeCode));
 
         // 测试列出 Profiles
         let profiles = db.list_profiles()?;
         assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].target_app, Some(TargetApp::ClaudeCode));
 
         // 测试共享配置
         let config = serde_json::json!({

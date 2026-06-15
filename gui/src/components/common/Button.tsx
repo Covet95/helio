@@ -12,24 +12,26 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
       <button
         ref={ref}
         className={cn(
-          'no-drag inline-flex items-center justify-center gap-2 rounded-lg font-medium',
-          'transition-all duration-200 outline-none',
-          'focus-visible:ring-2 focus-visible:ring-accent/50',
-          'disabled:opacity-40 disabled:pointer-events-none active:scale-[0.98]',
+          'no-drag inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md font-medium',
+          'border transition-[background-color,box-shadow,border-color,color] duration-150 outline-none',
+          'focus-visible:ring-2 focus-visible:ring-accent/40',
+          'disabled:opacity-40 disabled:pointer-events-none active:translate-y-px',
           {
-            'bg-accent text-white shadow-[0_2px_12px_-2px_rgb(59_130_246/0.5)] hover:bg-accent-soft':
+            'border-ink bg-ink text-white shadow-[0_1px_2px_rgba(10,16,14,0.18),inset_0_1px_0_rgba(255,255,255,0.10)] hover:bg-[#2B3430]':
               variant === 'primary',
-            'bg-elevated text-ink border border-line hover:border-line-strong hover:bg-line/40':
+            'border-line bg-card text-ink-dim shadow-[inset_0_1px_0_rgba(255,255,255,0.85)] hover:border-line-strong hover:bg-elevated/70 hover:text-ink':
               variant === 'secondary',
-            'bg-transparent text-ink-dim hover:bg-elevated hover:text-ink':
+            'border-transparent bg-transparent text-ink-dim hover:bg-elevated/60 hover:text-ink':
               variant === 'ghost',
-            'bg-ok text-white hover:brightness-110': variant === 'success',
-            'bg-danger/90 text-white hover:bg-danger': variant === 'danger',
+            'border-ok/35 bg-card text-ok hover:bg-ok/8':
+              variant === 'success',
+            'border-danger/35 bg-card text-danger hover:bg-danger/8':
+              variant === 'danger',
           },
           {
             'px-3 py-1.5 text-[13px]': size === 'sm',
-            'px-4 py-2 text-sm': size === 'md',
-            'px-6 py-3 text-base': size === 'lg',
+            'px-3.5 py-2 text-[13px]': size === 'md',
+            'px-5 py-2.5 text-sm': size === 'lg',
           },
           className,
         )}

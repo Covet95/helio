@@ -4,14 +4,22 @@ use std::path::PathBuf;
 
 /// 配置适配器 trait
 pub trait ConfigAdapter {
-    /// 目标应用名称
-    fn target_app(&self) -> TargetApp;
-
     /// 配置文件路径
     fn config_path(&self) -> PathBuf;
 
     /// 读取当前配置
     fn read_config(&self) -> Result<serde_json::Value>;
+
+    /// 读取 MCP servers 的原始 JSON（mcpServers / mcp_servers / mcp）。
+    #[cfg(feature = "tauri-gui")]
+    fn read_mcp_servers_raw(&self) -> Result<Option<serde_json::Value>> {
+        let config = self.read_config()?;
+        Ok(config
+            .get("mcpServers")
+            .or_else(|| config.get("mcp_servers"))
+            .or_else(|| config.get("mcp"))
+            .cloned())
+    }
 
     /// 提取共享配置（排除 API 信息）
     fn extract_shared_config(&self, config: &serde_json::Value) -> serde_json::Value;

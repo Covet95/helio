@@ -1,5 +1,5 @@
 use super::ConfigAdapter;
-use crate::models::{ApiProfile, TargetApp};
+use crate::models::ApiProfile;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
@@ -17,6 +17,10 @@ impl CodexAdapter {
 
     fn config_file_path(&self) -> PathBuf {
         self.config_dir.join("config.toml")
+    }
+
+    fn auth_file_path(&self) -> PathBuf {
+        self.config_dir.join("auth.json")
     }
 
     /// 将 toml::Value 转换为 serde_json::Value
@@ -83,10 +87,6 @@ impl CodexAdapter {
 }
 
 impl ConfigAdapter for CodexAdapter {
-    fn target_app(&self) -> TargetApp {
-        TargetApp::Codex
-    }
-
     fn config_path(&self) -> PathBuf {
         self.config_file_path()
     }
@@ -108,17 +108,17 @@ impl ConfigAdapter for CodexAdapter {
     fn extract_shared_config(&self, config: &serde_json::Value) -> serde_json::Value {
         let mut shared = config.clone();
 
-        // Codex 的 API 凭据位于 model_providers.<provider>.base_url 和顶层 env 中的 key 引用。
-        // 我们移除顶层的 api_key（如果存在）以及 model_providers 下各 provider 的 base_url。
+        // Codex 的 API key 存在独立的 ~/.codex/auth.json，不在 config.toml 里。
+        // config.toml 里唯一的 API 端点信息是各 provider 的 base_url。
+        // 因此只移除 base_url，保留 wire_api / requires_openai_auth / name 等协议字段。
         if let Some(obj) = shared.as_object_mut() {
+            // 兼容历史版本误写入的顶层 api_key
             obj.remove("api_key");
 
-            // 移除各 model_provider 的 base_url（API 端点信息）
             if let Some(providers) = obj.get_mut("model_providers").and_then(|v| v.as_object_mut()) {
                 for (_name, provider) in providers.iter_mut() {
                     if let Some(p) = provider.as_object_mut() {
                         p.remove("base_url");
-                        p.remove("env_key");
                     }
                 }
             }
@@ -138,18 +138,20 @@ impl ConfigAdapter for CodexAdapter {
             config["model_providers"] = serde_json::json!({});
         }
 
-        // 使用 profile.provider 作为 provider id（默认 "openai" 风格）
+        // 使用 profile.provider 作为 provider id（默认沿用 "custom"）
         let provider_id = if api_profile.provider.is_empty() {
             "custom".to_string()
         } else {
             api_profile.provider.to_lowercase()
         };
 
-        // 写入 provider 配置
+        // 写入 provider 配置：只改 base_url，保留该 provider 已有的 wire_api /
+        // requires_openai_auth / name 等协议字段；仅在 provider 全新时补默认值。
         if let Some(providers) = config
             .get_mut("model_providers")
             .and_then(|v| v.as_object_mut())
         {
+            let is_new = !providers.contains_key(&provider_id);
             let entry = providers
                 .entry(provider_id.clone())
                 .or_insert_with(|| serde_json::json!({}));
@@ -158,20 +160,24 @@ impl ConfigAdapter for CodexAdapter {
                     "base_url".to_string(),
                     serde_json::Value::String(api_profile.api_url.clone()),
                 );
-                // Codex 通过 env_key 引用环境变量中的 key
-                p.insert(
-                    "env_key".to_string(),
-                    serde_json::Value::String(format!(
-                        "{}_API_KEY",
-                        provider_id.to_uppercase()
-                    )),
-                );
+                if is_new {
+                    // 全新 provider：补上 Codex 必需的协议默认值。
+                    p.entry("name".to_string())
+                        .or_insert_with(|| serde_json::Value::String(provider_id.clone()));
+                    p.entry("wire_api".to_string())
+                        .or_insert_with(|| serde_json::Value::String("responses".to_string()));
+                }
+                // 历史版本误写入的 env_key 不再使用（key 走 auth.json）
+                p.remove("env_key");
             }
         }
 
-        // 设置当前使用的 provider 和顶层 api_key
+        // 设置当前使用的 provider。API key 不写 config.toml —— 走 auth.json
+        // （见 apply_api_credentials），且清掉历史版本误写入的顶层 api_key。
         config["model_provider"] = serde_json::Value::String(provider_id);
-        config["api_key"] = serde_json::Value::String(api_profile.api_key.clone());
+        if let Some(obj) = config.as_object_mut() {
+            obj.remove("api_key");
+        }
 
         config
     }
@@ -244,6 +250,47 @@ impl ConfigAdapter for CodexAdapter {
 
         Ok(())
     }
+
+    /// Codex 特有：API key 存在独立的 ~/.codex/auth.json 的 OPENAI_API_KEY 字段，
+    /// 而非 config.toml。保留 auth.json 中的其他字段，只更新 OPENAI_API_KEY。
+    fn apply_api_credentials(&self, api_profile: &ApiProfile) -> Result<()> {
+        let path = self.auth_file_path();
+
+        // 读取现有 auth.json（保留其他字段），解析失败则从空对象开始。
+        let mut auth = if path.exists() {
+            fs::read_to_string(&path)
+                .ok()
+                .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+                .unwrap_or_else(|| serde_json::json!({}))
+        } else {
+            serde_json::json!({})
+        };
+
+        if !auth.is_object() {
+            auth = serde_json::json!({});
+        }
+        if let Some(obj) = auth.as_object_mut() {
+            obj.insert(
+                "OPENAI_API_KEY".to_string(),
+                serde_json::Value::String(api_profile.api_key.clone()),
+            );
+        }
+
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).context("Failed to create Codex config directory")?;
+        }
+
+        let content =
+            serde_json::to_string_pretty(&auth).context("Failed to serialize Codex auth.json")?;
+        let temp_path = path.with_extension("json.tmp");
+        fs::write(&temp_path, &content).context("Failed to write temp Codex auth.json")?;
+        if let Ok(file) = fs::File::open(&temp_path) {
+            let _ = file.sync_all();
+        }
+        fs::rename(&temp_path, &path).context("Failed to rename temp Codex auth.json")?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -258,8 +305,7 @@ mod tests {
             api_url: "https://api.example.com/v1".to_string(),
             api_key: "sk-test-key".to_string(),
             model_mapping: None,
-            created_at: None,
-            updated_at: None,
+            ..Default::default()
         }
     }
 
@@ -327,14 +373,89 @@ command = "npx"
 
         let merged = adapter.merge_config(&sample_profile(), &shared);
 
-        // API 字段被写入
+        // base_url 写入对应 provider，model_provider 指向它
         assert_eq!(merged["model_provider"], "openai");
-        assert_eq!(merged["api_key"], "sk-test-key");
         assert_eq!(
             merged["model_providers"]["openai"]["base_url"],
             "https://api.example.com/v1"
         );
+        // 全新 provider 补上协议默认值
+        assert_eq!(merged["model_providers"]["openai"]["wire_api"], "responses");
+        // API key 绝不写进 config.toml（走 auth.json）
+        assert!(merged.get("api_key").is_none());
+        assert!(merged["model_providers"]["openai"].get("env_key").is_none());
         // 共享配置保留
         assert_eq!(merged["mcp_servers"]["fs"]["command"], "npx");
+    }
+
+    #[test]
+    fn test_merge_preserves_existing_provider_protocol() {
+        let adapter = CodexAdapter::new();
+        // 已有 custom provider，带 wire_api / requires_openai_auth
+        let shared = serde_json::json!({
+            "model_providers": {
+                "custom": {
+                    "name": "custom",
+                    "wire_api": "responses",
+                    "requires_openai_auth": true,
+                    "base_url": "https://old.api.com"
+                }
+            }
+        });
+        let profile = ApiProfile {
+            provider: "custom".to_string(),
+            api_url: "https://new.api.com/v1".to_string(),
+            api_key: "sk-x".to_string(),
+            ..sample_profile()
+        };
+
+        let merged = adapter.merge_config(&profile, &shared);
+
+        // base_url 被更新，协议字段被原样保留
+        assert_eq!(
+            merged["model_providers"]["custom"]["base_url"],
+            "https://new.api.com/v1"
+        );
+        assert_eq!(merged["model_providers"]["custom"]["wire_api"], "responses");
+        assert_eq!(
+            merged["model_providers"]["custom"]["requires_openai_auth"],
+            true
+        );
+    }
+
+    #[test]
+    fn test_apply_api_credentials_writes_auth_json() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let config_dir = std::env::temp_dir().join(format!(
+            "switch-api-codex-auth-test-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&config_dir).unwrap();
+        // 预置 auth.json，含其他字段，验证被保留
+        fs::write(
+            config_dir.join("auth.json"),
+            r#"{"OPENAI_API_KEY":"sk-old","tokens":{"refresh":"abc"}}"#,
+        )
+        .unwrap();
+
+        let adapter = CodexAdapter {
+            config_dir: config_dir.clone(),
+        };
+        adapter
+            .apply_api_credentials(&sample_profile())
+            .unwrap();
+
+        let written: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(config_dir.join("auth.json")).unwrap(),
+        )
+        .unwrap();
+        // key 被更新
+        assert_eq!(written["OPENAI_API_KEY"], "sk-test-key");
+        // 其他字段保留
+        assert_eq!(written["tokens"]["refresh"], "abc");
+
+        let _ = fs::remove_dir_all(&config_dir);
     }
 }

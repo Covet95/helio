@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// API Profile - 只存储 API 相关信息
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApiProfile {
     pub id: Option<i64>,
     pub name: String,
@@ -11,30 +11,20 @@ pub struct ApiProfile {
     pub api_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_mapping: Option<HashMap<String, String>>,
+    /// 默认模型（如 gpt-5.5 / claude-opus-4）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// 推理强度（Codex: low/medium/high/xhigh）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    /// 是否启用 1M 上下文窗口
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_1m: Option<bool>,
+    /// 归属工具（per-tool profile；None = 通用，所有工具下都显示）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_app: Option<TargetApp>,
     pub created_at: Option<i64>,
     pub updated_at: Option<i64>,
-}
-
-/// 配置文件格式
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ConfigFormat {
-    /// JSON 格式（Claude Code, OpenCode）
-    Json,
-    /// TOML 格式（Codex）
-    Toml,
-    /// 基于环境变量的 API 存储（Gemini CLI，settings.json + .env）
-    EnvBased,
-}
-
-/// 工具元数据 - 数据化每个工具的属性
-#[derive(Debug, Clone)]
-pub struct ToolMetadata {
-    /// 工具 ID（kebab-case，如 "claude-code"）
-    pub id: &'static str,
-    /// 显示名称
-    pub display_name: &'static str,
-    /// 配置文件格式
-    pub config_format: ConfigFormat,
 }
 
 /// 目标应用类型
@@ -67,6 +57,7 @@ impl TargetApp {
         }
     }
 
+    #[cfg(not(feature = "tauri-gui"))]
     pub fn all() -> Vec<Self> {
         vec![
             TargetApp::ClaudeCode,
@@ -74,32 +65,6 @@ impl TargetApp {
             TargetApp::Gemini,
             TargetApp::OpenCode,
         ]
-    }
-
-    /// 工具元数据 - 数据驱动各工具的属性
-    pub fn metadata(&self) -> ToolMetadata {
-        match self {
-            TargetApp::ClaudeCode => ToolMetadata {
-                id: "claude-code",
-                display_name: "Claude Code",
-                config_format: ConfigFormat::Json,
-            },
-            TargetApp::Codex => ToolMetadata {
-                id: "codex",
-                display_name: "Codex",
-                config_format: ConfigFormat::Toml,
-            },
-            TargetApp::Gemini => ToolMetadata {
-                id: "gemini",
-                display_name: "Gemini CLI",
-                config_format: ConfigFormat::EnvBased,
-            },
-            TargetApp::OpenCode => ToolMetadata {
-                id: "opencode",
-                display_name: "OpenCode",
-                config_format: ConfigFormat::Json,
-            },
-        }
     }
 }
 
@@ -120,10 +85,10 @@ pub struct SharedConfig {
 /// 当前活动的 Profile
 #[derive(Debug, Clone)]
 pub struct ActiveProfile {
-    pub target_app: TargetApp,
     pub profile_id: i64,
 }
 
+#[cfg(not(feature = "tauri-gui"))]
 impl ApiProfile {
     pub fn new(
         name: String,
@@ -139,6 +104,10 @@ impl ApiProfile {
             api_url,
             api_key,
             model_mapping,
+            model: None,
+            reasoning_effort: None,
+            context_1m: None,
+            target_app: None,
             created_at: None,
             updated_at: None,
         }
@@ -159,17 +128,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_all_variants_have_metadata() {
-        for app in TargetApp::all() {
-            let meta = app.metadata();
-            assert_eq!(meta.id, app.as_str(), "metadata id must match as_str");
-            assert!(!meta.display_name.is_empty());
-        }
-    }
-
-    #[test]
     fn test_from_str_roundtrip() {
-        for app in TargetApp::all() {
+        for app in [
+            TargetApp::ClaudeCode,
+            TargetApp::Codex,
+            TargetApp::Gemini,
+            TargetApp::OpenCode,
+        ] {
             let s = app.as_str();
             assert_eq!(TargetApp::from_str(s), Some(app));
         }
@@ -180,9 +145,13 @@ mod tests {
     fn test_new_tools_registered() {
         assert_eq!(TargetApp::from_str("gemini"), Some(TargetApp::Gemini));
         assert_eq!(TargetApp::from_str("opencode"), Some(TargetApp::OpenCode));
-        assert_eq!(TargetApp::Gemini.metadata().config_format, ConfigFormat::EnvBased);
-        assert_eq!(TargetApp::OpenCode.metadata().config_format, ConfigFormat::Json);
-        assert_eq!(TargetApp::Codex.metadata().config_format, ConfigFormat::Toml);
+    }
+
+    #[cfg(not(feature = "tauri-gui"))]
+    #[test]
+    fn test_all_variants_roundtrip() {
+        for app in TargetApp::all() {
+            assert_eq!(TargetApp::from_str(app.as_str()), Some(app));
+        }
     }
 }
-

@@ -48,6 +48,7 @@ tempfile = "3.10"
 
 [features]
 gui = []
+tauri-gui = []
 
 [profile.release]
 opt-level = 3

@@ -1,5 +1,5 @@
 use super::ConfigAdapter;
-use crate::models::{ApiProfile, TargetApp};
+use crate::models::ApiProfile;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
@@ -83,10 +83,6 @@ impl GeminiAdapter {
 }
 
 impl ConfigAdapter for GeminiAdapter {
-    fn target_app(&self) -> TargetApp {
-        TargetApp::Gemini
-    }
-
     fn config_path(&self) -> PathBuf {
         self.settings_path()
     }
@@ -232,8 +228,7 @@ mod tests {
             api_url: "https://proxy.com".to_string(),
             api_key: "key123".to_string(),
             model_mapping: None,
-            created_at: None,
-            updated_at: None,
+            ..Default::default()
         };
         let shared = serde_json::json!({
             "mcpServers": { "fs": { "command": "npx" } }

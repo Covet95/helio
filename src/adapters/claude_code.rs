@@ -1,5 +1,5 @@
 use super::ConfigAdapter;
-use crate::models::{ApiProfile, TargetApp};
+use crate::models::ApiProfile;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
@@ -27,37 +27,51 @@ impl ClaudeCodeAdapter {
 }
 
 impl ConfigAdapter for ClaudeCodeAdapter {
-    fn target_app(&self) -> TargetApp {
-        TargetApp::ClaudeCode
-    }
-
     fn config_path(&self) -> PathBuf {
-        // 优先使用 settings.local.json
         self.local_settings_path()
     }
 
     fn read_config(&self) -> Result<serde_json::Value> {
-        let path = self.config_path();
-
-        if !path.exists() {
-            // 如果 local 不存在，尝试读取全局配置
-            let global_path = self.global_settings_path();
-            if global_path.exists() {
-                let content = fs::read_to_string(&global_path)
-                    .context("Failed to read global settings")?;
-                return serde_json::from_str(&content)
-                    .context("Failed to parse global settings");
-            }
-
-            // 都不存在则返回空配置
-            return Ok(serde_json::json!({}));
+        let local_path = self.local_settings_path();
+        if local_path.exists() {
+            let content =
+                fs::read_to_string(&local_path).context("Failed to read local settings")?;
+            return serde_json::from_str(&content).context("Failed to parse local settings");
         }
 
-        let content = fs::read_to_string(&path)
-            .context("Failed to read config file")?;
+        let global_path = self.global_settings_path();
+        if global_path.exists() {
+            let content =
+                fs::read_to_string(&global_path).context("Failed to read global settings")?;
+            return serde_json::from_str(&content).context("Failed to parse global settings");
+        }
 
-        serde_json::from_str(&content)
-            .context("Failed to parse config JSON")
+        Ok(serde_json::json!({}))
+    }
+
+    /// Claude Code 的 MCP servers 存在 `~/.claude.json`（顶层 mcpServers = 全局），
+    /// 不在 settings.json 里。优先读 .claude.json，找不到再回退 settings（兼容老式配置）。
+    #[cfg(feature = "tauri-gui")]
+    fn read_mcp_servers_raw(&self) -> Result<Option<serde_json::Value>> {
+        if let Some(home) = dirs::home_dir() {
+            let claude_json = home.join(".claude.json");
+            if claude_json.exists() {
+                if let Ok(content) = fs::read_to_string(&claude_json) {
+                    if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&content) {
+                        if let Some(mcp) = cfg.get("mcpServers").cloned() {
+                            return Ok(Some(mcp));
+                        }
+                    }
+                }
+            }
+        }
+
+        let config = self.read_config()?;
+        Ok(config
+            .get("mcpServers")
+            .or_else(|| config.get("mcp_servers"))
+            .or_else(|| config.get("mcp"))
+            .cloned())
     }
 
     fn extract_shared_config(&self, config: &serde_json::Value) -> serde_json::Value {
@@ -80,7 +94,7 @@ impl ConfigAdapter for ClaudeCodeAdapter {
             config["env"] = serde_json::json!({});
         }
 
-        // 设置 API URL 和 Key
+        // 设置 API URL / Key / 模型
         if let Some(env) = config.get_mut("env").and_then(|v| v.as_object_mut()) {
             env.insert(
                 "ANTHROPIC_BASE_URL".to_string(),
@@ -90,6 +104,65 @@ impl ConfigAdapter for ClaudeCodeAdapter {
                 "ANTHROPIC_AUTH_TOKEN".to_string(),
                 serde_json::Value::String(api_profile.api_key.clone()),
             );
+            // 模型：设了就写入，没设就移除（回退到全局默认）
+            match &api_profile.model {
+                Some(m) if !m.trim().is_empty() => {
+                    env.insert(
+                        "ANTHROPIC_MODEL".to_string(),
+                        serde_json::Value::String(m.clone()),
+                    );
+                }
+                _ => {
+                    env.remove("ANTHROPIC_MODEL");
+                }
+            }
+
+            // 角色映射（Sonnet/Opus/Haiku）—— 有则写，无则清（避免旧角色残留覆盖切换后的实际模型）
+            let mm = api_profile.model_mapping.as_ref();
+            for role in ["sonnet", "opus", "haiku"] {
+                let model = mm
+                    .and_then(|m| m.get(&format!("{role}_model")))
+                    .map(|s| s.as_str())
+                    .filter(|s| !s.is_empty());
+                let name = mm
+                    .and_then(|m| m.get(&format!("{role}_name")))
+                    .map(|s| s.as_str())
+                    .filter(|s| !s.is_empty());
+                let one_m = mm
+                    .and_then(|m| m.get(&format!("{role}_one_m")))
+                    .map(|s| s == "true")
+                    .unwrap_or(false);
+                let upper = role.to_uppercase();
+                match model {
+                    Some(m) => {
+                        // [1M] 后缀 = 声明支持 1M 上下文（写在 _MODEL，不写在 _NAME）
+                        let model_val = if one_m {
+                            format!("{m}[1M]")
+                        } else {
+                            m.to_string()
+                        };
+                        env.insert(
+                            format!("ANTHROPIC_DEFAULT_{upper}_MODEL"),
+                            serde_json::Value::String(model_val),
+                        );
+                        match name {
+                            Some(n) => {
+                                env.insert(
+                                    format!("ANTHROPIC_DEFAULT_{upper}_MODEL_NAME"),
+                                    serde_json::Value::String(n.to_string()),
+                                );
+                            }
+                            None => {
+                                env.remove(&format!("ANTHROPIC_DEFAULT_{upper}_MODEL_NAME"));
+                            }
+                        }
+                    }
+                    None => {
+                        env.remove(&format!("ANTHROPIC_DEFAULT_{upper}_MODEL"));
+                        env.remove(&format!("ANTHROPIC_DEFAULT_{upper}_MODEL_NAME"));
+                    }
+                }
+            }
         }
 
         config
@@ -178,6 +251,19 @@ impl ConfigAdapter for ClaudeCodeAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn test_adapter() -> ClaudeCodeAdapter {
+        let unique = TEST_DIR_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let config_dir = std::env::temp_dir().join(format!(
+            "switch-api-claude-adapter-test-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&config_dir).unwrap();
+        ClaudeCodeAdapter { config_dir }
+    }
 
     #[test]
     fn test_extract_shared_config() {
@@ -216,8 +302,7 @@ mod tests {
             api_url: "https://test.api".to_string(),
             api_key: "sk-new-key".to_string(),
             model_mapping: None,
-            created_at: None,
-            updated_at: None,
+            ..Default::default()
         };
 
         let shared_config = serde_json::json!({
@@ -238,5 +323,84 @@ mod tests {
         // 共享配置应该保留
         assert_eq!(merged["env"]["OTHER_VAR"], "value");
         assert_eq!(merged["permissions"]["allow"][0], "bash");
+    }
+
+    #[test]
+    fn test_config_path_returns_settings_local_json() {
+        let adapter = test_adapter();
+
+        assert_eq!(
+            adapter.config_path(),
+            adapter.config_dir.join("settings.local.json")
+        );
+
+        let _ = fs::remove_dir_all(&adapter.config_dir);
+    }
+
+    #[test]
+    fn test_read_config_prefers_settings_local_json() {
+        let adapter = test_adapter();
+        fs::write(
+            adapter.global_settings_path(),
+            r#"{"env":{"ANTHROPIC_BASE_URL":"https://global.example"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            adapter.local_settings_path(),
+            r#"{"env":{"ANTHROPIC_BASE_URL":"https://local.example"}}"#,
+        )
+        .unwrap();
+
+        let config = adapter.read_config().unwrap();
+
+        assert_eq!(
+            config["env"]["ANTHROPIC_BASE_URL"],
+            "https://local.example"
+        );
+
+        let _ = fs::remove_dir_all(&adapter.config_dir);
+    }
+
+    #[test]
+    fn test_read_config_falls_back_to_settings_json() {
+        let adapter = test_adapter();
+        fs::write(
+            adapter.global_settings_path(),
+            r#"{"env":{"ANTHROPIC_BASE_URL":"https://global.example"}}"#,
+        )
+        .unwrap();
+
+        let config = adapter.read_config().unwrap();
+
+        assert_eq!(
+            config["env"]["ANTHROPIC_BASE_URL"],
+            "https://global.example"
+        );
+
+        let _ = fs::remove_dir_all(&adapter.config_dir);
+    }
+
+    #[test]
+    fn test_write_config_writes_settings_local_json() {
+        let adapter = test_adapter();
+        let config = serde_json::json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://local.example"
+            }
+        });
+
+        adapter.write_config(&config).unwrap();
+
+        assert!(adapter.local_settings_path().exists());
+        assert!(!adapter.global_settings_path().exists());
+        let written: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(adapter.local_settings_path()).unwrap())
+                .unwrap();
+        assert_eq!(
+            written["env"]["ANTHROPIC_BASE_URL"],
+            "https://local.example"
+        );
+
+        let _ = fs::remove_dir_all(&adapter.config_dir);
     }
 }

@@ -1,50 +1,54 @@
 import { useState } from 'react';
 import { Button } from '../components/common/Button';
 import { PageHeader } from '../components/common/PageHeader';
-import { Download, Upload, Database, ShieldCheck } from 'lucide-react';
+import { Download, Upload } from 'lucide-react';
+import { ConfirmDialog } from '../components/common/Modal';
+
+type Feedback = { text: string; kind: 'success' | 'error' | 'info' };
 
 export default function ExportPage() {
   const [importing, setImporting] = useState(false);
   const [exporting, setExporting] = useState(false);
-  const [message, setMessage] = useState('');
+  const [feedback, setFeedback] = useState<Feedback | null>(null);
+  const [confirmImport, setConfirmImport] = useState(false);
 
   const handleExport = async () => {
     try {
       setExporting(true);
-      setMessage('');
+      setFeedback(null);
       const { save } = await import('@tauri-apps/plugin-dialog');
       const filePath = await save({
-        defaultPath: `switch-api-backup-${Date.now()}.db`,
+        defaultPath: `helio-backup-${Date.now()}.db`,
         filters: [{ name: 'Database', extensions: ['db', 'sqlite'] }],
       });
-      if (!filePath) { setMessage('导出已取消'); return; }
+      if (!filePath) { setFeedback({ text: '导出已取消', kind: 'info' }); return; }
       const { tauriApi } = await import('../lib/tauri');
       await tauriApi.exportDatabase(filePath);
-      setMessage('✅ 数据库导出成功');
+      setFeedback({ text: '数据库导出成功', kind: 'success' });
     } catch (err) {
-      setMessage('❌ 导出失败: ' + err);
+      setFeedback({ text: '导出失败: ' + err, kind: 'error' });
     } finally {
       setExporting(false);
     }
   };
 
   const handleImport = async () => {
-    if (!confirm('导入将覆盖当前数据库（会自动备份）。是否继续？')) return;
     try {
       setImporting(true);
-      setMessage('');
+      setConfirmImport(false);
+      setFeedback(null);
       const { open } = await import('@tauri-apps/plugin-dialog');
       const filePath = await open({
         multiple: false,
         filters: [{ name: 'Database', extensions: ['db', 'sqlite'] }],
       });
-      if (!filePath) { setMessage('导入已取消'); return; }
+      if (!filePath) { setFeedback({ text: '导入已取消', kind: 'info' }); return; }
       const { tauriApi } = await import('../lib/tauri');
       await tauriApi.importDatabase(filePath as string);
-      setMessage('✅ 数据库导入成功，正在刷新…');
+      setFeedback({ text: '数据库导入成功，正在刷新…', kind: 'success' });
       setTimeout(() => window.location.reload(), 1500);
     } catch (err) {
-      setMessage('❌ 导入失败: ' + err);
+      setFeedback({ text: '导入失败: ' + err, kind: 'error' });
     } finally {
       setImporting(false);
     }
@@ -52,72 +56,62 @@ export default function ExportPage() {
 
   return (
     <div className="min-h-full">
-      <PageHeader title="Import / Export" subtitle="单文件数据库，便于备份、迁移与团队共享" />
+      <PageHeader title="备份 / 恢复" />
 
-      <div className="px-8 py-6 max-w-3xl">
-        {message && (
-          <div className={`mb-5 rounded-lg border px-4 py-2.5 text-[13px] animate-fade-up ${
-            message.startsWith('✅') ? 'border-ok/30 bg-ok/10 text-ok'
-            : message.startsWith('❌') ? 'border-danger/30 bg-danger/10 text-danger'
+      <div className="max-w-3xl px-4 py-4 sm:px-7 sm:py-5">
+        {feedback && (
+          <div className={`mb-4 rounded-md border px-3 py-2 text-[13px] ${
+            feedback.kind === 'success' ? 'border-ok/30 bg-ok/10 text-ok'
+            : feedback.kind === 'error' ? 'border-danger/30 bg-danger/10 text-danger'
             : 'border-line bg-surface text-ink-dim'
           }`}>
-            {message}
+            {feedback.text}
           </div>
         )}
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <ActionCard
+        <div className="overflow-hidden rounded-lg border border-line bg-card">
+          <ActionRow
             icon={<Download size={20} className="text-accent" />}
-            tint="#3B82F6"
             title="导出数据库"
-            desc="将所有 Profiles 与共享配置导出为单个 .db 文件"
-            button={<Button onClick={handleExport} disabled={exporting} className="w-full"><Download size={16} />{exporting ? '导出中…' : '导出'}</Button>}
+            meta=".db / .sqlite"
+            button={<Button onClick={handleExport} disabled={exporting}><Download size={16} />{exporting ? '导出中…' : '导出'}</Button>}
           />
-          <ActionCard
+          <ActionRow
             icon={<Upload size={20} className="text-opencode" />}
-            tint="#A78BFA"
             title="导入数据库"
-            desc="从备份文件恢复，当前数据库会自动备份为 .backup"
-            button={<Button variant="secondary" onClick={handleImport} disabled={importing} className="w-full"><Upload size={16} />{importing ? '导入中…' : '导入'}</Button>}
+            meta="覆盖前自动备份"
+            button={<Button variant="secondary" onClick={() => setConfirmImport(true)} disabled={importing}><Upload size={16} />{importing ? '导入中…' : '导入'}</Button>}
           />
-        </div>
-
-        <div className="mt-4 rounded-xl border border-line bg-surface/50 p-4">
-          <div className="flex items-center gap-2 mb-2.5">
-            <ShieldCheck size={15} className="text-ok" />
-            <span className="text-[13px] font-medium text-ink">安全说明</span>
-          </div>
-          <ul className="space-y-1.5 text-[12.5px] text-ink-dim">
-            <li className="flex gap-2"><Dot />数据库包含所有 API Profiles 与各工具共享配置</li>
-            <li className="flex gap-2"><Dot />导出的 .db 文件可在任意设备导入，适合团队分享</li>
-            <li className="flex gap-2"><Dot />导入前自动备份当前库，操作可回滚</li>
-          </ul>
         </div>
       </div>
+
+      {confirmImport && (
+        <ConfirmDialog
+          title="导入数据库"
+          message="当前数据库会被覆盖，导入前会自动备份。"
+          confirmText="导入"
+          danger
+          onCancel={() => setConfirmImport(false)}
+          onConfirm={handleImport}
+        />
+      )}
     </div>
   );
 }
 
-function ActionCard({ icon, title, desc, button, tint }: {
-  icon: React.ReactNode; title: string; desc: string; button: React.ReactNode; tint: string;
+function ActionRow({ icon, title, meta, button }: {
+  icon: React.ReactNode; title: string; meta: string; button: React.ReactNode;
 }) {
   return (
-    <div className="group relative overflow-hidden rounded-xl border border-line bg-card p-5 transition-all duration-300 hover:border-line-strong">
-      <div className="pointer-events-none absolute inset-0 opacity-0 transition-opacity duration-500 group-hover:opacity-100"
-           style={{ backgroundImage: `linear-gradient(135deg, ${tint}10, transparent 70%)` }} />
-      <div className="relative">
-        <div className="grid place-items-center h-11 w-11 rounded-xl border border-line bg-surface mb-3.5">{icon}</div>
-        <h3 className="text-[14.5px] font-semibold text-ink mb-1">{title}</h3>
-        <p className="text-[12.5px] text-ink-dim mb-4 leading-relaxed">{desc}</p>
-        {button}
+    <div className="flex items-center justify-between gap-4 border-b border-line px-4 py-3.5 last:border-b-0">
+      <div className="flex min-w-0 items-center gap-3">
+        <div className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-line bg-surface">{icon}</div>
+        <div className="min-w-0">
+          <h3 className="text-[14px] font-semibold text-ink">{title}</h3>
+          <p className="text-[12px] text-ink-faint">{meta}</p>
+        </div>
       </div>
+      {button}
     </div>
   );
 }
-
-function Dot() {
-  return <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-ink-faint" />;
-}
-
-// silence unused import in case Database icon wanted later
-void Database;

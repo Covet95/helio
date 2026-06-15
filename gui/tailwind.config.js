@@ -5,53 +5,50 @@ export default {
   theme: {
     extend: {
       colors: {
-        // surface elevator (dark-first, 4 levels)
-        bg: "#0E0E11",
-        surface: "#16161A",
-        card: "#1C1C22",
-        elevated: "#24242C",
-        line: "#2A2A33",
-        "line-strong": "#3A3A45",
+        bg: "#FAF6EE",
+        surface: "#F5EFE2",
+        card: "#FFFFFF",
+        elevated: "#F5EFE2",
+        line: "#EBE2D2",
+        "line-strong": "#DACDB6",
 
-        ink: "#F2F2F5",
-        "ink-dim": "#A0A0AC",
-        "ink-faint": "#65656F",
+        ink: "#2A2118",
+        "ink-dim": "#6F6353",
+        "ink-faint": "#A39681",
 
-        accent: "#3B82F6",
-        "accent-soft": "#60A5FA",
+        accent: "#F97316",
+        "accent-soft": "#EA580C",
 
-        ok: "#22C55E",
-        warn: "#F59E0B",
-        danger: "#EF4444",
+        ok: "#16A34A",
+        warn: "#D97706",
+        danger: "#DC2626",
 
-        // per-tool brand accents
-        claude: "#D97757",
-        codex: "#10B981",
-        gemini: "#4F8DF6",
-        opencode: "#A78BFA",
+        claude: "#C2410C",
+        codex: "#047857",
+        gemini: "#2563EB",
+        opencode: "#7C3AED",
 
-        // legacy aliases (keep old class names working)
-        primary: "#3B82F6",
-        success: "#22C55E",
-        warning: "#F59E0B",
-        error: "#EF4444",
-        sidebar: "#16161A",
+        primary: "#2A2118",
+        success: "#16A34A",
+        warning: "#D97706",
+        error: "#DC2626",
+        sidebar: "#F5EFE2",
       },
       fontFamily: {
-        sans: ["Inter", "-apple-system", "BlinkMacSystemFont", "Segoe UI", "sans-serif"],
-        mono: ["JetBrains Mono", "ui-monospace", "SFMono-Regular", "SF Mono", "Menlo", "monospace"],
+        sans: ["-apple-system", "BlinkMacSystemFont", "Segoe UI", "PingFang SC", "Microsoft YaHei", "sans-serif"],
+        mono: ["ui-monospace", "SFMono-Regular", "SF Mono", "Menlo", "Consolas", "monospace"],
       },
       borderRadius: {
         sm: "0.375rem",
         md: "0.5rem",
         lg: "0.75rem",
-        xl: "0.875rem",
-        "2xl": "1.125rem",
+        xl: "0.75rem",
+        "2xl": "0.875rem",
       },
       boxShadow: {
-        soft: "0 1px 2px 0 rgb(0 0 0 / 0.4)",
-        card: "0 4px 24px -8px rgb(0 0 0 / 0.5)",
-        glow: "0 0 0 1px rgb(59 130 246 / 0.4), 0 8px 32px -8px rgb(59 130 246 / 0.25)",
+        soft: "0 1px 2px 0 rgb(60 40 15 / 0.05)",
+        card: "0 1px 2px 0 rgb(60 40 15 / 0.06), 0 14px 28px -16px rgb(60 40 15 / 0.18)",
+        glow: "0 0 0 1px rgb(234 88 12 / 0.20), 0 3px 10px -4px rgb(234 88 12 / 0.24)",
       },
       keyframes: {
         "fade-up": {

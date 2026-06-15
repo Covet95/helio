@@ -88,6 +88,9 @@ pub async fn switch_profile(
     // 写入配置
     adapter.write_config(&merged).map_err(|e| e.to_string())?;
 
+    // 应用工具特定的 API 凭据（如 Codex 的 auth.json、Gemini 的 .env）
+    adapter.apply_api_credentials(&api_profile).map_err(|e| e.to_string())?;
+
     // 更新活动记录
     db.set_active_profile(target, api_profile.id.unwrap())
         .map_err(|e| e.to_string())?;
