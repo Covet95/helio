@@ -241,6 +241,39 @@ impl SessionReader for CodexSessionReader {
     }
 }
 
+/// 删除单个会话：移系统垃圾桶。目标不存在视为成功；越界拒绝。
+pub fn delete_one(reader: &dyn SessionReader, id: &str) -> DeleteResult {
+    delete_one_with(reader, id, &trash_delete)
+}
+
+/// trash 删除的默认实现
+fn trash_delete(path: &Path) -> anyhow::Result<()> {
+    trash::delete(path).map_err(|e| anyhow::anyhow!("移入垃圾桶失败: {e}"))
+}
+
+/// 可注入删除函数（测试用）
+fn delete_one_with(
+    reader: &dyn SessionReader,
+    id: &str,
+    do_delete: &dyn Fn(&Path) -> anyhow::Result<()>,
+) -> DeleteResult {
+    let tool = reader.tool().to_string();
+    let path = match reader.resolve_path(id) {
+        Some(p) => p,
+        None => return DeleteResult { id: id.into(), tool, ok: true, error: None }, // 不存在=成功
+    };
+    if !is_within_root(&reader.root(), &path) {
+        return DeleteResult { id: id.into(), tool, ok: false, error: Some("路径越界，拒绝删除".into()) };
+    }
+    if !path.exists() {
+        return DeleteResult { id: id.into(), tool, ok: true, error: None };
+    }
+    match do_delete(&path) {
+        Ok(_) => DeleteResult { id: id.into(), tool, ok: true, error: None },
+        Err(e) => DeleteResult { id: id.into(), tool, ok: false, error: Some(e.to_string()) },
+    }
+}
+
 /// 数 jsonl 行数（消息数估算）
 fn count_lines(path: &Path) -> usize {
     File::open(path)
@@ -359,6 +392,38 @@ mod tests {
         let bad = list.iter().find(|m| !m.parseable).expect("应有不可解析项");
         assert_eq!(bad.parseable, false);
 
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn test_delete_moves_file_away() {
+        let root = temp_dir("codex-del");
+        let day = root.join("2026/06/03");
+        fs::create_dir_all(&day).unwrap();
+        let f = day.join("rollout-del-1.jsonl");
+        fs::write(&f, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"d1\"}}\n").unwrap();
+        assert!(f.exists());
+
+        let reader = CodexSessionReader { sessions_dir: root.clone() };
+        let trashed = temp_dir("trashbin");
+        let fake_delete = |p: &Path| -> anyhow::Result<()> {
+            let dest = trashed.join(p.file_name().unwrap());
+            fs::rename(p, dest)?; Ok(())
+        };
+        let res = delete_one_with(&reader, "d1", &fake_delete);
+        assert!(res.ok, "删除应成功: {:?}", res.error);
+        assert!(!f.exists(), "文件应已被移走");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn test_delete_missing_file_is_ok() {
+        let root = temp_dir("codex-del-missing");
+        fs::create_dir_all(&root).unwrap();
+        let reader = CodexSessionReader { sessions_dir: root.clone() };
+        let res = delete_one(&reader, "does-not-exist");
+        assert!(res.ok, "目标不存在应视为成功");
         fs::remove_dir_all(&root).ok();
     }
 }
