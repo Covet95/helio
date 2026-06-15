@@ -66,3 +66,27 @@ export interface StatusInfo {
   opencode?: TargetStatus;
   database: DatabaseInfo;
 }
+
+export interface SessionMeta {
+  id: string;
+  tool: string;
+  cwd: string;
+  title: string | null;
+  started_at: number;
+  modified_at: number;
+  size_bytes: number;
+  message_count: number;
+  parseable: boolean;
+}
+
+export interface PreviewMessage {
+  role: string;
+  text: string;
+}
+
+export interface DeleteResult {
+  id: string;
+  tool: string;
+  ok: boolean;
+  error: string | null;
+}

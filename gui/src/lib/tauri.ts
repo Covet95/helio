@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { ApiProfile, FetchedModel, StatusInfo, TargetApp } from '@/types';
+import type { ApiProfile, FetchedModel, StatusInfo, TargetApp, SessionMeta, PreviewMessage, DeleteResult } from '@/types';
 
 const canUseTauri = () => typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
@@ -101,6 +101,22 @@ export const tauriApi = {
 
   importCcSwitch: (targetApp: string, providers: CcSwitchProvider[]) =>
     command<number>('import_cc_switch', { targetApp, providers }),
+
+  // 会话历史
+  listSessions: (tool?: string, search?: string) =>
+    command<SessionMeta[]>('list_sessions', { tool, search }, []),
+
+  readSessionPreview: (tool: string, id: string) =>
+    command<PreviewMessage[]>('read_session_preview', { tool, id }, []),
+
+  deleteSession: (tool: string, id: string) =>
+    command<DeleteResult>('delete_session', { tool, id }),
+
+  deleteSessions: (items: { tool: string; id: string }[]) =>
+    command<DeleteResult[]>('delete_sessions', { items }, []),
+
+  cleanupSessions: (tool: string | undefined, olderThanDays: number) =>
+    command<DeleteResult[]>('cleanup_sessions', { tool, olderThanDays }, []),
 };
 
 export interface CcSwitchProvider {
