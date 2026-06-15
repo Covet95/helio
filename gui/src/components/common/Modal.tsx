@@ -1,5 +1,5 @@
-import { type ReactNode, type InputHTMLAttributes } from 'react';
-import { X, AlertTriangle } from 'lucide-react';
+import { type ReactNode, type InputHTMLAttributes, useState } from 'react';
+import { X, AlertTriangle, Eye, EyeOff } from 'lucide-react';
 
 export function Modal({
   title,
@@ -95,16 +95,34 @@ interface FieldProps extends InputHTMLAttributes<HTMLInputElement> {
   mono?: boolean;
 }
 
-export function Field({ label, mono, className, ...props }: FieldProps) {
+export function Field({ label, mono, className, type, ...props }: FieldProps) {
+  const [revealed, setRevealed] = useState(false);
+  const isPassword = type === 'password';
+  const inputType = isPassword && revealed ? 'text' : type;
+
   return (
     <label className="block">
       <span className="block mb-1.5 text-[12px] font-medium text-ink-dim">{label}</span>
-      <input
-        className={`w-full rounded-md border border-line bg-card px-3 py-2 text-[13.5px] text-ink outline-none transition-all placeholder:text-ink-faint focus:border-accent/60 focus:ring-2 focus:ring-accent/15 disabled:opacity-50 ${
-          mono ? 'font-mono' : ''
-        } ${className || ''}`}
-        {...props}
-      />
+      <div className="relative">
+        <input
+          type={inputType}
+          className={`w-full rounded-md border border-line bg-card px-3 py-2 text-[13.5px] text-ink outline-none transition-all placeholder:text-ink-faint focus:border-accent/60 focus:ring-2 focus:ring-accent/15 disabled:opacity-50 ${
+            mono ? 'font-mono' : ''
+          } ${isPassword ? 'pr-10' : ''} ${className || ''}`}
+          {...props}
+        />
+        {isPassword && (
+          <button
+            type="button"
+            tabIndex={-1}
+            onClick={() => setRevealed((v) => !v)}
+            aria-label={revealed ? '隐藏' : '显示'}
+            className="absolute right-2 top-1/2 -translate-y-1/2 grid h-7 w-7 place-items-center rounded text-ink-faint hover:text-ink hover:bg-elevated"
+          >
+            {revealed ? <EyeOff size={15} /> : <Eye size={15} />}
+          </button>
+        )}
+      </div>
     </label>
   );
 }

@@ -4,7 +4,7 @@ import { Button } from '../components/common/Button';
 import { Spinner } from '../components/common/Spinner';
 import { PageHeader } from '../components/common/PageHeader';
 import { Modal, Field, ConfirmDialog } from '../components/common/Modal';
-import { Plus, Pencil, Trash2, Check, Layers, Search, Copy } from 'lucide-react';
+import { Plus, Pencil, Trash2, Check, Layers, Search, Copy, Eye, EyeOff } from 'lucide-react';
 import type { ApiProfile, FetchedModel, StatusInfo, TargetApp } from '../types';
 import { SUPPORTED_TOOLS, toolById } from '../types';
 import { cn, maskApiKey } from '../lib/utils';
@@ -256,6 +256,7 @@ function ProfileCard({
   onSwitch: () => void;
 }) {
   const tint = providerTint(profile.provider);
+  const [keyRevealed, setKeyRevealed] = useState(false);
 
   return (
     <div
@@ -286,7 +287,19 @@ function ProfileCard({
           </div>
           <div className="mt-1 flex items-center gap-3 text-[12px] text-ink-dim">
             <span className="truncate font-mono">{profile.api_url}</span>
-            <span className="shrink-0 font-mono text-ink-faint">{maskApiKey(profile.api_key)}</span>
+            <span className="inline-flex shrink-0 items-center gap-1 font-mono text-ink-faint">
+              <span className="break-all">{keyRevealed ? profile.api_key : maskApiKey(profile.api_key)}</span>
+              {profile.api_key && (
+                <button
+                  type="button"
+                  onClick={() => setKeyRevealed((v) => !v)}
+                  aria-label={keyRevealed ? '隐藏 Key' : '显示 Key'}
+                  className="grid h-5 w-5 place-items-center rounded text-ink-faint hover:text-ink hover:bg-elevated"
+                >
+                  {keyRevealed ? <EyeOff size={13} /> : <Eye size={13} />}
+                </button>
+              )}
+            </span>
           </div>
         </div>
 
