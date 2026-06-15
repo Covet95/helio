@@ -157,7 +157,35 @@ impl ConfigAdapter for OpenCodeAdapter {
                         serde_json::Value::String(api_profile.api_url.clone()),
                     );
                 }
+
+                // 默认模型：profile 设了 model 时，确保它在 provider 的 models 里
+                // 声明（否则 OpenCode 选不到该模型），并设顶层 model = provider/model。
+                if let Some(model) = api_profile
+                    .model
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|m| !m.is_empty())
+                {
+                    let models = p
+                        .entry("models".to_string())
+                        .or_insert_with(|| serde_json::json!({}));
+                    if let Some(models_obj) = models.as_object_mut() {
+                        models_obj
+                            .entry(model.to_string())
+                            .or_insert_with(|| serde_json::json!({ "name": model }));
+                    }
+                }
             }
+        }
+
+        // 顶层 model 指定默认模型，格式 provider/model（OpenCode 要求）。
+        if let Some(model) = api_profile
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+        {
+            config["model"] = serde_json::Value::String(format!("{provider_id}/{model}"));
         }
 
         config
@@ -315,6 +343,29 @@ mod tests {
         // 共享配置保留
         assert_eq!(merged["mcp"]["fs"]["type"], "local");
         assert_eq!(merged["permission"]["edit"], "ask");
+    }
+
+    #[test]
+    fn test_merge_writes_default_model() {
+        let adapter = OpenCodeAdapter::new();
+        let profile = ApiProfile {
+            model: Some("claude-opus-4-8".to_string()),
+            ..sample_profile()
+        };
+        let merged = adapter.merge_config(&profile, &serde_json::json!({}));
+
+        // 顶层 model = provider/model
+        assert_eq!(merged["model"], "anthropic/claude-opus-4-8");
+        // provider 的 models 声明了该模型（否则 OpenCode 选不到）
+        assert!(merged["provider"]["anthropic"]["models"]["claude-opus-4-8"].is_object());
+    }
+
+    #[test]
+    fn test_merge_no_model_omits_top_level_model() {
+        let adapter = OpenCodeAdapter::new();
+        // sample_profile 不带 model
+        let merged = adapter.merge_config(&sample_profile(), &serde_json::json!({}));
+        assert!(merged.get("model").is_none(), "未设 model 时不应写顶层 model");
     }
 
     #[test]

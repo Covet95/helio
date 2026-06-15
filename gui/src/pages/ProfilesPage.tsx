@@ -407,7 +407,7 @@ function ProfileModal({
   };
 
   const presets = PROVIDER_PRESETS[tool];
-  const showModelParams = tool === 'codex' || tool === 'claude-code';
+  const showModelParams = tool === 'codex' || tool === 'claude-code' || tool === 'opencode';
 
   const applyPreset = (p: typeof presets[number]) => {
     setForm((f) => ({
