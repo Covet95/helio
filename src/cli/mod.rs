@@ -468,14 +468,19 @@ fn cmd_import(input: PathBuf, db_path: &PathBuf, force: bool) -> Result<()> {
         anyhow::bail!("输入文件不存在: {}", input.display());
     }
 
-    // 备份现有数据库
-    if db_path.exists() && !force {
-        if !utils::confirm("将覆盖现有数据库，是否继续？")? {
+    // 覆盖现有数据库前，先验证输入文件是合法 SQLite 库，
+    // 避免选错文件（损坏/非数据库）时把现有数据覆盖掉才发现。
+    Database::open(&input).map_err(|e| anyhow::anyhow!("输入文件不是合法的数据库: {}", e))?;
+
+    if db_path.exists() {
+        if !force && !utils::confirm("将覆盖现有数据库，是否继续？")? {
             utils::info("已取消");
             return Ok(());
         }
 
-        let backup = db_path.with_extension("backup");
+        // 备份带时间戳，保留历史备份不互相覆盖；即使 --force 也始终备份以便回退。
+        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+        let backup = db_path.with_file_name(format!("db.backup.{}.sqlite", timestamp));
         std::fs::copy(db_path, &backup)?;
         utils::success(&format!("已备份现有数据库到: {}", backup.display()));
     }
