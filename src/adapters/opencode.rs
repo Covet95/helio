@@ -81,6 +81,43 @@ impl OpenCodeAdapter {
             api_profile.provider.to_lowercase()
         }
     }
+
+    /// 把单个 Claude MCP server 转成 OpenCode 格式。
+    /// 既无 command 又无 url → 无法转换，返回 None（跳过该项）。
+    /// 丢弃 OpenCode 不认的字段（type/alwaysAllow/startup_timeout_sec/未知项）。
+    fn convert_one_server(server: &serde_json::Value) -> Option<serde_json::Value> {
+        let obj = server.as_object()?;
+        let mut out = serde_json::Map::new();
+
+        if let Some(url) = obj.get("url").and_then(|v| v.as_str()) {
+            // 远程型
+            out.insert("type".into(), serde_json::Value::String("remote".into()));
+            out.insert("url".into(), serde_json::Value::String(url.to_string()));
+        } else if let Some(command) = obj.get("command").and_then(|v| v.as_str()) {
+            // 本地型：command(字符串) + args(数组) → command(数组)
+            let mut cmd = vec![serde_json::Value::String(command.to_string())];
+            if let Some(args) = obj.get("args").and_then(|v| v.as_array()) {
+                cmd.extend(args.iter().cloned());
+            }
+            out.insert("type".into(), serde_json::Value::String("local".into()));
+            out.insert("command".into(), serde_json::Value::Array(cmd));
+            // env → environment（仅非空对象）
+            if let Some(env) = obj.get("env").and_then(|v| v.as_object()) {
+                if !env.is_empty() {
+                    out.insert(
+                        "environment".into(),
+                        serde_json::Value::Object(env.clone()),
+                    );
+                }
+            }
+        } else {
+            // 既无 url 又无 command：无法转换
+            return None;
+        }
+
+        out.insert("enabled".into(), serde_json::Value::Bool(true));
+        Some(serde_json::Value::Object(out))
+    }
 }
 
 impl ConfigAdapter for OpenCodeAdapter {
@@ -512,5 +549,65 @@ mod tests {
         assert_eq!(merged["provider"]["openai"]["options"]["timeout"], 5000);
         // 新 provider 已添加
         assert_eq!(merged["provider"]["anthropic"]["options"]["apiKey"], "sk-test-key");
+    }
+
+    #[test]
+    fn test_convert_stdio_server() {
+        let claude = serde_json::json!({
+            "type": "stdio",
+            "command": "npx",
+            "args": ["-y", "pkg"],
+            "env": { "K": "v" }
+        });
+        let out = OpenCodeAdapter::convert_one_server(&claude).unwrap();
+        assert_eq!(out["type"], "local");
+        assert_eq!(out["command"], serde_json::json!(["npx", "-y", "pkg"]));
+        assert_eq!(out["environment"]["K"], "v");
+        assert_eq!(out["enabled"], true);
+        assert!(out.get("args").is_none());
+    }
+
+    #[test]
+    fn test_convert_command_only() {
+        let claude = serde_json::json!({ "command": "foo" });
+        let out = OpenCodeAdapter::convert_one_server(&claude).unwrap();
+        assert_eq!(out["command"], serde_json::json!(["foo"]));
+        assert_eq!(out["type"], "local");
+    }
+
+    #[test]
+    fn test_convert_empty_env_omitted() {
+        let claude = serde_json::json!({ "command": "foo", "env": {} });
+        let out = OpenCodeAdapter::convert_one_server(&claude).unwrap();
+        assert!(out.get("environment").is_none(), "空 env 不应写 environment");
+    }
+
+    #[test]
+    fn test_convert_remote_server() {
+        let claude = serde_json::json!({ "type": "sse", "url": "https://x/mcp" });
+        let out = OpenCodeAdapter::convert_one_server(&claude).unwrap();
+        assert_eq!(out["type"], "remote");
+        assert_eq!(out["url"], "https://x/mcp");
+        assert_eq!(out["enabled"], true);
+    }
+
+    #[test]
+    fn test_convert_drops_claude_specific_fields() {
+        let claude = serde_json::json!({
+            "command": "npx",
+            "args": ["chrome-devtools-mcp@latest"],
+            "alwaysAllow": ["navigate_page", "click"],
+            "startup_timeout_sec": 120
+        });
+        let out = OpenCodeAdapter::convert_one_server(&claude).unwrap();
+        assert!(out.get("alwaysAllow").is_none());
+        assert!(out.get("startup_timeout_sec").is_none());
+        assert_eq!(out["command"], serde_json::json!(["npx", "chrome-devtools-mcp@latest"]));
+    }
+
+    #[test]
+    fn test_convert_no_command_no_url_skipped() {
+        let claude = serde_json::json!({ "env": { "K": "v" } });
+        assert!(OpenCodeAdapter::convert_one_server(&claude).is_none());
     }
 }
