@@ -31,8 +31,8 @@ export default function ProfilesPage() {
   const activeProfile = activeProfileFor(status, targetApp);
   const normalizedQuery = query.trim().toLowerCase();
   const toolProfiles = useMemo(() => {
-    // 只看当前工具可见的档案：当前工具绑定的 + 通用档案
-    return profiles.filter((p) => !p.target_app || p.target_app === targetApp);
+    // 只看当前工具绑定的档案（每条档案必须明确归属某工具，无"通用"）
+    return profiles.filter((p) => p.target_app === targetApp);
   }, [profiles, targetApp]);
   const filteredProfiles = useMemo(() => {
     let list = toolProfiles;

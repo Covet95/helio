@@ -92,10 +92,10 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             .find(|(t, _)| *t == tool)
             .and_then(|(_, id)| *id);
 
-        // 该工具下的 profiles：target_app == tool 或 None(通用)
+        // 该工具下的 profiles（每条 profile 必须明确归属某工具，无"通用"）
         let items: Vec<CheckMenuItem<tauri::Wry>> = profiles
             .iter()
-            .filter(|p| p.target_app == Some(tool) || p.target_app.is_none())
+            .filter(|p| p.target_app == Some(tool))
             .map(|p| {
                 let checked = is_active(p.id, active_id);
                 CheckMenuItem::with_id(
