@@ -101,19 +101,10 @@ impl ConfigAdapter for OpenCodeAdapter {
     }
 
     fn extract_shared_config(&self, config: &serde_json::Value) -> serde_json::Value {
-        let mut shared = config.clone();
-
-        // 移除每个 provider 的 options.apiKey 和 options.baseURL（API 凭据）
-        if let Some(providers) = shared.get_mut("provider").and_then(|v| v.as_object_mut()) {
-            for (_id, provider) in providers.iter_mut() {
-                if let Some(options) = provider.get_mut("options").and_then(|v| v.as_object_mut()) {
-                    options.remove("apiKey");
-                    options.remove("baseURL");
-                }
-            }
-        }
-
-        shared
+        // OpenCode 多 provider 共存：保留所有 provider（含各自凭据），
+        // 这样切换某个 provider 时，其他 provider 仍然可用。
+        // 切换逻辑只在 merge_config 里更新「当前 provider」的凭据 + 顶层默认 model。
+        config.clone()
     }
 
     fn merge_config(
@@ -195,13 +186,33 @@ impl ConfigAdapter for OpenCodeAdapter {
         }
 
         // 顶层 model 指定默认模型，格式 provider/model（OpenCode 要求）。
-        if let Some(model) = api_profile
+        // 规则：① 有 model → provider/model；② 无 model 有 models[0] → provider/models[0]；
+        // ③ 都没有 → 删掉顶层 model（不留指向旧/失效 provider 的脏值，让 OpenCode 用内置默认）。
+        let default_model = api_profile
             .model
             .as_deref()
             .map(str::trim)
             .filter(|m| !m.is_empty())
-        {
-            config["model"] = serde_json::Value::String(format!("{provider_id}/{model}"));
+            .map(|m| m.to_string())
+            .or_else(|| {
+                api_profile.models.as_ref().and_then(|list| {
+                    list.iter()
+                        .map(|m| m.trim())
+                        .find(|m| !m.is_empty())
+                        .map(|m| m.to_string())
+                })
+            });
+
+        match default_model {
+            Some(model) => {
+                config["model"] = serde_json::Value::String(format!("{provider_id}/{model}"));
+            }
+            None => {
+                // 没有可指定的模型：移除顶层 model，避免指向已切走/失效的 provider
+                if let Some(obj) = config.as_object_mut() {
+                    obj.remove("model");
+                }
+            }
         }
 
         config
@@ -303,7 +314,9 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_shared_removes_api() {
+    fn test_extract_shared_preserves_provider_creds() {
+        // 方向 B（多 provider 共存）：extract 保留所有 provider 的凭据，
+        // 否则共存的其他 provider 会变成空凭据的坏 provider。
         let adapter = OpenCodeAdapter::new();
         let config = serde_json::json!({
             "provider": {
@@ -322,15 +335,64 @@ mod tests {
 
         let shared = adapter.extract_shared_config(&config);
 
-        // API 字段被移除
-        assert!(shared["provider"]["anthropic"]["options"].get("apiKey").is_none());
-        assert!(shared["provider"]["anthropic"]["options"].get("baseURL").is_none());
-        // 非 API option 保留
+        // 凭据被保留（共存 provider 仍可用）
+        assert_eq!(shared["provider"]["anthropic"]["options"]["apiKey"], "sk-secret");
+        assert_eq!(shared["provider"]["anthropic"]["options"]["baseURL"], "https://api.com");
         assert_eq!(shared["provider"]["anthropic"]["options"]["timeout"], 30000);
-        // 共享配置保留
+        // 其余配置原样保留
         assert_eq!(shared["provider"]["anthropic"]["name"], "Anthropic");
         assert_eq!(shared["mcp"]["fs"]["type"], "local");
         assert_eq!(shared["permission"]["edit"], "ask");
+    }
+
+    #[test]
+    fn test_merge_coexist_preserves_other_provider_creds() {
+        // 切换到 anthropic 时，已存在的 cpa provider 的凭据必须原样保留（共存可用）
+        let adapter = OpenCodeAdapter::new();
+        let shared = serde_json::json!({
+            "provider": {
+                "cpa": {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "name": "cpa",
+                    "models": { "claude-opus-4-8": { "name": "claude-opus-4-8" } },
+                    "options": { "apiKey": "sk-cpa", "baseURL": "http://127.0.0.1:8317/v1" }
+                }
+            }
+        });
+
+        let merged = adapter.merge_config(&sample_profile(), &shared);
+
+        // 新 provider anthropic 写入
+        assert_eq!(merged["provider"]["anthropic"]["options"]["apiKey"], "sk-test-key");
+        // 旧 provider cpa 凭据原样保留，不被清空
+        assert_eq!(merged["provider"]["cpa"]["options"]["apiKey"], "sk-cpa");
+        assert_eq!(merged["provider"]["cpa"]["options"]["baseURL"], "http://127.0.0.1:8317/v1");
+    }
+
+    #[test]
+    fn test_merge_no_model_removes_stale_top_level_model() {
+        // profile 无 model 也无 models：删掉顶层旧 model（用户选项：用 OpenCode 内置默认）
+        let adapter = OpenCodeAdapter::new();
+        let shared = serde_json::json!({ "model": "cpa/claude-opus-4-8" });
+        // sample_profile 不带 model/models
+        let merged = adapter.merge_config(&sample_profile(), &shared);
+        assert!(
+            merged.get("model").is_none(),
+            "无模型时应删掉顶层旧 model，实得 {:?}",
+            merged.get("model")
+        );
+    }
+
+    #[test]
+    fn test_merge_uses_first_models_when_no_default() {
+        // 无 model 但有 models：顶层用 provider/models[0]
+        let adapter = OpenCodeAdapter::new();
+        let profile = ApiProfile {
+            models: Some(vec!["claude-sonnet-4-6".to_string(), "claude-haiku-4-5".to_string()]),
+            ..sample_profile()
+        };
+        let merged = adapter.merge_config(&profile, &serde_json::json!({}));
+        assert_eq!(merged["model"], "anthropic/claude-sonnet-4-6");
     }
 
     #[test]
