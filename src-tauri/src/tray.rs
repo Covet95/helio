@@ -162,6 +162,14 @@ fn fallback_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     )
 }
 
+/// 显示并聚焦主窗口（点状态栏图标 / 「打开 Helio」时用）。
+fn show_main_window(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
