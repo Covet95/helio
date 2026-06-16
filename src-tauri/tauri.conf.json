@@ -12,6 +12,7 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Helio",
         "width": 900,
         "height": 650,
@@ -21,6 +22,12 @@
         "fullscreen": false
       }
     ],
+    "trayIcon": {
+      "id": "helio-tray",
+      "iconPath": "icons/icon.png",
+      "iconAsTemplate": true,
+      "tooltip": "Helio"
+    },
     "security": {
       "csp": null
     }
