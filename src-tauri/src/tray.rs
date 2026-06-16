@@ -4,6 +4,10 @@ use crate::commands::AppState;
 use crate::models::ApiProfile;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Manager};
+use crate::commands::apply_profile_config;
+use serde_json::json;
+use tauri::Emitter;
+use tauri_plugin_notification::NotificationExt;
 
 /// 固定菜单项 id（事件处理器按字符串匹配，集中定义避免拼写漂移）。
 const OPEN_WINDOW_ID: &str = "open_window";
@@ -167,6 +171,45 @@ fn show_main_window(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.show();
         let _ = win.set_focus();
+    }
+}
+
+/// 执行一次切换：复用 apply_profile_config + 更新 active + emit 事件 + 弹通知。
+/// 出错时只弹错误通知，不 panic、不动菜单。
+fn do_switch(app: &AppHandle, tool: TargetApp, profile_name: &str) {
+    let result: Result<(), String> = (|| {
+        let state = app.state::<AppState>();
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        let profile = db.get_profile_by_name(profile_name).map_err(|e| e.to_string())?;
+        apply_profile_config(&db, tool, &profile)?;
+        let id = profile.id.ok_or_else(|| "profile 无 id".to_string())?;
+        db.set_active_profile(tool, id).map_err(|e| e.to_string())?;
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            // 通知前端刷新当前状态
+            let _ = app.emit(
+                "profile-switched",
+                json!({ "tool": tool.as_str(), "profile_name": profile_name }),
+            );
+            // 原生通知
+            let _ = app
+                .notification()
+                .builder()
+                .title("Helio")
+                .body(format!("已切换 {} → {}", tool_display_name(tool), profile_name))
+                .show();
+        }
+        Err(e) => {
+            let _ = app
+                .notification()
+                .builder()
+                .title("Helio 切换失败")
+                .body(format!("{} → {}：{}", tool_display_name(tool), profile_name, e))
+                .show();
+        }
     }
 }
 
