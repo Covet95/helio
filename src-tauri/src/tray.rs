@@ -13,6 +13,8 @@ use tauri_plugin_notification::NotificationExt;
 /// 固定菜单项 id（事件处理器按字符串匹配，集中定义避免拼写漂移）。
 const OPEN_WINDOW_ID: &str = "open_window";
 const QUIT_ID: &str = "quit";
+/// 状态栏图标 id（注册与查找须一致；与 tauri.conf.json 的 trayIcon.id 对应）。
+const TRAY_ID: &str = "helio-tray";
 
 /// 切换菜单项 id 格式：switch::<tool>::<profile_name>
 /// profile 名可能含 "::"，解析时从左切 2 段，名字取剩余全部。
@@ -220,9 +222,9 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let icon = app
         .default_window_icon()
         .cloned()
-        .expect("default window icon missing");
+        .expect("default window icon missing"); // 图标随 bundle 固定打包，缺失即配置错误
 
-    TrayIconBuilder::with_id("helio-tray")
+    TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon)
         .tooltip("Helio")
         .menu(&menu)
@@ -266,7 +268,7 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 
 /// 重建 tray 菜单（切换后 / 点开窗口时）。失败则忽略，保持旧菜单。
 fn rebuild_tray_menu(app: &AppHandle) {
-    if let Some(tray) = app.tray_by_id("helio-tray") {
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
         if let Ok(menu) = build_menu(app) {
             let _ = tray.set_menu(Some(menu));
         }
