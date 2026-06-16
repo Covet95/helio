@@ -3,6 +3,7 @@ use crate::models::TargetApp;
 use crate::commands::AppState;
 use crate::models::ApiProfile;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::tray::{TrayIconBuilder, TrayIconEvent, MouseButton, MouseButtonState};
 use tauri::{AppHandle, Manager};
 use crate::commands::apply_profile_config;
 use serde_json::json;
@@ -209,6 +210,65 @@ fn do_switch(app: &AppHandle, tool: TargetApp, profile_name: &str) {
                 .title("Helio 切换失败")
                 .body(format!("{} → {}：{}", tool_display_name(tool), profile_name, e))
                 .show();
+        }
+    }
+}
+
+/// 应用启动时建状态栏图标。挂菜单 + 事件处理器。
+pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
+    let menu = build_menu(app)?;
+    let icon = app
+        .default_window_icon()
+        .cloned()
+        .expect("default window icon missing");
+
+    TrayIconBuilder::with_id("helio-tray")
+        .icon(icon)
+        .tooltip("Helio")
+        .menu(&menu)
+        .on_menu_event(|app, event| {
+            let id = event.id.as_ref();
+            match id {
+                OPEN_WINDOW_ID => {
+                    show_main_window(app);
+                    // 点开时刷新菜单（满足需求：GUI 改动后下次点开刷新）
+                    rebuild_tray_menu(app);
+                }
+                QUIT_ID => {
+                    app.exit(0);
+                }
+                other => {
+                    if let Some((tool, name)) = parse_switch_id(other) {
+                        do_switch(app, tool, &name);
+                        // 切换后重建菜单：勾选移到新 profile
+                        rebuild_tray_menu(app);
+                    }
+                    // 其它(占位项 empty::* / 子菜单容器 tool::* 等)忽略
+                }
+            }
+        })
+        .on_tray_icon_event(|tray, event| {
+            // 左键单击图标：显示窗口
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                let app = tray.app_handle();
+                show_main_window(app);
+            }
+        })
+        .build(app)?;
+
+    Ok(())
+}
+
+/// 重建 tray 菜单（切换后 / 点开窗口时）。失败则忽略，保持旧菜单。
+fn rebuild_tray_menu(app: &AppHandle) {
+    if let Some(tray) = app.tray_by_id("helio-tray") {
+        if let Ok(menu) = build_menu(app) {
+            let _ = tray.set_menu(Some(menu));
         }
     }
 }
