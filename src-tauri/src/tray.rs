@@ -216,16 +216,65 @@ fn do_switch(app: &AppHandle, tool: TargetApp, profile_name: &str) {
     }
 }
 
+/// 生成状态栏用的「太阳」模板图标（实心圆芯 + 8 道细长光芒）。
+/// 纯黑像素 + 透明背景：配合 icon_as_template(true)，macOS 按主题自动反色。
+/// 代码生成，不依赖图片文件。参数与设计原型一致（变体 B）。
+fn sun_icon() -> tauri::image::Image<'static> {
+    const S: u32 = 44;
+    const CORE_R: f32 = 7.5;
+    const RAY_INNER: f32 = 12.0;
+    const RAY_OUTER: f32 = 20.5;
+    const RAY_HALF: f32 = 1.6;
+    const N_RAYS: u32 = 8;
+
+    let cx = (S as f32 - 1.0) / 2.0;
+    let cy = (S as f32 - 1.0) / 2.0;
+
+    // 线性渐变：x 从 e0 过渡到 e1 时，返回 0→1（用于 1px 抗锯齿边）
+    let ramp = |e0: f32, e1: f32, x: f32| -> f32 { ((x - e0) / (e1 - e0)).clamp(0.0, 1.0) };
+
+    let mut rgba = vec![0u8; (S * S * 4) as usize];
+    for y in 0..S {
+        for x in 0..S {
+            let dx = x as f32 - cx;
+            let dy = y as f32 - cy;
+            let dist = dx.hypot(dy);
+
+            // 圆芯
+            let mut a = ramp(CORE_R + 0.6, CORE_R - 0.6, dist);
+
+            // 8 道光芒
+            let ang = dy.atan2(dx);
+            for k in 0..N_RAYS {
+                let ra = (k as f32 / N_RAYS as f32) * std::f32::consts::TAU;
+                let mut da = ang - ra;
+                // 归一到 [-PI, PI]
+                da = da.sin().atan2(da.cos());
+                let perp = da.sin().abs() * dist; // 到光芒中心线的垂直距离
+                let along = da.cos() * dist; // 沿光芒方向的投影
+                if along > 0.0 {
+                    let band = ramp(RAY_INNER - 0.6, RAY_INNER + 0.6, along)
+                        * ramp(RAY_OUTER + 0.6, RAY_OUTER - 0.6, along);
+                    let wid = ramp(RAY_HALF + 0.6, RAY_HALF - 0.6, perp);
+                    a = a.max(band * wid);
+                }
+            }
+
+            let i = ((y * S + x) * 4) as usize;
+            // 黑色 + 可变 alpha
+            rgba[i + 3] = (a * 255.0).round() as u8;
+        }
+    }
+
+    tauri::image::Image::new_owned(rgba, S, S)
+}
+
 /// 应用启动时建状态栏图标。挂菜单 + 事件处理器。
 pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let menu = build_menu(app)?;
-    let icon = app
-        .default_window_icon()
-        .cloned()
-        .expect("default window icon missing"); // 图标随 bundle 固定打包，缺失即配置错误
 
     TrayIconBuilder::with_id(TRAY_ID)
-        .icon(icon)
+        .icon(sun_icon())
         .icon_as_template(true)
         .tooltip("Helio")
         .menu(&menu)
@@ -325,5 +374,27 @@ mod tests {
         assert!(!is_active(Some(3), Some(4)));
         assert!(!is_active(Some(3), None)); // 该工具没有 active
         assert!(!is_active(None, Some(3))); // profile 无 id
+    }
+
+    #[test]
+    fn test_sun_icon_valid() {
+        let img = sun_icon();
+        // 44x44 RGBA
+        assert_eq!(img.width(), 44);
+        assert_eq!(img.height(), 44);
+        let rgba = img.rgba();
+        assert_eq!(rgba.len(), 44 * 44 * 4);
+        // 颜色通道恒为黑（仅 alpha 变化）
+        assert!(rgba.chunks(4).all(|p| p[0] == 0 && p[1] == 0 && p[2] == 0));
+        // 既有不透明像素（图形），也有透明像素（背景）——不是全黑块、也不是全空
+        let opaque = rgba.chunks(4).filter(|p| p[3] == 255).count();
+        let transparent = rgba.chunks(4).filter(|p| p[3] == 0).count();
+        assert!(opaque > 50, "应有足够的实心像素，实得 {opaque}");
+        assert!(transparent > 200, "应有大片透明背景，实得 {transparent}");
+        // 正中心（圆芯）必须不透明
+        let center = ((22 * 44 + 22) * 4) as usize;
+        assert_eq!(rgba[center + 3], 255, "圆芯中心应为实心");
+        // 四角必须透明（光芒不会到角）
+        assert_eq!(rgba[3], 0, "左上角应透明");
     }
 }
