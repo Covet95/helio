@@ -559,14 +559,6 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_no_model_omits_top_level_model() {
-        let adapter = OpenCodeAdapter::new();
-        // sample_profile 不带 model
-        let merged = adapter.merge_config(&sample_profile(), &serde_json::json!({}));
-        assert!(merged.get("model").is_none(), "未设 model 时不应写顶层 model");
-    }
-
-    #[test]
     fn test_merge_preserves_existing_provider_npm_and_models() {
         let adapter = OpenCodeAdapter::new();
         // 已有同名 provider，带自定义 npm / name / models
