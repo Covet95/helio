@@ -31,16 +31,68 @@ pub struct DatabaseInfo {
     pub path: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 pub struct McpServerConfig {
-    #[serde(default)]
     pub command: String,
-    #[serde(default)]
     pub args: Vec<String>,
-    #[serde(default)]
     pub url: Option<String>,
-    #[serde(default)]
     pub env: Option<std::collections::HashMap<String, String>>,
+}
+
+// 反序列化中间体：command 可为字符串(Claude)或数组(OpenCode)，
+// env(Claude) 或 environment(OpenCode) 都接受。其它字段忽略。
+#[derive(Deserialize)]
+struct RawMcpServer {
+    #[serde(default)]
+    command: Option<serde_json::Value>,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    env: Option<std::collections::HashMap<String, String>>,
+    #[serde(default)]
+    environment: Option<std::collections::HashMap<String, String>>,
+}
+
+impl<'de> Deserialize<'de> for McpServerConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawMcpServer::deserialize(deserializer)?;
+
+        // command 归一化：数组 → 第一个元素当 command，其余并入 args 前面；
+        // 字符串 → 直接当 command；缺失 → 空。
+        let (command, mut args) = match raw.command {
+            Some(serde_json::Value::String(s)) => (s, Vec::new()),
+            Some(serde_json::Value::Array(arr)) => {
+                let mut parts: Vec<String> = arr
+                    .into_iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect();
+                if parts.is_empty() {
+                    (String::new(), Vec::new())
+                } else {
+                    let cmd = parts.remove(0);
+                    (cmd, parts)
+                }
+            }
+            _ => (String::new(), Vec::new()),
+        };
+        // raw.args 接在数组拆出的 args 之后（Claude 情形 parts 为空，等于只有 raw.args）
+        args.extend(raw.args);
+
+        // env 优先 env(Claude)，否则 environment(OpenCode)
+        let env = raw.env.or(raw.environment);
+
+        Ok(McpServerConfig {
+            command,
+            args,
+            url: raw.url,
+            env,
+        })
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -791,5 +843,61 @@ fn parse_cc_provider(
             (url, key, "anthropic".to_string(), None, None, false)
         }
         _ => (String::new(), String::new(), "custom".to_string(), None, None, false),
+    }
+}
+
+#[cfg(test)]
+mod mcp_config_tests {
+    use super::McpServerConfig;
+
+    #[test]
+    fn test_opencode_array_command_normalized() {
+        let v = serde_json::json!({
+            "type": "local",
+            "command": ["npx", "-y", "pkg"],
+            "environment": { "K": "v" },
+            "enabled": true
+        });
+        let cfg: McpServerConfig = serde_json::from_value(v).unwrap();
+        assert_eq!(cfg.command, "npx");
+        assert_eq!(cfg.args, vec!["-y", "pkg"]);
+        assert_eq!(cfg.env.unwrap().get("K").unwrap(), "v");
+    }
+
+    #[test]
+    fn test_claude_string_command_unchanged() {
+        let v = serde_json::json!({
+            "type": "stdio",
+            "command": "npx",
+            "args": ["-y", "pkg"],
+            "env": { "K": "v" }
+        });
+        let cfg: McpServerConfig = serde_json::from_value(v).unwrap();
+        assert_eq!(cfg.command, "npx");
+        assert_eq!(cfg.args, vec!["-y", "pkg"]);
+        assert_eq!(cfg.env.unwrap().get("K").unwrap(), "v");
+    }
+
+    #[test]
+    fn test_remote_url_only() {
+        let v = serde_json::json!({ "type": "remote", "url": "https://x/mcp", "enabled": true });
+        let cfg: McpServerConfig = serde_json::from_value(v).unwrap();
+        assert_eq!(cfg.command, "");
+        assert!(cfg.args.is_empty());
+        assert_eq!(cfg.url.unwrap(), "https://x/mcp");
+    }
+
+    #[test]
+    fn test_map_of_opencode_servers_deserializes() {
+        let v = serde_json::json!({
+            "playwright": { "type": "local", "command": ["npx", "@playwright/mcp@latest"], "enabled": true },
+            "github": { "type": "remote", "url": "https://api.githubcopilot.com/mcp/", "enabled": true }
+        });
+        let map: std::collections::HashMap<String, McpServerConfig> =
+            serde_json::from_value(v).unwrap();
+        assert_eq!(map.len(), 2);
+        assert_eq!(map["playwright"].command, "npx");
+        assert_eq!(map["playwright"].args, vec!["@playwright/mcp@latest"]);
+        assert_eq!(map["github"].url.as_deref(), Some("https://api.githubcopilot.com/mcp/"));
     }
 }
