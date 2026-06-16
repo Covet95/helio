@@ -188,6 +188,9 @@ impl Database {
     }
 
     /// 更新 API Profile
+    ///
+    /// 按 `id` 定位记录（而非 name），因此**支持改名**。
+    /// id 为空时回退到按旧 name 定位（理论上现有 profile 都带 id）。
     pub fn update_profile(&self, profile: &ApiProfile) -> Result<()> {
         let now = chrono::Utc::now().timestamp();
         let model_mapping_json = profile
@@ -201,23 +204,48 @@ impl Database {
             .map(serde_json::to_string)
             .transpose()?;
 
-        self.conn.execute(
-            "UPDATE api_profiles SET provider = ?1, api_url = ?2, api_key = ?3,
-             model_mapping = ?4, model = ?5, reasoning_effort = ?6, context_1m = ?7, target_app = ?8, models = ?9, updated_at = ?10 WHERE name = ?11",
-            params![
-                &profile.provider,
-                &profile.api_url,
-                &profile.api_key,
-                model_mapping_json,
-                &profile.model,
-                &profile.reasoning_effort,
-                profile.context_1m.map(|b| b as i64),
-                profile.target_app.as_ref().map(|t| t.as_str()),
-                models_json,
-                now,
-                &profile.name
-            ],
-        )?;
+        match profile.id {
+            Some(id) => {
+                self.conn.execute(
+                    "UPDATE api_profiles SET name = ?1, provider = ?2, api_url = ?3, api_key = ?4,
+                     model_mapping = ?5, model = ?6, reasoning_effort = ?7, context_1m = ?8, target_app = ?9, models = ?10, updated_at = ?11 WHERE id = ?12",
+                    params![
+                        &profile.name,
+                        &profile.provider,
+                        &profile.api_url,
+                        &profile.api_key,
+                        model_mapping_json,
+                        &profile.model,
+                        &profile.reasoning_effort,
+                        profile.context_1m.map(|b| b as i64),
+                        profile.target_app.as_ref().map(|t| t.as_str()),
+                        models_json,
+                        now,
+                        id
+                    ],
+                )?;
+            }
+            None => {
+                // 无 id：按 name 定位，不改名
+                self.conn.execute(
+                    "UPDATE api_profiles SET provider = ?1, api_url = ?2, api_key = ?3,
+                     model_mapping = ?4, model = ?5, reasoning_effort = ?6, context_1m = ?7, target_app = ?8, models = ?9, updated_at = ?10 WHERE name = ?11",
+                    params![
+                        &profile.provider,
+                        &profile.api_url,
+                        &profile.api_key,
+                        model_mapping_json,
+                        &profile.model,
+                        &profile.reasoning_effort,
+                        profile.context_1m.map(|b| b as i64),
+                        profile.target_app.as_ref().map(|t| t.as_str()),
+                        models_json,
+                        now,
+                        &profile.name
+                    ],
+                )?;
+            }
+        }
 
         Ok(())
     }
@@ -422,6 +450,45 @@ mod tests {
         let active = db.get_active_profile(TargetApp::ClaudeCode)?;
         assert!(active.is_some());
         assert_eq!(active.unwrap().profile_id, id);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_profile_can_rename() -> Result<()> {
+        let db = Database::open(":memory:")?;
+
+        let profile = ApiProfile {
+            name: "old-name".to_string(),
+            provider: "anthropic".to_string(),
+            api_url: "https://api.example.com/v1".to_string(),
+            api_key: "sk-old".to_string(),
+            ..Default::default()
+        };
+        let id = db.add_profile(&profile)?;
+        // 标记为某工具的活动 profile（active 表按 id 关联）
+        db.set_active_profile(TargetApp::ClaudeCode, id)?;
+
+        // 改名 + 改 key，带上原 id
+        let edited = ApiProfile {
+            id: Some(id),
+            name: "new-name".to_string(),
+            provider: "anthropic".to_string(),
+            api_url: "https://api.example.com/v1".to_string(),
+            api_key: "sk-new".to_string(),
+            ..Default::default()
+        };
+        db.update_profile(&edited)?;
+
+        // 旧名查不到，新名查得到，且 id 不变、字段已更新
+        assert!(db.get_profile_by_name("old-name").is_err(), "旧名应已不存在");
+        let got = db.get_profile_by_name("new-name")?;
+        assert_eq!(got.id, Some(id), "改名不应改变 id");
+        assert_eq!(got.api_key, "sk-new");
+
+        // active 关联按 id，改名后仍指向同一条
+        let active = db.get_active_profile(TargetApp::ClaudeCode)?;
+        assert_eq!(active.unwrap().profile_id, id, "改名后活动关联应保留");
 
         Ok(())
     }

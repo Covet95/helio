@@ -479,7 +479,7 @@ function ProfileModal({
             </div>
           )}
 
-          <Field label="名称" value={form.name} disabled={!!profile} required
+          <Field label="名称" value={form.name} required
                  onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="my-proxy" />
           <Field label="Provider" value={form.provider} required
                  onChange={(e) => setForm({ ...form, provider: e.target.value })} placeholder="anthropic / openai / google" />
