@@ -96,10 +96,15 @@ export default function ImportPage() {
         provider: api.provider,
         api_url: api.api_url,
         api_key: api.api_key,
+        target_app: tool,
       });
       setFeedback({ text: `已导入为配置档案「${name.trim()}」`, kind: 'success' });
     } catch (e) {
-      setFeedback({ text: '导入失败: ' + e, kind: 'error' });
+      const msg = String(e);
+      const friendly = /UNIQUE constraint failed/i.test(msg)
+        ? `已存在同名档案「${name.trim()}」，请改个名字再导入`
+        : '导入失败: ' + msg;
+      setFeedback({ text: friendly, kind: 'error' });
     }
   };
 
