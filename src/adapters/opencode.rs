@@ -154,6 +154,15 @@ impl OpenCodeAdapter {
             }
         }
     }
+
+    /// 读 ~/.claude.json 的 mcpServers。读不到/解析失败/无该键 → None（不报错）。
+    fn read_claude_mcp_servers() -> Option<serde_json::Value> {
+        let home = dirs::home_dir()?;
+        let path = home.join(".claude.json");
+        let content = fs::read_to_string(&path).ok()?;
+        let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
+        parsed.get("mcpServers").cloned()
+    }
 }
 
 impl ConfigAdapter for OpenCodeAdapter {
@@ -286,6 +295,13 @@ impl ConfigAdapter for OpenCodeAdapter {
                     obj.remove("model");
                 }
             }
+        }
+
+        // 自动同步 Claude 的 MCP（读 ~/.claude.json，转 OpenCode 格式，合并进 config.mcp）。
+        // 读不到 Claude 配置时静默跳过，不影响切换。
+        if let Some(claude_servers) = Self::read_claude_mcp_servers() {
+            let converted = Self::claude_mcp_to_opencode(&claude_servers);
+            Self::merge_mcp_into(&mut config, &converted);
         }
 
         config
