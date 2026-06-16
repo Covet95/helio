@@ -5,6 +5,10 @@ use crate::models::ApiProfile;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Manager};
 
+/// 固定菜单项 id（事件处理器按字符串匹配，集中定义避免拼写漂移）。
+const OPEN_WINDOW_ID: &str = "open_window";
+const QUIT_ID: &str = "quit";
+
 /// 切换菜单项 id 格式：switch::<tool>::<profile_name>
 /// profile 名可能含 "::"，解析时从左切 2 段，名字取剩余全部。
 fn encode_switch_id(tool: TargetApp, profile_name: &str) -> String {
@@ -131,8 +135,8 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     }
 
     let sep = PredefinedMenuItem::separator(app)?;
-    let open = MenuItem::with_id(app, "open_window", "打开 Helio", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+    let open = MenuItem::with_id(app, OPEN_WINDOW_ID, "打开 Helio", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, QUIT_ID, "退出", true, None::<&str>)?;
 
     let mut all: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = Vec::new();
     for s in &submenus {
@@ -147,8 +151,8 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 
 /// 降级菜单：只有「打开 Helio / 退出」。
 fn fallback_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
-    let open = MenuItem::with_id(app, "open_window", "打开 Helio", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+    let open = MenuItem::with_id(app, OPEN_WINDOW_ID, "打开 Helio", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, QUIT_ID, "退出", true, None::<&str>)?;
     Menu::with_items(
         app,
         &[
