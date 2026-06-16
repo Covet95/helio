@@ -38,6 +38,8 @@ pub enum TargetApp {
     ClaudeCode,
     Codex,
     Gemini,
+    // kebab 规则会得到 "open-code"，但全局(as_str/from_str/前端/DB)统一用 "opencode"
+    #[serde(rename = "opencode")]
     OpenCode,
 }
 
@@ -150,6 +152,34 @@ mod tests {
     fn test_new_tools_registered() {
         assert_eq!(TargetApp::from_str("gemini"), Some(TargetApp::Gemini));
         assert_eq!(TargetApp::from_str("opencode"), Some(TargetApp::OpenCode));
+    }
+
+    #[test]
+    fn test_serde_matches_as_str() {
+        // serde 序列化必须与 as_str 一致（前端/DB/IPC 全用同一套字符串）
+        for app in [
+            TargetApp::ClaudeCode,
+            TargetApp::Codex,
+            TargetApp::Gemini,
+            TargetApp::OpenCode,
+        ] {
+            let json = serde_json::to_string(&app).unwrap();
+            assert_eq!(
+                json,
+                format!("\"{}\"", app.as_str()),
+                "{app:?} 的 serde 输出应等于 as_str"
+            );
+            // 反序列化：前端传的字符串（= as_str）必须能解析回来
+            let back: TargetApp =
+                serde_json::from_str(&format!("\"{}\"", app.as_str())).unwrap();
+            assert_eq!(back, app);
+        }
+        // 关键回归：OpenCode 必须是 "opencode"（不是 kebab 的 "open-code"）
+        assert_eq!(
+            serde_json::to_string(&TargetApp::OpenCode).unwrap(),
+            "\"opencode\""
+        );
+        serde_json::from_str::<TargetApp>("\"opencode\"").unwrap();
     }
 
     #[cfg(not(feature = "tauri-gui"))]
