@@ -5,6 +5,7 @@ mod db;
 mod models;
 mod model_fetch;
 mod session_history;
+mod tray;
 
 use commands::AppState;
 use db::Database;
