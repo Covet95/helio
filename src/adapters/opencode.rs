@@ -132,6 +132,28 @@ impl OpenCodeAdapter {
         }
         serde_json::Value::Object(out)
     }
+
+    /// 把转换后的 mcp 对象合并进 config["mcp"]：同名覆盖，保留 config 已有的额外项。
+    /// config.mcp 不存在或不是对象时，以空对象起步。
+    fn merge_mcp_into(config: &mut serde_json::Value, mcp: &serde_json::Value) {
+        let incoming = match mcp.as_object() {
+            Some(m) if !m.is_empty() => m,
+            _ => return, // 没有要合并的，直接返回
+        };
+        // 确保 config["mcp"] 是对象
+        let needs_init = !config
+            .get("mcp")
+            .map(|v| v.is_object())
+            .unwrap_or(false);
+        if needs_init {
+            config["mcp"] = serde_json::json!({});
+        }
+        if let Some(dst) = config.get_mut("mcp").and_then(|v| v.as_object_mut()) {
+            for (name, server) in incoming {
+                dst.insert(name.clone(), server.clone()); // 同名覆盖
+            }
+        }
+    }
 }
 
 impl ConfigAdapter for OpenCodeAdapter {
@@ -645,5 +667,37 @@ mod tests {
         assert_eq!(out, serde_json::json!({}));
         let out2 = OpenCodeAdapter::claude_mcp_to_opencode(&serde_json::json!("nope"));
         assert_eq!(out2, serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_merge_mcp_overwrites_same_name_keeps_extra() {
+        let mut config = serde_json::json!({
+            "mcp": {
+                "foo": { "type": "local", "command": ["OLD"] },
+                "bar": { "type": "local", "command": ["keep"] }
+            }
+        });
+        let incoming = serde_json::json!({
+            "foo": { "type": "local", "command": ["NEW"], "enabled": true }
+        });
+        OpenCodeAdapter::merge_mcp_into(&mut config, &incoming);
+        assert_eq!(config["mcp"]["foo"]["command"], serde_json::json!(["NEW"]));
+        assert_eq!(config["mcp"]["bar"]["command"], serde_json::json!(["keep"]));
+    }
+
+    #[test]
+    fn test_merge_mcp_empty_incoming_noop() {
+        let mut config = serde_json::json!({ "mcp": { "bar": { "x": 1 } } });
+        OpenCodeAdapter::merge_mcp_into(&mut config, &serde_json::json!({}));
+        assert_eq!(config["mcp"]["bar"]["x"], 1);
+    }
+
+    #[test]
+    fn test_merge_mcp_creates_block_when_absent() {
+        let mut config = serde_json::json!({ "model": "x/y" });
+        let incoming = serde_json::json!({ "foo": { "type": "local", "command": ["a"] } });
+        OpenCodeAdapter::merge_mcp_into(&mut config, &incoming);
+        assert_eq!(config["mcp"]["foo"]["command"], serde_json::json!(["a"]));
+        assert_eq!(config["model"], "x/y");
     }
 }
