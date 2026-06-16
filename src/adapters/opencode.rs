@@ -118,6 +118,20 @@ impl OpenCodeAdapter {
         out.insert("enabled".into(), serde_json::Value::Bool(true));
         Some(serde_json::Value::Object(out))
     }
+
+    /// 把 Claude 的 mcpServers 对象整体转成 OpenCode 的 mcp 对象。
+    /// 非对象输入 → 空对象。转不了的单项跳过。
+    fn claude_mcp_to_opencode(claude_servers: &serde_json::Value) -> serde_json::Value {
+        let mut out = serde_json::Map::new();
+        if let Some(servers) = claude_servers.as_object() {
+            for (name, server) in servers {
+                if let Some(converted) = Self::convert_one_server(server) {
+                    out.insert(name.clone(), converted);
+                }
+            }
+        }
+        serde_json::Value::Object(out)
+    }
 }
 
 impl ConfigAdapter for OpenCodeAdapter {
@@ -609,5 +623,27 @@ mod tests {
     fn test_convert_no_command_no_url_skipped() {
         let claude = serde_json::json!({ "env": { "K": "v" } });
         assert!(OpenCodeAdapter::convert_one_server(&claude).is_none());
+    }
+
+    #[test]
+    fn test_claude_mcp_to_opencode_batch() {
+        let claude = serde_json::json!({
+            "playwright": { "command": "npx", "args": ["@playwright/mcp@latest"] },
+            "remote-x": { "type": "http", "url": "https://x/mcp" },
+            "broken": { "env": { "K": "v" } }
+        });
+        let out = OpenCodeAdapter::claude_mcp_to_opencode(&claude);
+        assert_eq!(out["playwright"]["type"], "local");
+        assert_eq!(out["remote-x"]["type"], "remote");
+        // 转不了的被跳过
+        assert!(out.get("broken").is_none());
+    }
+
+    #[test]
+    fn test_claude_mcp_to_opencode_non_object() {
+        let out = OpenCodeAdapter::claude_mcp_to_opencode(&serde_json::json!(null));
+        assert_eq!(out, serde_json::json!({}));
+        let out2 = OpenCodeAdapter::claude_mcp_to_opencode(&serde_json::json!("nope"));
+        assert_eq!(out2, serde_json::json!({}));
     }
 }
