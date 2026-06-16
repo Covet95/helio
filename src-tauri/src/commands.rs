@@ -663,30 +663,53 @@ pub async fn get_status(state: State<'_, AppState>) -> Result<StatusInfo, String
     })
 }
 
-fn read_local_skills(target: TargetApp) -> Result<Vec<String>, String> {
-    let home = dirs::home_dir().ok_or("Failed to get home directory")?;
-    let skills_dir = match target {
-        TargetApp::ClaudeCode => home.join(".claude").join("skills"),
-        TargetApp::Codex => home.join(".codex").join("skills"),
-        TargetApp::Gemini => home.join(".gemini").join("skills"),
-        TargetApp::OpenCode => home.join(".config").join("opencode").join("skills"),
-    };
-
-    if !skills_dir.exists() {
-        return Ok(Vec::new());
-    }
-
+/// 扫描给定目录列表里的 skill 子目录名，按出现顺序去重。
+/// 目录不存在/读失败的跳过。纯函数（不依赖 HOME），便于测试。
+fn scan_skill_dirs(dirs_to_scan: &[std::path::PathBuf]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
     let mut skills = Vec::new();
-    for entry in std::fs::read_dir(&skills_dir).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        if entry.path().is_dir() {
-            if let Some(name) = entry.file_name().to_str() {
-                skills.push(name.to_string());
+    for skills_dir in dirs_to_scan {
+        if !skills_dir.exists() {
+            continue;
+        }
+        let entries = match std::fs::read_dir(skills_dir) {
+            Ok(e) => e,
+            Err(_) => continue, // 单个目录读失败不影响其余
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            if entry.path().is_dir() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if seen.insert(name.to_string()) {
+                        skills.push(name.to_string());
+                    }
+                }
             }
         }
     }
+    skills
+}
 
-    Ok(skills)
+fn read_local_skills(target: TargetApp) -> Result<Vec<String>, String> {
+    let home = dirs::home_dir().ok_or("Failed to get home directory")?;
+
+    // 各工具的 skills 目录。OpenCode 官方会从多个 Claude/agent 兼容目录发现 skills，
+    // 这里与之一致：~/.config/opencode/skills、~/.claude/skills、~/.agents/skills。
+    let dirs_to_scan: Vec<std::path::PathBuf> = match target {
+        TargetApp::ClaudeCode => vec![home.join(".claude").join("skills")],
+        TargetApp::Codex => vec![home.join(".codex").join("skills")],
+        TargetApp::Gemini => vec![home.join(".gemini").join("skills")],
+        TargetApp::OpenCode => vec![
+            home.join(".config").join("opencode").join("skills"),
+            home.join(".claude").join("skills"),
+            home.join(".agents").join("skills"),
+        ],
+    };
+
+    Ok(scan_skill_dirs(&dirs_to_scan))
 }
 
 fn default_db_path() -> Result<std::path::PathBuf, String> {
@@ -899,5 +922,40 @@ mod mcp_config_tests {
         assert_eq!(map["playwright"].command, "npx");
         assert_eq!(map["playwright"].args, vec!["@playwright/mcp@latest"]);
         assert_eq!(map["github"].url.as_deref(), Some("https://api.githubcopilot.com/mcp/"));
+    }
+}
+
+#[cfg(test)]
+mod skills_tests {
+    use super::scan_skill_dirs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static CTR: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn test_scan_skill_dirs_multi_dir_dedup() {
+        // 造两个目录：dirA/{a,shared}、dirB/{b,shared}，外加一个不存在的目录
+        let n = CTR.fetch_add(1, Ordering::SeqCst);
+        let base = std::env::temp_dir().join(format!("helio-skills-{}-{n}", std::process::id()));
+        let dir_a = base.join("a-skills");
+        let dir_b = base.join("b-skills");
+        let missing = base.join("does-not-exist");
+        std::fs::create_dir_all(dir_a.join("a")).unwrap();
+        std::fs::create_dir_all(dir_a.join("shared")).unwrap();
+        std::fs::create_dir_all(dir_b.join("b")).unwrap();
+        std::fs::create_dir_all(dir_b.join("shared")).unwrap();
+
+        let mut skills = scan_skill_dirs(&[dir_a.clone(), dir_b.clone(), missing]);
+        skills.sort();
+        // a、b、shared(去重为一个)；不存在的目录被跳过；不报错
+        assert_eq!(skills, vec!["a".to_string(), "b".to_string(), "shared".to_string()]);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_scan_skill_dirs_all_missing_returns_empty() {
+        let skills = scan_skill_dirs(&[std::path::PathBuf::from("/no/such/dir/xyz")]);
+        assert!(skills.is_empty());
     }
 }
