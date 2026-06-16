@@ -226,6 +226,7 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon)
+        .icon_as_template(true)
         .tooltip("Helio")
         .menu(&menu)
         .on_menu_event(|app, event| {

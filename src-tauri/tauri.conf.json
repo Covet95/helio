@@ -22,12 +22,6 @@
         "fullscreen": false
       }
     ],
-    "trayIcon": {
-      "id": "helio-tray",
-      "iconPath": "icons/icon.png",
-      "iconAsTemplate": true,
-      "tooltip": "Helio"
-    },
     "security": {
       "csp": null
     }
