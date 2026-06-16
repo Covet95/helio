@@ -230,7 +230,7 @@ pub async fn switch_profile(
     Ok(())
 }
 
-fn apply_profile_config(
+pub(crate) fn apply_profile_config(
     db: &Database,
     target: TargetApp,
     api_profile: &ApiProfile,
