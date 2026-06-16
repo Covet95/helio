@@ -10,6 +10,7 @@ mod tray;
 use commands::AppState;
 use db::Database;
 use std::sync::Mutex;
+use tauri::WindowEvent;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -29,7 +30,19 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(AppState { db: Mutex::new(db) })
+        .setup(|app| {
+            tray::build_tray(app.handle())?;
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            // 关窗 → 隐藏到状态栏，不退出
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::list_profiles,
             commands::get_profile,
