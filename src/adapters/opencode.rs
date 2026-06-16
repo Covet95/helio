@@ -93,6 +93,15 @@ impl OpenCodeAdapter {
             // 远程型
             out.insert("type".into(), serde_json::Value::String("remote".into()));
             out.insert("url".into(), serde_json::Value::String(url.to_string()));
+            // headers 携带认证信息（如 Bearer token），OpenCode 远程 MCP 支持，保留
+            if let Some(headers) = obj.get("headers").and_then(|v| v.as_object()) {
+                if !headers.is_empty() {
+                    out.insert(
+                        "headers".into(),
+                        serde_json::Value::Object(headers.clone()),
+                    );
+                }
+            }
         } else if let Some(command) = obj.get("command").and_then(|v| v.as_str()) {
             // 本地型：command(字符串) + args(数组) → command(数组)
             let mut cmd = vec![serde_json::Value::String(command.to_string())];
@@ -640,6 +649,20 @@ mod tests {
         let out = OpenCodeAdapter::convert_one_server(&claude).unwrap();
         assert_eq!(out["type"], "remote");
         assert_eq!(out["url"], "https://x/mcp");
+        assert_eq!(out["enabled"], true);
+    }
+
+    #[test]
+    fn test_convert_remote_preserves_headers() {
+        let claude = serde_json::json!({
+            "type": "http",
+            "url": "https://api.githubcopilot.com/mcp/",
+            "headers": { "Authorization": "Bearer tok123" }
+        });
+        let out = OpenCodeAdapter::convert_one_server(&claude).unwrap();
+        assert_eq!(out["type"], "remote");
+        assert_eq!(out["url"], "https://api.githubcopilot.com/mcp/");
+        assert_eq!(out["headers"]["Authorization"], "Bearer tok123");
         assert_eq!(out["enabled"], true);
     }
 
