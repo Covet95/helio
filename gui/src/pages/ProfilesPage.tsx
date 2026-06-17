@@ -9,13 +9,14 @@ import type { ApiProfile, FetchedModel, StatusInfo, TargetApp } from '../types';
 import { SUPPORTED_TOOLS, toolById } from '../types';
 import { cn, maskApiKey } from '../lib/utils';
 import { PROVIDER_PRESETS, REASONING_LEVELS } from '../lib/presets';
-import { nextCopyName } from '../lib/profileNames';
+import { duplicateProfileDraft } from '../lib/profileCopy';
 
 export default function ProfilesPage() {
   const { profiles, status, loadingProfiles, fetchProfiles, fetchStatus, addProfile, updateProfile, deleteProfile, switchProfile } = useStore();
   const [targetApp, setTargetApp] = useState<TargetApp>('claude-code');
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState<ApiProfile | null>(null);
+  const [draft, setDraft] = useState<ApiProfile | null>(null);
   const [switched, setSwitched] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [query, setQuery] = useState('');
@@ -88,24 +89,11 @@ export default function ProfilesPage() {
     }
   };
 
-  const handleDuplicate = async (profile: ApiProfile) => {
-    const copy: ApiProfile = {
-      ...profile,
-      id: undefined,
-      name: nextCopyName(profile.name, profiles.map((item) => item.name)),
-      created_at: undefined,
-      updated_at: undefined,
-    };
-
+  const handleDuplicate = (profile: ApiProfile) => {
     setFeedback(null);
-    try {
-      await addProfile(copy);
-      setEditing(copy);
-      setShowModal(true);
-      setFeedback({ kind: 'success', text: `已复制为 ${copy.name}` });
-    } catch (error) {
-      setFeedback({ kind: 'error', text: `复制失败：${error}` });
-    }
+    setEditing(null);
+    setDraft(duplicateProfileDraft(profile, profiles.map((item) => item.name)));
+    setShowModal(true);
   };
 
   return (
@@ -119,7 +107,7 @@ export default function ProfilesPage() {
                 去重 ({dupExtras.length})
               </Button>
             )}
-            <Button onClick={() => { setEditing(null); setShowModal(true); }}>
+            <Button onClick={() => { setEditing(null); setDraft(null); setShowModal(true); }}>
               <Plus size={16} strokeWidth={2.5} />
               新建档案
             </Button>
@@ -198,10 +186,25 @@ export default function ProfilesPage() {
       {showModal && (
         <ProfileModal
           profile={editing}
+          draft={draft}
           initialTool={targetApp}
-          onClose={() => setShowModal(false)}
+          onClose={() => { setShowModal(false); setDraft(null); }}
           onSave={async (p) => {
-            if (editing) await updateProfile(p); else await addProfile(p);
+            try {
+              if (editing) await updateProfile(p); else await addProfile(p);
+            } catch (e) {
+              const msg = String(e);
+              const friendly = /UNIQUE constraint failed/i.test(msg)
+                ? `已存在同名档案「${p.name}」，请换个名字`
+                : `保存失败：${msg}`;
+              setFeedback({ kind: 'error', text: friendly });
+              return; // 失败时保持弹窗打开，让用户改
+            }
+            setFeedback({
+              kind: 'success',
+              text: editing ? `已保存「${p.name}」` : draft ? `已复制为 ${p.name}` : `已创建「${p.name}」`,
+            });
+            setDraft(null);
             setShowModal(false);
           }}
         />
@@ -376,17 +379,19 @@ function activeProfileFor(status: StatusInfo | null, targetApp: TargetApp): ApiP
 }
 
 function ProfileModal({
-  profile, initialTool, onClose, onSave,
+  profile, draft, initialTool, onClose, onSave,
 }: {
   profile: ApiProfile | null;
+  draft: ApiProfile | null;
   initialTool: TargetApp;
   onClose: () => void;
   onSave: (p: ApiProfile) => void;
 }) {
-  const initialModalTool = profile?.target_app ?? initialTool;
+  const initialProfile = profile ?? draft;
+  const initialModalTool = initialProfile?.target_app ?? initialTool;
   const [tool, setTool] = useState<TargetApp>(initialModalTool);
   const [form, setForm] = useState<ApiProfile>(
-    profile || emptyProfileForTool(initialModalTool),
+    initialProfile || emptyProfileForTool(initialModalTool),
   );
   const [models, setModels] = useState<FetchedModel[]>([]);
   const [loadingModels, setLoadingModels] = useState(false);
@@ -426,13 +431,13 @@ function ProfileModal({
 
   return (
     <Modal
-      title={profile ? '编辑配置档案' : '新建配置档案'}
+      title={profile ? '编辑配置档案' : draft ? '复制配置档案' : '新建配置档案'}
       onClose={onClose}
       size="lg"
       footer={
         <>
           <Button type="button" variant="ghost" onClick={onClose}>取消</Button>
-          <Button type="submit" form="helio-profile-form">{profile ? '保存' : '创建'}</Button>
+          <Button type="submit" form="helio-profile-form">{profile ? '保存' : draft ? '创建副本' : '创建'}</Button>
         </>
       }
     >
@@ -441,7 +446,7 @@ function ProfileModal({
         onSubmit={(e) => { e.preventDefault(); onSave({ ...form, target_app: tool }); }}
         className="space-y-4"
       >
-          {!profile && (
+          {!initialProfile && (
             <div>
               <span className="block mb-1.5 text-[12px] font-medium text-ink-dim">目标工具</span>
               <div className="flex flex-wrap gap-1.5">
@@ -461,7 +466,7 @@ function ProfileModal({
             </div>
           )}
 
-          {!profile && (
+          {!initialProfile && (
             <div>
               <span className="block mb-1.5 text-[12px] font-medium text-ink-dim">Provider 预设</span>
               <div className="flex flex-wrap gap-1.5">
