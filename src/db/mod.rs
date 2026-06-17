@@ -22,13 +22,19 @@ impl Database {
             r#"
             CREATE TABLE IF NOT EXISTS api_profiles (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
                 provider TEXT NOT NULL,
                 api_url TEXT NOT NULL,
                 api_key TEXT NOT NULL,
                 model_mapping TEXT,
+                model TEXT,
+                reasoning_effort TEXT,
+                context_1m INTEGER,
+                target_app TEXT,
+                models TEXT,
                 created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL
+                updated_at INTEGER NOT NULL,
+                UNIQUE(name, target_app)
             );
 
             CREATE TABLE IF NOT EXISTS shared_configs (
@@ -55,6 +61,94 @@ impl Database {
         let _ = self.conn.execute("ALTER TABLE api_profiles ADD COLUMN context_1m INTEGER", []);
         let _ = self.conn.execute("ALTER TABLE api_profiles ADD COLUMN target_app TEXT", []);
         let _ = self.conn.execute("ALTER TABLE api_profiles ADD COLUMN models TEXT", []);
+
+        self.migrate_composite_unique()?;
+
+        Ok(())
+    }
+
+    /// 幂等迁移:name 全局 UNIQUE → UNIQUE(name, target_app)，并去掉历史 `-cc` 后缀。
+    /// 仅当旧约束仍存在时执行;执行前备份库文件。
+    fn migrate_composite_unique(&self) -> Result<()> {
+        let create_sql: String = self.conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='api_profiles'",
+            [],
+            |r| r.get(0),
+        )?;
+        // 已是复合唯一 → 跳过
+        if create_sql.contains("UNIQUE(name, target_app)")
+            || create_sql.contains("UNIQUE (name, target_app)")
+        {
+            return Ok(());
+        }
+        // 不含旧的全局 name UNIQUE 也跳过(防御)
+        if !create_sql.contains("name TEXT NOT NULL UNIQUE") {
+            return Ok(());
+        }
+
+        // 备份库文件(若是文件库)。:memory: 没有路径，跳过备份。
+        if let Some(db_path) = self.conn.path() {
+            if db_path != ":memory:" && !db_path.is_empty() {
+                let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
+                let backup = format!("{db_path}.premigrate.{ts}.sqlite");
+                let _ = std::fs::copy(db_path, &backup);
+            }
+        }
+
+        // 重建表:新表用复合唯一。注意去 -cc 后缀(仅 target_app 非空、去后缀后同工具不冲突)。
+        self.conn.execute_batch(
+            r#"
+            CREATE TABLE api_profiles_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                api_url TEXT NOT NULL,
+                api_key TEXT NOT NULL,
+                model_mapping TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                model TEXT,
+                reasoning_effort TEXT,
+                context_1m INTEGER,
+                target_app TEXT,
+                models TEXT,
+                UNIQUE(name, target_app)
+            );
+
+            -- 先原样拷贝
+            INSERT INTO api_profiles_new
+                (id,name,provider,api_url,api_key,model_mapping,created_at,updated_at,model,reasoning_effort,context_1m,target_app,models)
+            SELECT id,name,provider,api_url,api_key,model_mapping,created_at,updated_at,model,reasoning_effort,context_1m,target_app,models
+            FROM api_profiles;
+            "#,
+        )?;
+
+        // 去 -cc 后缀:逐条更新,仅当去后缀后 (newname,target_app) 在新表中不存在(排除自身)。
+        // SQLite 不支持 `UPDATE ... AS alias`,故用表名代替别名(无别名版本)。
+        self.conn.execute(
+            r#"
+            UPDATE api_profiles_new
+            SET name = substr(name, 1, length(name) - 3)
+            WHERE name LIKE '%-cc'
+              AND target_app IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM api_profiles_new b
+                  WHERE b.target_app = api_profiles_new.target_app
+                    AND b.name = substr(api_profiles_new.name, 1, length(api_profiles_new.name) - 3)
+                    AND b.id != api_profiles_new.id
+              )
+            "#,
+            [],
+        )?;
+
+        // 换表 + 重建索引
+        self.conn.execute_batch(
+            r#"
+            DROP TABLE api_profiles;
+            ALTER TABLE api_profiles_new RENAME TO api_profiles;
+            CREATE INDEX IF NOT EXISTS idx_profiles_name ON api_profiles(name);
+            "#,
+        )?;
 
         Ok(())
     }
@@ -513,6 +607,69 @@ mod tests {
         let targets = db.get_active_targets_for_profile(id)?;
         assert_eq!(targets, vec![TargetApp::ClaudeCode, TargetApp::OpenCode]);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_migrate_to_composite_unique_and_strip_cc() -> Result<()> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static CTR: AtomicU64 = AtomicU64::new(0);
+        let n = CTR.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("helio-mig-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("old.sqlite");
+
+        // 1) 手工造一个“旧版”库：name 全局 UNIQUE，含 -cc 数据 + 跨工具同名
+        {
+            let conn = rusqlite::Connection::open(&path)?;
+            conn.execute_batch(
+                r#"
+                CREATE TABLE api_profiles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    provider TEXT NOT NULL,
+                    api_url TEXT NOT NULL,
+                    api_key TEXT NOT NULL,
+                    model_mapping TEXT,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    model TEXT, reasoning_effort TEXT, context_1m INTEGER, target_app TEXT, models TEXT
+                );
+                INSERT INTO api_profiles (name,provider,api_url,api_key,created_at,updated_at,target_app) VALUES
+                    ('一一','anthropic','u','k',0,0,'claude-code'),
+                    ('一一-cc','openai','u','k',0,0,'codex');
+                "#,
+            )?;
+        }
+
+        // 2) 用 Database::open 触发迁移
+        let db = Database::open(&path)?;
+
+        // 3) 断言：复合唯一约束已生效
+        let sql: String = db.conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='api_profiles'",
+            [], |r| r.get(0))?;
+        assert!(sql.contains("UNIQUE(name, target_app)") || sql.contains("UNIQUE (name, target_app)"),
+            "应为复合唯一，实际: {sql}");
+        assert!(!sql.contains("name TEXT NOT NULL UNIQUE"), "旧的全局 name UNIQUE 应已移除");
+
+        // 4) -cc 已去后缀
+        let profiles = db.list_profiles()?;
+        let names: Vec<(String,Option<String>)> = profiles.iter()
+            .map(|p| (p.name.clone(), p.target_app.map(|t| t.as_str().to_string()))).collect();
+        assert!(names.contains(&("一一".into(), Some("claude-code".into()))));
+        assert!(names.contains(&("一一".into(), Some("codex".into()))), "一一-cc 应去后缀为 一一(codex)");
+        assert!(!profiles.iter().any(|p| p.name.ends_with("-cc")), "不应再有 -cc 后缀");
+
+        // 5) 复合唯一：codex 再插一个 一一 应失败；claude 插 一一 也应失败(同工具重名)
+        let dup = ApiProfile { name:"一一".into(), provider:"x".into(), api_url:"u".into(), api_key:"k".into(), target_app:Some(TargetApp::Codex), ..Default::default() };
+        assert!(db.add_profile(&dup).is_err(), "同工具(codex)重名应被复合唯一拒绝");
+
+        // 6) 幂等:再 open 一次不报错
+        drop(db);
+        let _db2 = Database::open(&path)?;
+
+        let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
 }
