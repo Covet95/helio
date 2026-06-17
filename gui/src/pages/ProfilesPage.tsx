@@ -396,6 +396,7 @@ function ProfileModal({
   const [models, setModels] = useState<FetchedModel[]>([]);
   const [loadingModels, setLoadingModels] = useState(false);
   const [modelErr, setModelErr] = useState('');
+  const [formErr, setFormErr] = useState('');
 
   const loadModels = async () => {
     if (!form.api_url.trim() || !form.api_key.trim()) {
@@ -429,6 +430,17 @@ function ProfileModal({
     }));
   };
 
+  // 显式提交：footer 的保存按钮在 <form> 之外（Modal 把 footer 渲染成 form 的兄弟节点），
+  // 靠 button[form=id] 跨 DOM 关联在 WKWebView 里不可靠，改为直接调用，并自己做必填校验。
+  const submit = () => {
+    if (!form.name.trim() || !form.provider.trim() || !form.api_url.trim() || !form.api_key.trim()) {
+      setFormErr('请填写名称、Provider、API URL、API Key');
+      return;
+    }
+    setFormErr('');
+    onSave({ ...form, target_app: tool });
+  };
+
   return (
     <Modal
       title={profile ? '编辑配置档案' : draft ? '复制配置档案' : '新建配置档案'}
@@ -437,15 +449,20 @@ function ProfileModal({
       footer={
         <>
           <Button type="button" variant="ghost" onClick={onClose}>取消</Button>
-          <Button type="submit" form="helio-profile-form">{profile ? '保存' : draft ? '创建副本' : '创建'}</Button>
+          <Button type="button" onClick={submit}>{profile ? '保存' : draft ? '创建副本' : '创建'}</Button>
         </>
       }
     >
       <form
         id="helio-profile-form"
-        onSubmit={(e) => { e.preventDefault(); onSave({ ...form, target_app: tool }); }}
+        onSubmit={(e) => { e.preventDefault(); submit(); }}
         className="space-y-4"
       >
+          {formErr && (
+            <div className="rounded-md border border-danger/30 bg-danger/8 px-3 py-2 text-[12.5px] text-danger">
+              {formErr}
+            </div>
+          )}
           {!initialProfile && (
             <div>
               <span className="block mb-1.5 text-[12px] font-medium text-ink-dim">目标工具</span>
