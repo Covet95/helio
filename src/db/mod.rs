@@ -96,8 +96,10 @@ impl Database {
         }
 
         // 重建表:新表用复合唯一。注意去 -cc 后缀(仅 target_app 非空、去后缀后同工具不冲突)。
+        // 整个重建流程包在单个事务中以保证原子性(防止 DROP 与 RENAME 之间进程被杀留下孤表)。
         self.conn.execute_batch(
             r#"
+            BEGIN;
             CREATE TABLE api_profiles_new (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
@@ -115,18 +117,11 @@ impl Database {
                 UNIQUE(name, target_app)
             );
 
-            -- 先原样拷贝
             INSERT INTO api_profiles_new
                 (id,name,provider,api_url,api_key,model_mapping,created_at,updated_at,model,reasoning_effort,context_1m,target_app,models)
             SELECT id,name,provider,api_url,api_key,model_mapping,created_at,updated_at,model,reasoning_effort,context_1m,target_app,models
             FROM api_profiles;
-            "#,
-        )?;
 
-        // 去 -cc 后缀:逐条更新,仅当去后缀后 (newname,target_app) 在新表中不存在(排除自身)。
-        // SQLite 不支持 `UPDATE ... AS alias`,故用表名代替别名(无别名版本)。
-        self.conn.execute(
-            r#"
             UPDATE api_profiles_new
             SET name = substr(name, 1, length(name) - 3)
             WHERE name LIKE '%-cc'
@@ -136,17 +131,12 @@ impl Database {
                   WHERE b.target_app = api_profiles_new.target_app
                     AND b.name = substr(api_profiles_new.name, 1, length(api_profiles_new.name) - 3)
                     AND b.id != api_profiles_new.id
-              )
-            "#,
-            [],
-        )?;
+              );
 
-        // 换表 + 重建索引
-        self.conn.execute_batch(
-            r#"
             DROP TABLE api_profiles;
             ALTER TABLE api_profiles_new RENAME TO api_profiles;
             CREATE INDEX IF NOT EXISTS idx_profiles_name ON api_profiles(name);
+            COMMIT;
             "#,
         )?;
 
@@ -661,11 +651,21 @@ mod tests {
         assert!(names.contains(&("一一".into(), Some("codex".into()))), "一一-cc 应去后缀为 一一(codex)");
         assert!(!profiles.iter().any(|p| p.name.ends_with("-cc")), "不应再有 -cc 后缀");
 
-        // 5) 复合唯一：codex 再插一个 一一 应失败；claude 插 一一 也应失败(同工具重名)
+        // 5) id 必须在重建中保留(active_profiles 按 id 关联)
+        let claude_yi = profiles.iter()
+            .find(|p| p.name == "一一" && p.target_app == Some(TargetApp::ClaudeCode))
+            .expect("claude 一一 存在");
+        assert_eq!(claude_yi.id, Some(1), "claude 一一 应保留 id=1");
+        let codex_yi = profiles.iter()
+            .find(|p| p.name == "一一" && p.target_app == Some(TargetApp::Codex))
+            .expect("codex 一一(原 一一-cc) 存在");
+        assert_eq!(codex_yi.id, Some(2), "codex 一一(原 一一-cc) 应保留 id=2");
+
+        // 6) 复合唯一：codex 再插一个 一一 应失败；claude 插 一一 也应失败(同工具重名)
         let dup = ApiProfile { name:"一一".into(), provider:"x".into(), api_url:"u".into(), api_key:"k".into(), target_app:Some(TargetApp::Codex), ..Default::default() };
         assert!(db.add_profile(&dup).is_err(), "同工具(codex)重名应被复合唯一拒绝");
 
-        // 6) 幂等:再 open 一次不报错
+        // 7) 幂等:再 open 一次不报错
         drop(db);
         let _db2 = Database::open(&path)?;
 
