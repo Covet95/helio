@@ -10,3 +10,5 @@ gui/node_modules/
 # 开发过程产物（brainstorm / 计划），不纳入版本库
 .planning/
 .superpowers/
+
+.claude/settings.local.json
