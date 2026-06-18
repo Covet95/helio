@@ -4,7 +4,7 @@ import { Button } from '../components/common/Button';
 import { Spinner } from '../components/common/Spinner';
 import { PageHeader } from '../components/common/PageHeader';
 import { Modal, Field, ConfirmDialog } from '../components/common/Modal';
-import { Plus, Pencil, Trash2, Check, Layers, Search, Copy, Eye, EyeOff, Link2, FileJson } from 'lucide-react';
+import { Plus, Pencil, Trash2, Check, Layers, Search, FilePlus2, Eye, EyeOff, Link2, FileJson } from 'lucide-react';
 import type { ApiProfile, FetchedModel, StatusInfo, TargetApp } from '../types';
 import { SUPPORTED_TOOLS, toolById } from '../types';
 import { cn, maskApiKey } from '../lib/utils';
@@ -329,7 +329,7 @@ function ProfileCard({
           <IconBtn label="编辑" onClick={onEdit}><Pencil size={15} /></IconBtn>
           <IconBtn label="复制 API URL" onClick={onCopyApiUrl}><Link2 size={15} /></IconBtn>
           <IconBtn label="复制 API 配置" onClick={onCopyApiConfig}><FileJson size={15} /></IconBtn>
-          <IconBtn label="复制档案" onClick={onDuplicate}><Copy size={15} /></IconBtn>
+          <IconBtn label="创建副本" onClick={onDuplicate}><FilePlus2 size={15} /></IconBtn>
           <IconBtn label="删除" danger onClick={onDelete}><Trash2 size={15} /></IconBtn>
           {active ? (
             <span className="ml-1 rounded-md border border-ok/25 bg-ok/8 px-2.5 py-1.5 text-[12px] font-medium text-ok">当前</span>
@@ -368,7 +368,9 @@ function AppSelector({ value, onChange }: { value: TargetApp; onChange: (value: 
 function IconBtn({ children, label, danger, onClick }: { children: React.ReactNode; label: string; danger?: boolean; onClick: () => void }) {
   return (
     <button
+      type="button"
       title={label}
+      aria-label={label}
       onClick={onClick}
       className={`no-drag grid place-items-center h-8 w-8 rounded-lg border border-line bg-surface transition-all hover:bg-elevated ${
         danger ? 'text-ink-faint hover:text-danger hover:border-danger/40' : 'text-ink-faint hover:text-ink'
