@@ -120,12 +120,18 @@ pub enum ProfileCommands {
     Show {
         /// Profile 名称
         name: String,
+        /// 目标应用 (claude-code, codex)
+        #[arg(long)]
+        target_app: Option<String>,
     },
 
     /// 更新 Profile
     Update {
         /// Profile 名称
         name: String,
+        /// 目标应用 (claude-code, codex)
+        #[arg(long)]
+        target_app: Option<String>,
         /// 新的 API URL
         #[arg(long)]
         url: Option<String>,
@@ -165,17 +171,18 @@ pub fn execute(cli: Cli) -> Result<()> {
             ProfileCommands::Delete { name, target_app, force } => {
                 cmd_profile_delete(&db, name, target_app, force)?;
             }
-            ProfileCommands::Show { name } => {
-                cmd_profile_show(&db, name)?;
+            ProfileCommands::Show { name, target_app } => {
+                cmd_profile_show(&db, name, target_app)?;
             }
             ProfileCommands::Update {
                 name,
+                target_app,
                 url,
                 key,
                 provider,
                 model_mapping,
             } => {
-                cmd_profile_update(&db, name, url, key, provider, model_mapping)?;
+                cmd_profile_update(&db, name, target_app, url, key, provider, model_mapping)?;
             }
         },
         Commands::Switch {
@@ -307,8 +314,9 @@ fn resolve_target_for_name(db: &Database, name: &str, target_app: Option<&str>) 
     }
 }
 
-fn cmd_profile_show(db: &Database, name: String) -> Result<()> {
-    let profile = db.get_profile_by_name(&name)?;
+fn cmd_profile_show(db: &Database, name: String, target_app: Option<String>) -> Result<()> {
+    let target = resolve_target_for_name(db, &name, target_app.as_deref())?;
+    let profile = db.get_profile_by_name_and_target(&name, target)?;
 
     println!("\n{} {}\n", "API Profile:".bold(), profile.name.cyan());
     println!("  Provider: {}", profile.provider);
@@ -334,12 +342,14 @@ fn cmd_profile_show(db: &Database, name: String) -> Result<()> {
 fn cmd_profile_update(
     db: &Database,
     name: String,
+    target_app: Option<String>,
     url: Option<String>,
     key: Option<String>,
     provider: Option<String>,
     model_mapping: Option<String>,
 ) -> Result<()> {
-    let mut profile = db.get_profile_by_name(&name)?;
+    let target = resolve_target_for_name(db, &name, target_app.as_deref())?;
+    let mut profile = db.get_profile_by_name_and_target(&name, target)?;
 
     let mut updated = false;
 
@@ -378,7 +388,7 @@ fn cmd_switch(db: &Database, target_app: TargetApp, profile_name: String, backup
     utils::info(&format!("切换 {} 到 Profile: {}...", target_app, profile_name));
 
     // 1. 获取 API Profile
-    let api_profile = db.get_profile_by_name(&profile_name)?;
+    let api_profile = db.get_profile_by_name_and_target(&profile_name, target_app)?;
 
     // 2. 获取适配器
     let adapter = get_adapter(target_app);
