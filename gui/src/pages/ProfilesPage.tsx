@@ -4,12 +4,13 @@ import { Button } from '../components/common/Button';
 import { Spinner } from '../components/common/Spinner';
 import { PageHeader } from '../components/common/PageHeader';
 import { Modal, Field, ConfirmDialog } from '../components/common/Modal';
-import { Plus, Pencil, Trash2, Check, Layers, Search, Copy, Eye, EyeOff } from 'lucide-react';
+import { Plus, Pencil, Trash2, Check, Layers, Search, Copy, Eye, EyeOff, Link2, FileJson } from 'lucide-react';
 import type { ApiProfile, FetchedModel, StatusInfo, TargetApp } from '../types';
 import { SUPPORTED_TOOLS, toolById } from '../types';
 import { cn, maskApiKey } from '../lib/utils';
 import { PROVIDER_PRESETS, REASONING_LEVELS } from '../lib/presets';
-import { duplicateProfileDraft } from '../lib/profileCopy';
+import { duplicateProfileDraft, profileApiConfigText, profileApiUrlText } from '../lib/profileCopy';
+import { copyText } from '../lib/clipboard';
 
 export default function ProfilesPage() {
   const { profiles, status, loadingProfiles, fetchProfiles, fetchStatus, addProfile, updateProfile, deleteProfile, switchProfile } = useStore();
@@ -96,6 +97,16 @@ export default function ProfilesPage() {
     setShowModal(true);
   };
 
+  const handleCopy = async (label: string, text: string) => {
+    setFeedback(null);
+    try {
+      await copyText(text);
+      setFeedback({ kind: 'success', text: `已复制${label}` });
+    } catch (error) {
+      setFeedback({ kind: 'error', text: `复制${label}失败：${humanizeCopyError(error)}` });
+    }
+  };
+
   return (
     <div className="min-h-full">
       <PageHeader
@@ -176,6 +187,8 @@ export default function ProfilesPage() {
                 onEdit={() => { setEditing(p); setShowModal(true); }}
                 onDelete={() => setDeleting(p.name)}
                 onDuplicate={() => handleDuplicate(p)}
+                onCopyApiUrl={() => handleCopy('API URL', profileApiUrlText(p))}
+                onCopyApiConfig={() => handleCopy('API 配置', profileApiConfigText(p))}
                 onSwitch={() => handleSwitch(p.name)}
               />
             ))}
@@ -252,7 +265,7 @@ function EmptyState() {
 }
 
 function ProfileCard({
-  profile, active, justSwitched, onEdit, onDelete, onDuplicate, onSwitch,
+  profile, active, justSwitched, onEdit, onDelete, onDuplicate, onCopyApiUrl, onCopyApiConfig, onSwitch,
 }: {
   profile: ApiProfile;
   active: boolean;
@@ -260,6 +273,8 @@ function ProfileCard({
   onEdit: () => void;
   onDelete: () => void;
   onDuplicate: () => void;
+  onCopyApiUrl: () => void;
+  onCopyApiConfig: () => void;
   onSwitch: () => void;
 }) {
   const tint = providerTint(profile.provider);
@@ -312,7 +327,9 @@ function ProfileCard({
 
         <div className="flex items-center gap-1.5">
           <IconBtn label="编辑" onClick={onEdit}><Pencil size={15} /></IconBtn>
-          <IconBtn label="复制" onClick={onDuplicate}><Copy size={15} /></IconBtn>
+          <IconBtn label="复制 API URL" onClick={onCopyApiUrl}><Link2 size={15} /></IconBtn>
+          <IconBtn label="复制 API 配置" onClick={onCopyApiConfig}><FileJson size={15} /></IconBtn>
+          <IconBtn label="复制档案" onClick={onDuplicate}><Copy size={15} /></IconBtn>
           <IconBtn label="删除" danger onClick={onDelete}><Trash2 size={15} /></IconBtn>
           {active ? (
             <span className="ml-1 rounded-md border border-ok/25 bg-ok/8 px-2.5 py-1.5 text-[12px] font-medium text-ok">当前</span>
@@ -368,6 +385,11 @@ function providerTint(provider: string): string {
   if (p.includes('openai')) return '#10B981';
   if (p.includes('google')) return '#4F8DF6';
   return '#4B5563';
+}
+
+function humanizeCopyError(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  return raw.replace(/^\s*(TypeError|Error):\s*/i, '').trim() || '剪贴板不可用';
 }
 
 function activeProfileFor(status: StatusInfo | null, targetApp: TargetApp): ApiProfile | undefined {

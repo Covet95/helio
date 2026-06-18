@@ -2,6 +2,10 @@
 use crate::db::Database;
 use crate::models::{ApiProfile, TargetApp};
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "macos")]
+use std::io::Write;
+#[cfg(target_os = "macos")]
+use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use tauri::State;
 
@@ -101,6 +105,48 @@ pub struct LocalConfigInfo {
     pub skills: Vec<String>,
     pub hooks: serde_json::Value,
     pub permissions: serde_json::Value,
+}
+
+#[tauri::command]
+pub async fn copy_text(text: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        return copy_text_with_pbcopy(&text);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = text;
+        Err("Clipboard copy is only implemented for macOS".to_string())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn copy_text_with_pbcopy(text: &str) -> Result<(), String> {
+    let mut child = Command::new("/usr/bin/pbcopy")
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to start pbcopy: {}", e))?;
+
+    {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| "Failed to open pbcopy stdin".to_string())?;
+        stdin
+            .write_all(text.as_bytes())
+            .map_err(|e| format!("Failed to write clipboard text: {}", e))?;
+    }
+
+    let status = child
+        .wait()
+        .map_err(|e| format!("Failed to wait for pbcopy: {}", e))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("pbcopy exited with status {}", status))
+    }
 }
 
 // 新增：扫描本地 MCP 配置
@@ -961,5 +1007,16 @@ mod skills_tests {
     fn test_scan_skill_dirs_all_missing_returns_empty() {
         let skills = scan_skill_dirs(&[std::path::PathBuf::from("/no/such/dir/xyz")]);
         assert!(skills.is_empty());
+    }
+}
+
+#[cfg(test)]
+#[cfg(target_os = "macos")]
+mod clipboard_tests {
+    use super::copy_text_with_pbcopy;
+
+    #[test]
+    fn test_copy_text_with_pbcopy_accepts_empty_text() {
+        copy_text_with_pbcopy("").expect("empty clipboard text should copy");
     }
 }

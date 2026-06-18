@@ -1,4 +1,4 @@
-import { duplicateProfileDraft } from './profileCopy';
+import { duplicateProfileDraft, profileApiConfigText, profileApiUrlText } from './profileCopy';
 
 function equal(actual: unknown, expected: unknown) {
   if (actual !== expected) {
@@ -25,3 +25,26 @@ equal(draft.target_app, 'opencode');
 equal(draft.created_at, undefined);
 equal(draft.updated_at, undefined);
 equal(source.id, 42);
+
+equal(profileApiUrlText(source), 'https://api.example.com');
+
+const copiedConfig = JSON.parse(profileApiConfigText({
+  ...source,
+  model: 'claude-sonnet',
+  models: ['claude-sonnet', 'claude-opus'],
+  reasoning_effort: 'high',
+  context_1m: true,
+}));
+
+equal(copiedConfig.name, 'prod');
+equal(copiedConfig.target_app, 'opencode');
+equal(copiedConfig.provider, 'anthropic');
+equal(copiedConfig.api_url, 'https://api.example.com');
+equal(copiedConfig.api_key, 'sk-test');
+equal(copiedConfig.model, 'claude-sonnet');
+equal(copiedConfig.models.length, 2);
+equal(copiedConfig.reasoning_effort, 'high');
+equal(copiedConfig.context_1m, true);
+equal(copiedConfig.id, undefined);
+equal(copiedConfig.created_at, undefined);
+equal(copiedConfig.updated_at, undefined);

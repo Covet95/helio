@@ -50,6 +50,7 @@ pub fn run() {
             commands::update_profile,
             commands::delete_profile,
             commands::switch_profile,
+            commands::copy_text,
             commands::get_shared_config,
             commands::save_shared_config,
             commands::get_status,

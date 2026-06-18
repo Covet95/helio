@@ -39,6 +39,9 @@ export const tauriApi = {
   switchProfile: (targetApp: TargetApp, profileName: string) =>
     command<void>('switch_profile', { targetApp, profileName }),
 
+  copyText: (text: string) =>
+    command<void>('copy_text', { text }),
+
   // 模型列表加载（OpenAI 兼容 /v1/models）
   fetchModels: (apiUrl: string, apiKey: string) =>
     command<FetchedModel[]>('fetch_models', { apiUrl, apiKey }),
