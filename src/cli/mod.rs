@@ -28,7 +28,7 @@ pub struct Cli {
 pub enum Commands {
     /// 初始化：从现有配置导入
     Init {
-        /// 目标应用 (claude-code, codex)
+        /// 目标应用 (claude-code, codex, gemini, opencode)
         target_app: String,
     },
 
@@ -38,7 +38,7 @@ pub enum Commands {
 
     /// 切换 API Profile
     Switch {
-        /// 目标应用 (claude-code, codex)
+        /// 目标应用 (claude-code, codex, gemini, opencode)
         target_app: String,
         /// Profile 名称
         profile_name: String,
@@ -56,7 +56,7 @@ pub enum Commands {
 
     /// 同步共享配置（从配置文件回填到数据库）
     Sync {
-        /// 目标应用 (claude-code, codex)
+        /// 目标应用 (claude-code, codex, gemini, opencode)
         target_app: String,
     },
 
@@ -95,6 +95,9 @@ pub enum ProfileCommands {
         /// 模型映射 (JSON 格式)
         #[arg(long)]
         model_mapping: Option<String>,
+        /// 目标应用 (claude-code, codex, gemini, opencode)
+        #[arg(long)]
+        target_app: Option<String>,
     },
 
     /// 列出所有 Profiles
@@ -108,7 +111,7 @@ pub enum ProfileCommands {
     Delete {
         /// Profile 名称
         name: String,
-        /// 目标应用 (claude-code, codex)
+        /// 目标应用 (claude-code, codex, gemini, opencode)
         #[arg(long)]
         target_app: Option<String>,
         /// 强制删除不提示
@@ -120,7 +123,7 @@ pub enum ProfileCommands {
     Show {
         /// Profile 名称
         name: String,
-        /// 目标应用 (claude-code, codex)
+        /// 目标应用 (claude-code, codex, gemini, opencode)
         #[arg(long)]
         target_app: Option<String>,
     },
@@ -129,7 +132,7 @@ pub enum ProfileCommands {
     Update {
         /// Profile 名称
         name: String,
-        /// 目标应用 (claude-code, codex)
+        /// 目标应用 (claude-code, codex, gemini, opencode)
         #[arg(long)]
         target_app: Option<String>,
         /// 新的 API URL
@@ -162,8 +165,9 @@ pub fn execute(cli: Cli) -> Result<()> {
                 key,
                 provider,
                 model_mapping,
+                target_app,
             } => {
-                cmd_profile_add(&db, name, url, key, provider, model_mapping)?;
+                cmd_profile_add(&db, name, url, key, provider, model_mapping, target_app)?;
             }
             ProfileCommands::List { verbose } => {
                 cmd_profile_list(&db, verbose)?;
@@ -241,6 +245,7 @@ fn cmd_profile_add(
     key: String,
     provider: String,
     model_mapping: Option<String>,
+    target_app: Option<String>,
 ) -> Result<()> {
     let model_mapping_map = if let Some(json) = model_mapping {
         Some(serde_json::from_str::<HashMap<String, String>>(&json)
@@ -249,7 +254,11 @@ fn cmd_profile_add(
         None
     };
 
-    let profile = ApiProfile::new(name.clone(), provider, url, key, model_mapping_map);
+    let mut profile = ApiProfile::new(name.clone(), provider, url, key, model_mapping_map);
+
+    if let Some(t) = target_app.as_deref() {
+        profile.target_app = Some(parse_target_app(t)?);
+    }
 
     db.add_profile(&profile)?;
 
@@ -287,8 +296,19 @@ fn cmd_profile_list(db: &Database, verbose: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_profile_delete(db: &Database, name: String, target_app: Option<String>, _force: bool) -> Result<()> {
+fn cmd_profile_delete(db: &Database, name: String, target_app: Option<String>, force: bool) -> Result<()> {
     let target = resolve_target_for_name(db, &name, target_app.as_deref())?;
+    if !force {
+        use std::io::Write;
+        print!("确定删除 Profile「{}」({})？[y/N] ", name, target);
+        std::io::stdout().flush().ok();
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).ok();
+        if !matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
+            utils::info("已取消");
+            return Ok(());
+        }
+    }
     if db.delete_profile(&name, target)? {
         utils::success(&format!("已删除 Profile: {} ({})", name, target));
     } else {
