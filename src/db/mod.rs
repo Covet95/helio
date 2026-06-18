@@ -181,48 +181,78 @@ impl Database {
         Ok(self.conn.last_insert_rowid())
     }
 
-    /// 根据名称获取 API Profile
+    /// 把一行 (13 列固定顺序) 映射为 ApiProfile，供各 SELECT 复用。
+    fn row_to_profile(row: &rusqlite::Row) -> rusqlite::Result<ApiProfile> {
+        let model_mapping_str: Option<String> = row.get(5)?;
+        let model_mapping = model_mapping_str
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        let context_1m: Option<i64> = row.get(8)?;
+        let target_app_str: Option<String> = row.get(11)?;
+        let target_app = target_app_str.as_deref().and_then(TargetApp::from_str);
+        let models_str: Option<String> = row.get(12)?;
+        let models = models_str
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+
+        Ok(ApiProfile {
+            id: Some(row.get(0)?),
+            name: row.get(1)?,
+            provider: row.get(2)?,
+            api_url: row.get(3)?,
+            api_key: row.get(4)?,
+            model_mapping,
+            model: row.get(6)?,
+            models,
+            reasoning_effort: row.get(7)?,
+            context_1m: context_1m.map(|v| v != 0),
+            created_at: Some(row.get(9)?),
+            updated_at: Some(row.get(10)?),
+            target_app,
+        })
+    }
+
+    /// 根据名称获取 API Profile。
+    ///
+    /// 0 行或多行(跨工具同名)均报错 → 供 CLI 无 target 时检测歧义。
     pub fn get_profile_by_name(&self, name: &str) -> Result<ApiProfile> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, provider, api_url, api_key, model_mapping, model, reasoning_effort, context_1m, created_at, updated_at, target_app, models
              FROM api_profiles WHERE name = ?1",
         )?;
 
-        let profile = stmt.query_row(params![name], |row| {
-            let model_mapping_str: Option<String> = row.get(5)?;
-            let model_mapping = model_mapping_str
-                .as_deref()
-                .map(serde_json::from_str)
-                .transpose()
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-            let context_1m: Option<i64> = row.get(8)?;
-            let target_app_str: Option<String> = row.get(11)?;
-            let target_app = target_app_str.as_deref().and_then(TargetApp::from_str);
-            let models_str: Option<String> = row.get(12)?;
-            let models = models_str
-                .as_deref()
-                .map(serde_json::from_str)
-                .transpose()
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        let mut rows = stmt
+            .query_map(params![name], Self::row_to_profile)?
+            .collect::<Result<Vec<_>, _>>()?;
+        match rows.len() {
+            1 => Ok(rows.pop().unwrap()),
+            0 => Err(anyhow::anyhow!("未找到 Profile: {name}")),
+            _ => Err(anyhow::anyhow!("存在多个同名 Profile「{name}」,请指定目标应用")),
+        }
+    }
 
-            Ok(ApiProfile {
-                id: Some(row.get(0)?),
-                name: row.get(1)?,
-                provider: row.get(2)?,
-                api_url: row.get(3)?,
-                api_key: row.get(4)?,
-                model_mapping,
-                model: row.get(6)?,
-                models,
-                reasoning_effort: row.get(7)?,
-                context_1m: context_1m.map(|v| v != 0),
-                created_at: Some(row.get(9)?),
-                updated_at: Some(row.get(10)?),
-                target_app,
-            })
-        })?;
-
+    /// 按 (name, target_app) 精确获取 profile。
+    pub fn get_profile_by_name_and_target(&self, name: &str, target: TargetApp) -> Result<ApiProfile> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, provider, api_url, api_key, model_mapping, model, reasoning_effort, context_1m, created_at, updated_at, target_app, models
+             FROM api_profiles WHERE name = ?1 AND target_app = ?2",
+        )?;
+        let profile = stmt.query_row(params![name, target.as_str()], Self::row_to_profile)?;
         Ok(profile)
+    }
+
+    /// 某工具下是否已存在同名 profile(可排除某 id,用于改名校验)。
+    pub fn profile_name_exists(&self, name: &str, target: TargetApp, exclude_id: Option<i64>) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM api_profiles WHERE name = ?1 AND target_app = ?2 AND (?3 IS NULL OR id != ?3)",
+            params![name, target.as_str(), exclude_id],
+            |r| r.get(0),
+        )?;
+        Ok(count > 0)
     }
 
     /// 列出所有 API Profiles
@@ -233,39 +263,7 @@ impl Database {
         )?;
 
         let profiles = stmt
-            .query_map([], |row| {
-                let model_mapping_str: Option<String> = row.get(5)?;
-                let model_mapping = model_mapping_str
-                    .as_deref()
-                    .map(serde_json::from_str)
-                    .transpose()
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-                let context_1m: Option<i64> = row.get(8)?;
-                let target_app_str: Option<String> = row.get(11)?;
-                let target_app = target_app_str.as_deref().and_then(TargetApp::from_str);
-                let models_str: Option<String> = row.get(12)?;
-                let models = models_str
-                    .as_deref()
-                    .map(serde_json::from_str)
-                    .transpose()
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-
-                Ok(ApiProfile {
-                    id: Some(row.get(0)?),
-                    name: row.get(1)?,
-                    provider: row.get(2)?,
-                    api_url: row.get(3)?,
-                    api_key: row.get(4)?,
-                    model_mapping,
-                    model: row.get(6)?,
-                    models,
-                    reasoning_effort: row.get(7)?,
-                    context_1m: context_1m.map(|v| v != 0),
-                    created_at: Some(row.get(9)?),
-                    updated_at: Some(row.get(10)?),
-                    target_app,
-                })
-            })?
+            .query_map([], Self::row_to_profile)?
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(profiles)
@@ -334,28 +332,24 @@ impl Database {
         Ok(())
     }
 
-    /// 删除 API Profile
-    pub fn delete_profile(&self, name: &str) -> Result<bool> {
-        // 先查出 id，清理 active_profiles 里的引用（避免外键约束失败），再删 profile
+    /// 删除某工具下指定名称的 Profile。
+    pub fn delete_profile(&self, name: &str, target: TargetApp) -> Result<bool> {
+        // 先查 id 清理 active 引用，再删
         let id: Option<i64> = self
             .conn
             .query_row(
-                "SELECT id FROM api_profiles WHERE name = ?1",
-                params![name],
+                "SELECT id FROM api_profiles WHERE name = ?1 AND target_app = ?2",
+                params![name, target.as_str()],
                 |row| row.get(0),
             )
             .optional()?;
-
         if let Some(pid) = id {
-            self.conn.execute(
-                "DELETE FROM active_profiles WHERE profile_id = ?1",
-                params![pid],
-            )?;
+            self.conn.execute("DELETE FROM active_profiles WHERE profile_id = ?1", params![pid])?;
         }
-
-        let rows = self
-            .conn
-            .execute("DELETE FROM api_profiles WHERE name = ?1", params![name])?;
+        let rows = self.conn.execute(
+            "DELETE FROM api_profiles WHERE name = ?1 AND target_app = ?2",
+            params![name, target.as_str()],
+        )?;
         Ok(rows > 0)
     }
 
@@ -597,6 +591,40 @@ mod tests {
         let targets = db.get_active_targets_for_profile(id)?;
         assert_eq!(targets, vec![TargetApp::ClaudeCode, TargetApp::OpenCode]);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_composite_lookup_delete_exists() -> Result<()> {
+        let db = Database::open(":memory:")?;
+        let mk = |name: &str, t: TargetApp| ApiProfile {
+            name: name.into(), provider: "p".into(), api_url: "u".into(), api_key: "k".into(),
+            target_app: Some(t), ..Default::default()
+        };
+        let id_cc = db.add_profile(&mk("一一", TargetApp::ClaudeCode))?;
+        let id_cx = db.add_profile(&mk("一一", TargetApp::Codex))?;
+        assert_ne!(id_cc, id_cx);
+
+        // 精确查:各取各
+        let a = db.get_profile_by_name_and_target("一一", TargetApp::ClaudeCode)?;
+        let b = db.get_profile_by_name_and_target("一一", TargetApp::Codex)?;
+        assert_eq!(a.id, Some(id_cc));
+        assert_eq!(b.id, Some(id_cx));
+
+        // 查重:同工具命中、排除自身不命中、另一工具命中各自的
+        assert!(db.profile_name_exists("一一", TargetApp::ClaudeCode, None)?);
+        assert!(!db.profile_name_exists("一一", TargetApp::ClaudeCode, Some(id_cc))?);
+        assert!(!db.profile_name_exists("二二", TargetApp::ClaudeCode, None)?);
+
+        // 删 codex 的 一一,不影响 claude 的
+        assert!(db.delete_profile("一一", TargetApp::Codex)?);
+        assert!(db.get_profile_by_name_and_target("一一", TargetApp::Codex).is_err());
+        assert!(db.get_profile_by_name_and_target("一一", TargetApp::ClaudeCode).is_ok());
+
+        // 跨工具同名时 name-only 查询应报错(歧义)——重建两条
+        db.add_profile(&mk("三三", TargetApp::ClaudeCode))?;
+        db.add_profile(&mk("三三", TargetApp::Codex))?;
+        assert!(db.get_profile_by_name("三三").is_err(), "跨工具同名 name-only 查应报错(歧义)");
         Ok(())
     }
 

@@ -252,9 +252,11 @@ pub async fn update_profile(profile: ApiProfile, state: State<'_, AppState>) -> 
 }
 
 #[tauri::command]
-pub async fn delete_profile(name: String, state: State<'_, AppState>) -> Result<bool, String> {
+pub async fn delete_profile(name: String, target_app: String, state: State<'_, AppState>) -> Result<bool, String> {
+    let target = TargetApp::from_str(&target_app)
+        .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.delete_profile(&name).map_err(|e| e.to_string())
+    db.delete_profile(&name, target).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

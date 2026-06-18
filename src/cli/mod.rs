@@ -108,6 +108,9 @@ pub enum ProfileCommands {
     Delete {
         /// Profile 名称
         name: String,
+        /// 目标应用 (claude-code, codex)
+        #[arg(long)]
+        target_app: Option<String>,
         /// 强制删除不提示
         #[arg(short, long)]
         force: bool,
@@ -159,8 +162,8 @@ pub fn execute(cli: Cli) -> Result<()> {
             ProfileCommands::List { verbose } => {
                 cmd_profile_list(&db, verbose)?;
             }
-            ProfileCommands::Delete { name, force } => {
-                cmd_profile_delete(&db, name, force)?;
+            ProfileCommands::Delete { name, target_app, force } => {
+                cmd_profile_delete(&db, name, target_app, force)?;
             }
             ProfileCommands::Show { name } => {
                 cmd_profile_show(&db, name)?;
@@ -277,20 +280,31 @@ fn cmd_profile_list(db: &Database, verbose: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_profile_delete(db: &Database, name: String, force: bool) -> Result<()> {
-    if !force
-        && !utils::confirm(&format!("确定要删除 Profile '{}'？", name))? {
-            utils::info("已取消");
-            return Ok(());
-        }
-
-    if db.delete_profile(&name)? {
-        utils::success(&format!("已删除 API Profile: {}", name));
+fn cmd_profile_delete(db: &Database, name: String, target_app: Option<String>, _force: bool) -> Result<()> {
+    let target = resolve_target_for_name(db, &name, target_app.as_deref())?;
+    if db.delete_profile(&name, target)? {
+        utils::success(&format!("已删除 Profile: {} ({})", name, target));
     } else {
-        anyhow::bail!("Profile '{}' 不存在", name);
+        utils::warning(&format!("未找到 Profile: {} ({})", name, target));
     }
-
     Ok(())
+}
+
+/// 解析 name 对应的 target：显式给了就用;没给则按 name 找所有匹配,唯一则用,多/零则报错。
+fn resolve_target_for_name(db: &Database, name: &str, target_app: Option<&str>) -> Result<TargetApp> {
+    if let Some(s) = target_app {
+        return parse_target_app(s);
+    }
+    let matches: Vec<TargetApp> = db.list_profiles()?
+        .into_iter()
+        .filter(|p| p.name == name)
+        .filter_map(|p| p.target_app)
+        .collect();
+    match matches.as_slice() {
+        [t] => Ok(*t),
+        [] => Err(anyhow::anyhow!("未找到 Profile: {name}")),
+        _ => Err(anyhow::anyhow!("存在多个同名 Profile「{name}」,请用 --target-app 指定工具")),
+    }
 }
 
 fn cmd_profile_show(db: &Database, name: String) -> Result<()> {
