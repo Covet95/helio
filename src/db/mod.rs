@@ -97,6 +97,12 @@ impl Database {
 
         // 重建表:新表用复合唯一。注意去 -cc 后缀(仅 target_app 非空、去后缀后同工具不冲突)。
         // 整个重建流程包在单个事务中以保证原子性(防止 DROP 与 RENAME 之间进程被杀留下孤表)。
+        //
+        // 关键:active_profiles 有 FOREIGN KEY ... REFERENCES api_profiles(id)。开启外键检查时
+        // `DROP TABLE api_profiles` 会触发 FOREIGN KEY constraint failed 导致整个事务回滚。
+        // 按 SQLite 官方安全重建表流程,重建期间必须关闭外键检查;
+        // 而 `PRAGMA foreign_keys` 在事务内是 no-op,必须在 BEGIN 之前设置、COMMIT 之后恢复。
+        self.conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
         self.conn.execute_batch(
             r#"
             BEGIN;
@@ -139,6 +145,7 @@ impl Database {
             COMMIT;
             "#,
         )?;
+        self.conn.execute_batch("PRAGMA foreign_keys=ON;")?;
 
         Ok(())
     }
@@ -656,6 +663,13 @@ mod tests {
                 INSERT INTO api_profiles (name,provider,api_url,api_key,created_at,updated_at,target_app) VALUES
                     ('一一','anthropic','u','k',0,0,'claude-code'),
                     ('一一-cc','openai','u','k',0,0,'codex');
+
+                CREATE TABLE active_profiles (
+                    target_app TEXT PRIMARY KEY,
+                    profile_id INTEGER NOT NULL,
+                    FOREIGN KEY (profile_id) REFERENCES api_profiles(id) ON DELETE CASCADE
+                );
+                INSERT INTO active_profiles (target_app, profile_id) VALUES ('codex', 2);
                 "#,
             )?;
         }
@@ -688,6 +702,12 @@ mod tests {
             .find(|p| p.name == "一一" && p.target_app == Some(TargetApp::Codex))
             .expect("codex 一一(原 一一-cc) 存在");
         assert_eq!(codex_yi.id, Some(2), "codex 一一(原 一一-cc) 应保留 id=2");
+
+        // 5b) active_profiles 的外键记录在重建后仍存在且 profile_id 不变
+        let active_pid: i64 = db.conn.query_row(
+            "SELECT profile_id FROM active_profiles WHERE target_app = 'codex'",
+            [], |r| r.get(0))?;
+        assert_eq!(active_pid, 2, "active_profiles(codex) 应仍指向 profile_id=2(迁移不应回滚/丢失)");
 
         // 6) 复合唯一：codex 再插一个 一一 应失败；claude 插 一一 也应失败(同工具重名)
         let dup = ApiProfile { name:"一一".into(), provider:"x".into(), api_url:"u".into(), api_key:"k".into(), target_app:Some(TargetApp::Codex), ..Default::default() };
