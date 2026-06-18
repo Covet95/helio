@@ -15,7 +15,7 @@ interface AppStore {
   fetchProfiles: () => Promise<void>;
   addProfile: (profile: ApiProfile) => Promise<void>;
   updateProfile: (profile: ApiProfile) => Promise<void>;
-  deleteProfile: (name: string) => Promise<void>;
+  deleteProfile: (targetApp: TargetApp, name: string) => Promise<void>;
   switchProfile: (app: TargetApp, name: string) => Promise<void>;
 
   fetchStatus: () => Promise<void>;
@@ -69,9 +69,9 @@ export const useStore = create<AppStore>((set, get) => ({
   },
 
   // Delete profile
-  deleteProfile: async (name) => {
+  deleteProfile: async (targetApp, name) => {
     try {
-      await tauriApi.deleteProfile(name);
+      await tauriApi.deleteProfile(targetApp, name);
       await get().fetchProfiles();
     } catch (error) {
       console.error('Failed to delete profile:', error);

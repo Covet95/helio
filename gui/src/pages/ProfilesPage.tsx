@@ -67,7 +67,7 @@ export default function ProfilesPage() {
     setFeedback(null);
     try {
       for (const p of dupExtras) {
-        await deleteProfile(p.name);
+        await deleteProfile(p.target_app ?? targetApp, p.name);
       }
       setFeedback({ kind: 'success', text: `已清理 ${dupExtras.length} 个重复档案` });
     } catch (e) {
@@ -169,7 +169,7 @@ export default function ProfilesPage() {
           <div className="max-w-5xl overflow-hidden rounded-lg border border-line bg-card">
             {filteredProfiles.map((p) => (
               <ProfileCard
-                key={p.name}
+                key={p.id ?? p.name}
                 profile={p}
                 active={activeProfile?.name === p.name}
                 justSwitched={switched?.startsWith(`${p.name}→`) ?? false}
@@ -219,7 +219,7 @@ export default function ProfilesPage() {
           onCancel={() => setDeleting(null)}
           onConfirm={async () => {
             try {
-              await deleteProfile(deleting);
+              await deleteProfile(targetApp, deleting);
             } catch (e) {
               alert('删除失败：' + e);
             }

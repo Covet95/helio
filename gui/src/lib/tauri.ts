@@ -24,8 +24,8 @@ export const tauriApi = {
   listProfiles: () =>
     command<ApiProfile[]>('list_profiles', undefined, []),
 
-  getProfile: (name: string) =>
-    command<ApiProfile>('get_profile', { name }),
+  getProfile: (targetApp: TargetApp, name: string) =>
+    command<ApiProfile>('get_profile', { name, targetApp }),
 
   addProfile: (profile: ApiProfile) =>
     command<number>('add_profile', { profile }),
@@ -33,8 +33,8 @@ export const tauriApi = {
   updateProfile: (profile: ApiProfile) =>
     command<void>('update_profile', { profile }),
 
-  deleteProfile: (name: string) =>
-    command<boolean>('delete_profile', { name }),
+  deleteProfile: (targetApp: TargetApp, name: string) =>
+    command<boolean>('delete_profile', { name, targetApp }),
 
   switchProfile: (targetApp: TargetApp, profileName: string) =>
     command<void>('switch_profile', { targetApp, profileName }),
