@@ -183,7 +183,7 @@ fn do_switch(app: &AppHandle, tool: TargetApp, profile_name: &str) {
     let result: Result<(), String> = (|| {
         let state = app.state::<AppState>();
         let db = state.db.lock().map_err(|e| e.to_string())?;
-        let profile = db.get_profile_by_name(profile_name).map_err(|e| e.to_string())?;
+        let profile = db.get_profile_by_name_and_target(profile_name, tool).map_err(|e| e.to_string())?;
         apply_profile_config(&db, tool, &profile)?;
         let id = profile.id.ok_or_else(|| "profile 无 id".to_string())?;
         db.set_active_profile(tool, id).map_err(|e| e.to_string())?;

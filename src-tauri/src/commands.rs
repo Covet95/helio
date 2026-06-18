@@ -220,9 +220,11 @@ pub async fn list_profiles(state: State<'_, AppState>) -> Result<Vec<ApiProfile>
 }
 
 #[tauri::command]
-pub async fn get_profile(name: String, state: State<'_, AppState>) -> Result<ApiProfile, String> {
+pub async fn get_profile(name: String, target_app: String, state: State<'_, AppState>) -> Result<ApiProfile, String> {
+    let target = TargetApp::from_str(&target_app)
+        .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.get_profile_by_name(&name).map_err(|e| e.to_string())
+    db.get_profile_by_name_and_target(&name, target).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -272,7 +274,7 @@ pub async fn switch_profile(
 
     // 获取 API Profile
     let api_profile = db
-        .get_profile_by_name(&profile_name)
+        .get_profile_by_name_and_target(&profile_name, target)
         .map_err(|e| e.to_string())?;
 
     apply_profile_config(&db, target, &api_profile)?;
@@ -793,8 +795,8 @@ pub async fn import_cc_switch(
     for p in providers {
         // 名称冲突则加后缀
         let mut name = p.name.clone();
-        if db.get_profile_by_name(&name).is_ok() {
-            name = format!("{}-cc", p.name);
+        if db.profile_name_exists(&name, target, None).unwrap_or(false) {
+            name = format!("{}-{}", p.name, target.as_str());
         }
         let profile = ApiProfile {
             name,
