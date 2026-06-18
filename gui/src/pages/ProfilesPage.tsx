@@ -4,12 +4,12 @@ import { Button } from '../components/common/Button';
 import { Spinner } from '../components/common/Spinner';
 import { PageHeader } from '../components/common/PageHeader';
 import { Modal, Field, ConfirmDialog } from '../components/common/Modal';
-import { Plus, Pencil, Trash2, Check, Layers, Search, FilePlus2, Eye, EyeOff, Link2, FileJson } from 'lucide-react';
+import { Plus, Pencil, Trash2, Check, Layers, Search, Eye, EyeOff, Link2, FileJson } from 'lucide-react';
 import type { ApiProfile, FetchedModel, StatusInfo, TargetApp } from '../types';
 import { SUPPORTED_TOOLS, toolById } from '../types';
 import { cn, maskApiKey } from '../lib/utils';
 import { PROVIDER_PRESETS, REASONING_LEVELS } from '../lib/presets';
-import { duplicateProfileDraft, profileApiConfigText, profileApiUrlText } from '../lib/profileCopy';
+import { profileApiConfigText, profileApiUrlText } from '../lib/profileCopy';
 import { copyText } from '../lib/clipboard';
 
 export default function ProfilesPage() {
@@ -17,7 +17,6 @@ export default function ProfilesPage() {
   const [targetApp, setTargetApp] = useState<TargetApp>('claude-code');
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState<ApiProfile | null>(null);
-  const [draft, setDraft] = useState<ApiProfile | null>(null);
   const [switched, setSwitched] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [query, setQuery] = useState('');
@@ -90,13 +89,6 @@ export default function ProfilesPage() {
     }
   };
 
-  const handleDuplicate = (profile: ApiProfile) => {
-    setFeedback(null);
-    setEditing(null);
-    setDraft(duplicateProfileDraft(profile, profiles.map((item) => item.name)));
-    setShowModal(true);
-  };
-
   const handleCopy = async (label: string, text: string) => {
     setFeedback(null);
     try {
@@ -118,7 +110,7 @@ export default function ProfilesPage() {
                 去重 ({dupExtras.length})
               </Button>
             )}
-            <Button onClick={() => { setEditing(null); setDraft(null); setShowModal(true); }}>
+            <Button onClick={() => { setEditing(null); setShowModal(true); }}>
               <Plus size={16} strokeWidth={2.5} />
               新建档案
             </Button>
@@ -186,7 +178,6 @@ export default function ProfilesPage() {
                 justSwitched={switched?.startsWith(`${p.name}→`) ?? false}
                 onEdit={() => { setEditing(p); setShowModal(true); }}
                 onDelete={() => setDeleting(p.name)}
-                onDuplicate={() => handleDuplicate(p)}
                 onCopyApiUrl={() => handleCopy('API URL', profileApiUrlText(p))}
                 onCopyApiConfig={() => handleCopy('API 配置', profileApiConfigText(p))}
                 onSwitch={() => handleSwitch(p.name)}
@@ -199,9 +190,8 @@ export default function ProfilesPage() {
       {showModal && (
         <ProfileModal
           profile={editing}
-          draft={draft}
           initialTool={targetApp}
-          onClose={() => { setShowModal(false); setDraft(null); }}
+          onClose={() => setShowModal(false)}
           onSave={async (p) => {
             try {
               if (editing) await updateProfile(p); else await addProfile(p);
@@ -215,9 +205,8 @@ export default function ProfilesPage() {
             }
             setFeedback({
               kind: 'success',
-              text: editing ? `已保存「${p.name}」` : draft ? `已复制为 ${p.name}` : `已创建「${p.name}」`,
+              text: editing ? `已保存「${p.name}」` : `已创建「${p.name}」`,
             });
-            setDraft(null);
             setShowModal(false);
           }}
         />
@@ -265,14 +254,13 @@ function EmptyState() {
 }
 
 function ProfileCard({
-  profile, active, justSwitched, onEdit, onDelete, onDuplicate, onCopyApiUrl, onCopyApiConfig, onSwitch,
+  profile, active, justSwitched, onEdit, onDelete, onCopyApiUrl, onCopyApiConfig, onSwitch,
 }: {
   profile: ApiProfile;
   active: boolean;
   justSwitched: boolean;
   onEdit: () => void;
   onDelete: () => void;
-  onDuplicate: () => void;
   onCopyApiUrl: () => void;
   onCopyApiConfig: () => void;
   onSwitch: () => void;
@@ -329,7 +317,6 @@ function ProfileCard({
           <IconBtn label="编辑" onClick={onEdit}><Pencil size={15} /></IconBtn>
           <IconBtn label="复制 API URL" onClick={onCopyApiUrl}><Link2 size={15} /></IconBtn>
           <IconBtn label="复制 API 配置" onClick={onCopyApiConfig}><FileJson size={15} /></IconBtn>
-          <IconBtn label="创建副本" onClick={onDuplicate}><FilePlus2 size={15} /></IconBtn>
           <IconBtn label="删除" danger onClick={onDelete}><Trash2 size={15} /></IconBtn>
           {active ? (
             <span className="ml-1 rounded-md border border-ok/25 bg-ok/8 px-2.5 py-1.5 text-[12px] font-medium text-ok">当前</span>
@@ -403,15 +390,14 @@ function activeProfileFor(status: StatusInfo | null, targetApp: TargetApp): ApiP
 }
 
 function ProfileModal({
-  profile, draft, initialTool, onClose, onSave,
+  profile, initialTool, onClose, onSave,
 }: {
   profile: ApiProfile | null;
-  draft: ApiProfile | null;
   initialTool: TargetApp;
   onClose: () => void;
   onSave: (p: ApiProfile) => void;
 }) {
-  const initialProfile = profile ?? draft;
+  const initialProfile = profile;
   const initialModalTool = initialProfile?.target_app ?? initialTool;
   const [tool, setTool] = useState<TargetApp>(initialModalTool);
   const [form, setForm] = useState<ApiProfile>(
@@ -467,13 +453,13 @@ function ProfileModal({
 
   return (
     <Modal
-      title={profile ? '编辑配置档案' : draft ? '复制配置档案' : '新建配置档案'}
+      title={profile ? '编辑配置档案' : '新建配置档案'}
       onClose={onClose}
       size="lg"
       footer={
         <>
           <Button type="button" variant="ghost" onClick={onClose}>取消</Button>
-          <Button type="button" onClick={submit}>{profile ? '保存' : draft ? '创建副本' : '创建'}</Button>
+          <Button type="button" onClick={submit}>{profile ? '保存' : '创建'}</Button>
         </>
       }
     >

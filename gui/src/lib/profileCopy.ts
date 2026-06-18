@@ -1,5 +1,4 @@
 import type { ApiProfile } from '../types';
-import { nextCopyName } from './profileNames';
 
 type CopyableProfileConfig = Pick<
   ApiProfile,
@@ -14,19 +13,6 @@ type CopyableProfileConfig = Pick<
   | 'context_1m'
   | 'target_app'
 >;
-
-export function duplicateProfileDraft(
-  profile: ApiProfile,
-  existingNames: Iterable<string>,
-): ApiProfile {
-  return {
-    ...profile,
-    id: undefined,
-    name: nextCopyName(profile.name, existingNames),
-    created_at: undefined,
-    updated_at: undefined,
-  };
-}
 
 export function profileApiUrlText(profile: ApiProfile): string {
   return profile.api_url;

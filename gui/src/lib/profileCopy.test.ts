@@ -1,4 +1,4 @@
-import { duplicateProfileDraft, profileApiConfigText, profileApiUrlText } from './profileCopy';
+import { profileApiConfigText, profileApiUrlText } from './profileCopy';
 
 function equal(actual: unknown, expected: unknown) {
   if (actual !== expected) {
@@ -16,15 +16,6 @@ const source = {
   created_at: 100,
   updated_at: 200,
 };
-
-const draft = duplicateProfileDraft(source, ['prod', 'prod-copy']);
-
-equal(draft.id, undefined);
-equal(draft.name, 'prod-copy-2');
-equal(draft.target_app, 'opencode');
-equal(draft.created_at, undefined);
-equal(draft.updated_at, undefined);
-equal(source.id, 42);
 
 equal(profileApiUrlText(source), 'https://api.example.com');
 
