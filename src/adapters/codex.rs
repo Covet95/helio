@@ -173,6 +173,8 @@ impl ConfigAdapter for CodexAdapter {
                     "base_url".to_string(),
                     serde_json::Value::String(api_profile.api_url.clone()),
                 );
+                p.entry("requires_openai_auth".to_string())
+                    .or_insert_with(|| serde_json::Value::Bool(true));
                 if is_new {
                     // 全新 provider：补上 Codex 必需的协议默认值。
                     p.entry("name".to_string())
@@ -190,6 +192,47 @@ impl ConfigAdapter for CodexAdapter {
         config["model_provider"] = serde_json::Value::String(provider_id);
         if let Some(obj) = config.as_object_mut() {
             obj.remove("api_key");
+
+            match api_profile.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                Some(model) => {
+                    obj.insert(
+                        "model".to_string(),
+                        serde_json::Value::String(model.to_string()),
+                    );
+                }
+                None => {
+                    obj.remove("model");
+                }
+            }
+
+            match api_profile
+                .reasoning_effort
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                Some(reasoning_effort) => {
+                    obj.insert(
+                        "model_reasoning_effort".to_string(),
+                        serde_json::Value::String(reasoning_effort.to_string()),
+                    );
+                }
+                None => {
+                    obj.remove("model_reasoning_effort");
+                }
+            }
+
+            match api_profile.context_1m {
+                Some(true) => {
+                    obj.insert(
+                        "model_context_window".to_string(),
+                        serde_json::Value::Number(1_000_000.into()),
+                    );
+                }
+                Some(false) | None => {
+                    obj.remove("model_context_window");
+                }
+            }
         }
 
         config
@@ -394,6 +437,10 @@ command = "npx"
         );
         // 全新 provider 补上协议默认值
         assert_eq!(merged["model_providers"]["openai-custom"]["wire_api"], "responses");
+        assert_eq!(
+            merged["model_providers"]["openai-custom"]["requires_openai_auth"],
+            true
+        );
         // 不得创建被保留的 openai provider 块
         assert!(merged["model_providers"].get("openai").is_none());
         // API key 绝不写进 config.toml（走 auth.json）
@@ -426,6 +473,45 @@ command = "npx"
     }
 
     #[test]
+    fn test_merge_applies_codex_model_parameters() {
+        let adapter = CodexAdapter::new();
+        let profile = ApiProfile {
+            model: Some("gpt-5.5".to_string()),
+            reasoning_effort: Some("xhigh".to_string()),
+            context_1m: Some(true),
+            ..sample_profile()
+        };
+
+        let merged = adapter.merge_config(&profile, &serde_json::json!({}));
+
+        assert_eq!(merged["model"], "gpt-5.5");
+        assert_eq!(merged["model_reasoning_effort"], "xhigh");
+        assert_eq!(merged["model_context_window"], 1_000_000);
+    }
+
+    #[test]
+    fn test_merge_clears_disabled_codex_model_parameters() {
+        let adapter = CodexAdapter::new();
+        let shared = serde_json::json!({
+            "model": "old-model",
+            "model_reasoning_effort": "high",
+            "model_context_window": 1_000_000,
+        });
+        let profile = ApiProfile {
+            model: None,
+            reasoning_effort: None,
+            context_1m: Some(false),
+            ..sample_profile()
+        };
+
+        let merged = adapter.merge_config(&profile, &shared);
+
+        assert!(merged.get("model").is_none());
+        assert!(merged.get("model_reasoning_effort").is_none());
+        assert!(merged.get("model_context_window").is_none());
+    }
+
+    #[test]
     fn test_merge_preserves_existing_provider_protocol() {
         let adapter = CodexAdapter::new();
         // 已有 custom provider，带 wire_api / requires_openai_auth
@@ -454,6 +540,30 @@ command = "npx"
             "https://new.api.com/v1"
         );
         assert_eq!(merged["model_providers"]["custom"]["wire_api"], "responses");
+        assert_eq!(
+            merged["model_providers"]["custom"]["requires_openai_auth"],
+            true
+        );
+    }
+
+    #[test]
+    fn test_merge_fills_missing_openai_auth_on_existing_provider() {
+        let adapter = CodexAdapter::new();
+        let shared = serde_json::json!({
+            "model_providers": {
+                "custom": {
+                    "name": "custom",
+                    "wire_api": "responses"
+                }
+            }
+        });
+        let profile = ApiProfile {
+            provider: "custom".to_string(),
+            ..sample_profile()
+        };
+
+        let merged = adapter.merge_config(&profile, &shared);
+
         assert_eq!(
             merged["model_providers"]["custom"]["requires_openai_auth"],
             true

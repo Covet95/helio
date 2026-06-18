@@ -86,12 +86,18 @@ export const tauriApi = {
       api_url: string;
       api_key: string;
       provider: string;
+      model?: string;
+      reasoning_effort?: string;
+      context_1m?: boolean;
       source: string;
     }>('scan_local_api', { targetApp }, {
       found: false,
       api_url: '',
       api_key: '',
       provider: '',
+      model: undefined,
+      reasoning_effort: undefined,
+      context_1m: undefined,
       source: `${targetApp} config`,
     }),
 

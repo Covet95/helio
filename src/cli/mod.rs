@@ -95,6 +95,15 @@ pub enum ProfileCommands {
         /// 模型映射 (JSON 格式)
         #[arg(long)]
         model_mapping: Option<String>,
+        /// 默认模型
+        #[arg(long)]
+        model: Option<String>,
+        /// 推理强度 (low, medium, high, xhigh)
+        #[arg(long)]
+        reasoning_effort: Option<String>,
+        /// 启用 1M 上下文窗口
+        #[arg(long)]
+        context_1m: bool,
         /// 目标应用 (claude-code, codex, gemini, opencode)
         #[arg(long)]
         target_app: Option<String>,
@@ -147,6 +156,15 @@ pub enum ProfileCommands {
         /// 新的模型映射
         #[arg(long)]
         model_mapping: Option<String>,
+        /// 新的默认模型
+        #[arg(long)]
+        model: Option<String>,
+        /// 新的推理强度 (low, medium, high, xhigh)
+        #[arg(long)]
+        reasoning_effort: Option<String>,
+        /// 启用 1M 上下文窗口
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+        context_1m: Option<bool>,
     },
 }
 
@@ -165,9 +183,23 @@ pub fn execute(cli: Cli) -> Result<()> {
                 key,
                 provider,
                 model_mapping,
+                model,
+                reasoning_effort,
+                context_1m,
                 target_app,
             } => {
-                cmd_profile_add(&db, name, url, key, provider, model_mapping, target_app)?;
+                cmd_profile_add(
+                    &db,
+                    name,
+                    url,
+                    key,
+                    provider,
+                    model_mapping,
+                    model,
+                    reasoning_effort,
+                    context_1m,
+                    target_app,
+                )?;
             }
             ProfileCommands::List { verbose } => {
                 cmd_profile_list(&db, verbose)?;
@@ -185,8 +217,22 @@ pub fn execute(cli: Cli) -> Result<()> {
                 key,
                 provider,
                 model_mapping,
+                model,
+                reasoning_effort,
+                context_1m,
             } => {
-                cmd_profile_update(&db, name, target_app, url, key, provider, model_mapping)?;
+                cmd_profile_update(
+                    &db,
+                    name,
+                    target_app,
+                    url,
+                    key,
+                    provider,
+                    model_mapping,
+                    model,
+                    reasoning_effort,
+                    context_1m,
+                )?;
             }
         },
         Commands::Switch {
@@ -245,6 +291,9 @@ fn cmd_profile_add(
     key: String,
     provider: String,
     model_mapping: Option<String>,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    context_1m: bool,
     target_app: Option<String>,
 ) -> Result<()> {
     let model_mapping_map = if let Some(json) = model_mapping {
@@ -255,6 +304,11 @@ fn cmd_profile_add(
     };
 
     let mut profile = ApiProfile::new(name.clone(), provider, url, key, model_mapping_map);
+    profile.model = model.filter(|value| !value.trim().is_empty());
+    profile.reasoning_effort = reasoning_effort.filter(|value| !value.trim().is_empty());
+    if context_1m {
+        profile.context_1m = Some(true);
+    }
 
     if let Some(t) = target_app.as_deref() {
         profile.target_app = Some(parse_target_app(t)?);
@@ -342,6 +396,15 @@ fn cmd_profile_show(db: &Database, name: String, target_app: Option<String>) -> 
     println!("  Provider: {}", profile.provider);
     println!("  URL: {}", profile.api_url);
     println!("  Key: {}", profile.masked_key());
+    if let Some(model) = profile.model {
+        println!("  Model: {}", model);
+    }
+    if let Some(reasoning_effort) = profile.reasoning_effort {
+        println!("  Reasoning Effort: {}", reasoning_effort);
+    }
+    if let Some(context_1m) = profile.context_1m {
+        println!("  1M Context: {}", if context_1m { "enabled" } else { "disabled" });
+    }
 
     if let Some(mapping) = profile.model_mapping {
         println!("  Model Mapping:");
@@ -367,6 +430,9 @@ fn cmd_profile_update(
     key: Option<String>,
     provider: Option<String>,
     model_mapping: Option<String>,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    context_1m: Option<bool>,
 ) -> Result<()> {
     let target = resolve_target_for_name(db, &name, target_app.as_deref())?;
     let mut profile = db.get_profile_by_name_and_target(&name, target)?;
@@ -390,6 +456,29 @@ fn cmd_profile_update(
 
     if let Some(mapping_json) = model_mapping {
         profile.model_mapping = Some(serde_json::from_str(&mapping_json)?);
+        updated = true;
+    }
+
+    if let Some(new_model) = model {
+        profile.model = if new_model.trim().is_empty() {
+            None
+        } else {
+            Some(new_model)
+        };
+        updated = true;
+    }
+
+    if let Some(new_reasoning_effort) = reasoning_effort {
+        profile.reasoning_effort = if new_reasoning_effort.trim().is_empty() {
+            None
+        } else {
+            Some(new_reasoning_effort)
+        };
+        updated = true;
+    }
+
+    if let Some(new_context_1m) = context_1m {
+        profile.context_1m = Some(new_context_1m);
         updated = true;
     }
 

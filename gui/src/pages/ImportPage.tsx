@@ -17,6 +17,9 @@ interface Scanned {
   api_url: string;
   api_key: string;
   provider: string;
+  model?: string;
+  reasoning_effort?: string;
+  context_1m?: boolean;
   source: string;
 }
 interface LocalInfo {
@@ -96,6 +99,9 @@ export default function ImportPage() {
         provider: api.provider,
         api_url: api.api_url,
         api_key: api.api_key,
+        model: api.model,
+        reasoning_effort: api.reasoning_effort,
+        context_1m: api.context_1m,
         target_app: tool,
       });
       setFeedback({ text: `已导入为配置档案「${name.trim()}」`, kind: 'success' });
@@ -251,6 +257,9 @@ export default function ImportPage() {
                       <div className="grid grid-cols-2 gap-3">
                         <ReadField label="API URL" value={api.api_url || '—'} />
                         <ReadField label="API Key" value={api.api_key ? maskApiKey(api.api_key) : '—'} />
+                        {api.model && <ReadField label="默认模型" value={api.model} />}
+                        {api.reasoning_effort && <ReadField label="推理强度" value={api.reasoning_effort} />}
+                        {api.context_1m !== undefined && <ReadField label="1M 上下文" value={api.context_1m ? '启用' : '关闭'} />}
                       </div>
                     </div>
                     <div className="flex items-center justify-between gap-3">

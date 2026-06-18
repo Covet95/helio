@@ -419,6 +419,9 @@ pub struct ScannedApi {
     pub api_url: String,
     pub api_key: String,
     pub provider: String,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub context_1m: Option<bool>,
     /// 来源配置文件路径，便于用户确认
     pub source: String,
 }
@@ -569,6 +572,9 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
         api_url: url,
         api_key: key,
         provider,
+        model: codex_string_field(target, &cfg, "model"),
+        reasoning_effort: codex_string_field(target, &cfg, "model_reasoning_effort"),
+        context_1m: codex_context_1m(target, &cfg),
         source,
     })
 }
@@ -594,6 +600,33 @@ pub async fn import_shared_config(
 
 fn str_field(v: &serde_json::Value, key: &str) -> String {
     v.get(key).and_then(|x| x.as_str()).unwrap_or("").to_string()
+}
+
+fn codex_string_field(
+    target: TargetApp,
+    cfg: &serde_json::Value,
+    key: &str,
+) -> Option<String> {
+    if target != TargetApp::Codex {
+        return None;
+    }
+
+    let value = str_field(cfg, key);
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn codex_context_1m(target: TargetApp, cfg: &serde_json::Value) -> Option<bool> {
+    if target != TargetApp::Codex {
+        return None;
+    }
+
+    cfg.get("model_context_window")
+        .and_then(|w| w.as_i64())
+        .map(|w| w >= 1_000_000)
 }
 
 fn default_provider(target: TargetApp) -> String {
