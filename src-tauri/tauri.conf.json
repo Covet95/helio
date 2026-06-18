@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "com.helio.app",
   "build": {
-    "beforeDevCommand": "cd /Users/covet/Desktop/switch-api/gui && npm run dev",
-    "beforeBuildCommand": "cd /Users/covet/Desktop/switch-api/gui && npm run build",
+    "beforeDevCommand": "npm --prefix gui run dev",
+    "beforeBuildCommand": "npm --prefix gui run build",
     "devUrl": "http://localhost:5173",
     "frontendDist": "../gui/dist"
   },

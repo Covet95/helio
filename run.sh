@@ -17,5 +17,5 @@ cargo tauri build 2>&1 | tail -2
 killall Dock 2>/dev/null || true
 killall Finder 2>/dev/null || true
 sleep 1
-open /Users/covet/Desktop/switch-api/target/release/bundle/macos/Helio.app
+open ../target/release/bundle/macos/Helio.app
 echo "✓ Helio.app 已打开（dock = 太阳图标 + 最新代码）"
