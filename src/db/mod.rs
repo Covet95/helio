@@ -223,25 +223,6 @@ impl Database {
         })
     }
 
-    /// 根据名称获取 API Profile。
-    ///
-    /// 0 行或多行(跨工具同名)均报错 → 供 CLI 无 target 时检测歧义。
-    pub fn get_profile_by_name(&self, name: &str) -> Result<ApiProfile> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, name, provider, api_url, api_key, model_mapping, model, reasoning_effort, context_1m, created_at, updated_at, target_app, models
-             FROM api_profiles WHERE name = ?1",
-        )?;
-
-        let mut rows = stmt
-            .query_map(params![name], Self::row_to_profile)?
-            .collect::<Result<Vec<_>, _>>()?;
-        match rows.len() {
-            1 => Ok(rows.pop().unwrap()),
-            0 => Err(anyhow::anyhow!("未找到 Profile: {name}")),
-            _ => Err(anyhow::anyhow!("存在多个同名 Profile「{name}」,请指定目标应用")),
-        }
-    }
-
     /// 按 (name, target_app) 精确获取 profile。
     pub fn get_profile_by_name_and_target(&self, name: &str, target: TargetApp) -> Result<ApiProfile> {
         let mut stmt = self.conn.prepare(
@@ -253,6 +234,9 @@ impl Database {
     }
 
     /// 某工具下是否已存在同名 profile(可排除某 id,用于改名校验)。
+    ///
+    /// 仅 GUI(tauri-gui)的 import 流程调用;CLI bin 不走此路径,故对 CLI 编译标记 allow。
+    #[allow(dead_code)]
     pub fn profile_name_exists(&self, name: &str, target: TargetApp, exclude_id: Option<i64>) -> Result<bool> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM api_profiles WHERE name = ?1 AND target_app = ?2 AND (?3 IS NULL OR id != ?3)",
@@ -510,7 +494,7 @@ mod tests {
         assert!(id > 0);
 
         // 测试获取 Profile
-        let retrieved = db.get_profile_by_name("test-profile")?;
+        let retrieved = db.get_profile_by_name_and_target("test-profile", TargetApp::ClaudeCode)?;
         assert_eq!(retrieved.name, "test-profile");
         assert_eq!(retrieved.api_url, "https://api.anthropic.com");
         assert_eq!(retrieved.target_app, Some(TargetApp::ClaudeCode));
@@ -548,6 +532,7 @@ mod tests {
             provider: "anthropic".to_string(),
             api_url: "https://api.example.com/v1".to_string(),
             api_key: "sk-old".to_string(),
+            target_app: Some(TargetApp::ClaudeCode),
             ..Default::default()
         };
         let id = db.add_profile(&profile)?;
@@ -561,13 +546,14 @@ mod tests {
             provider: "anthropic".to_string(),
             api_url: "https://api.example.com/v1".to_string(),
             api_key: "sk-new".to_string(),
+            target_app: Some(TargetApp::ClaudeCode),
             ..Default::default()
         };
         db.update_profile(&edited)?;
 
         // 旧名查不到，新名查得到，且 id 不变、字段已更新
-        assert!(db.get_profile_by_name("old-name").is_err(), "旧名应已不存在");
-        let got = db.get_profile_by_name("new-name")?;
+        assert!(db.get_profile_by_name_and_target("old-name", TargetApp::ClaudeCode).is_err(), "旧名应已不存在");
+        let got = db.get_profile_by_name_and_target("new-name", TargetApp::ClaudeCode)?;
         assert_eq!(got.id, Some(id), "改名不应改变 id");
         assert_eq!(got.api_key, "sk-new");
 
@@ -627,11 +613,6 @@ mod tests {
         assert!(db.delete_profile("一一", TargetApp::Codex)?);
         assert!(db.get_profile_by_name_and_target("一一", TargetApp::Codex).is_err());
         assert!(db.get_profile_by_name_and_target("一一", TargetApp::ClaudeCode).is_ok());
-
-        // 跨工具同名时 name-only 查询应报错(歧义)——重建两条
-        db.add_profile(&mk("三三", TargetApp::ClaudeCode))?;
-        db.add_profile(&mk("三三", TargetApp::Codex))?;
-        assert!(db.get_profile_by_name("三三").is_err(), "跨工具同名 name-only 查应报错(歧义)");
         Ok(())
     }
 
