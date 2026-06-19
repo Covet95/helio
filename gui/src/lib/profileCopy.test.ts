@@ -1,4 +1,4 @@
-import { profileApiKeyText, profileApiUrlText } from './profileCopy';
+import { profileApiCredentialsText } from './profileCopy';
 
 function equal(actual: unknown, expected: unknown) {
   if (actual !== expected) {
@@ -17,5 +17,4 @@ const source = {
   updated_at: 200,
 };
 
-equal(profileApiUrlText(source), 'https://api.example.com');
-equal(profileApiKeyText(source), 'sk-test');
+equal(profileApiCredentialsText(source), 'API URL: https://api.example.com\nAPI Key: sk-test');

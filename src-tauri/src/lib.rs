@@ -64,6 +64,7 @@ pub fn run() {
             commands::scan_cc_switch,
             commands::import_cc_switch,
             model_fetch::fetch_models,
+            model_fetch::test_model,
             session_history::list_sessions,
             session_history::read_session_preview,
             session_history::delete_session,

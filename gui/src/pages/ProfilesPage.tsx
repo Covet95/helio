@@ -4,12 +4,12 @@ import { Button } from '../components/common/Button';
 import { Spinner } from '../components/common/Spinner';
 import { PageHeader } from '../components/common/PageHeader';
 import { Modal, Field, ConfirmDialog } from '../components/common/Modal';
-import { Plus, Pencil, Trash2, Check, Layers, Search, Eye, EyeOff, Link2, KeyRound } from 'lucide-react';
+import { Plus, Pencil, Trash2, Check, Layers, Search, Eye, EyeOff, Link2 } from 'lucide-react';
 import type { ApiProfile, FetchedModel, StatusInfo, TargetApp } from '../types';
 import { SUPPORTED_TOOLS, toolById } from '../types';
 import { cn, maskApiKey } from '../lib/utils';
 import { PROVIDER_PRESETS, REASONING_LEVELS } from '../lib/presets';
-import { profileApiKeyText, profileApiUrlText } from '../lib/profileCopy';
+import { profileApiCredentialsText } from '../lib/profileCopy';
 import { copyText } from '../lib/clipboard';
 
 export default function ProfilesPage() {
@@ -178,8 +178,7 @@ export default function ProfilesPage() {
                 justSwitched={switched?.startsWith(`${p.name}→`) ?? false}
                 onEdit={() => { setEditing(p); setShowModal(true); }}
                 onDelete={() => setDeleting(p.name)}
-                onCopyApiUrl={() => handleCopy('API URL', profileApiUrlText(p))}
-                onCopyApiKey={() => handleCopy('API Key', profileApiKeyText(p))}
+                onCopyCredentials={() => handleCopy('URL + Key', profileApiCredentialsText(p))}
                 onSwitch={() => handleSwitch(p.name)}
               />
             ))}
@@ -254,15 +253,14 @@ function EmptyState() {
 }
 
 function ProfileCard({
-  profile, active, justSwitched, onEdit, onDelete, onCopyApiUrl, onCopyApiKey, onSwitch,
+  profile, active, justSwitched, onEdit, onDelete, onCopyCredentials, onSwitch,
 }: {
   profile: ApiProfile;
   active: boolean;
   justSwitched: boolean;
   onEdit: () => void;
   onDelete: () => void;
-  onCopyApiUrl: () => void;
-  onCopyApiKey: () => void;
+  onCopyCredentials: () => void;
   onSwitch: () => void;
 }) {
   const tint = providerTint(profile.provider);
@@ -315,8 +313,7 @@ function ProfileCard({
 
         <div className="flex items-center gap-1.5">
           <IconBtn label="编辑" onClick={onEdit}><Pencil size={15} /></IconBtn>
-          <IconBtn label="复制 API URL" onClick={onCopyApiUrl}><Link2 size={15} /></IconBtn>
-          <IconBtn label="复制 API Key" onClick={onCopyApiKey}><KeyRound size={15} /></IconBtn>
+          <IconBtn label="复制 URL + Key" onClick={onCopyCredentials}><Link2 size={15} /></IconBtn>
           <IconBtn label="删除" danger onClick={onDelete}><Trash2 size={15} /></IconBtn>
           {active ? (
             <span className="ml-1 rounded-md border border-ok/25 bg-ok/8 px-2.5 py-1.5 text-[12px] font-medium text-ok">当前</span>
@@ -405,6 +402,8 @@ function ProfileModal({
   );
   const [models, setModels] = useState<FetchedModel[]>([]);
   const [loadingModels, setLoadingModels] = useState(false);
+  const [checkingApi, setCheckingApi] = useState(false);
+  const [apiHealth, setApiHealth] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
   const [modelErr, setModelErr] = useState('');
   const [formErr, setFormErr] = useState('');
 
@@ -425,6 +424,30 @@ function ProfileModal({
       setModels([]);
     } finally {
       setLoadingModels(false);
+    }
+  };
+
+  const testConnection = async () => {
+    setCheckingApi(true);
+    setApiHealth(null);
+    setModelErr('');
+    try {
+      const { tauriApi } = await import('../lib/tauri');
+      const model = form.model?.trim() || form.models?.[0]?.trim() || '';
+      if (!form.api_url.trim() || !form.api_key.trim()) {
+        setApiHealth({ kind: 'error', text: '先填 API URL 和 API Key' });
+        return;
+      }
+      if (!model) {
+        setApiHealth({ kind: 'error', text: '先选择或填写模型' });
+        return;
+      }
+      const result = await tauriApi.testModel(form.api_url, form.api_key, model);
+      setApiHealth({ kind: 'success', text: `模型 ${result.model} 可用` });
+    } catch (error) {
+      setApiHealth({ kind: 'error', text: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setCheckingApi(false);
     }
   };
 
@@ -516,9 +539,23 @@ function ProfileModal({
           <Field label="Provider" value={form.provider} required
                  onChange={(e) => setForm({ ...form, provider: e.target.value })} placeholder="anthropic / openai / google" />
           <Field label="API URL" type="url" value={form.api_url} required mono
-                 onChange={(e) => setForm({ ...form, api_url: e.target.value })} />
+                 onChange={(e) => { setForm({ ...form, api_url: e.target.value }); setApiHealth(null); }} />
           <Field label="API Key" type="password" value={form.api_key} required mono
-                 onChange={(e) => setForm({ ...form, api_key: e.target.value })} placeholder="sk-..." />
+                 onChange={(e) => { setForm({ ...form, api_key: e.target.value }); setApiHealth(null); }} placeholder="sk-..." />
+
+          <div className="flex flex-wrap items-center gap-2">
+            <Button type="button" variant="secondary" size="sm" onClick={testConnection} disabled={checkingApi}>
+              {checkingApi ? '测试中…' : '测试模型'}
+            </Button>
+            {apiHealth && (
+              <span className={cn(
+                'text-[12px]',
+                apiHealth.kind === 'success' ? 'text-ok' : 'text-danger',
+              )}>
+                {apiHealth.text}
+              </span>
+            )}
+          </div>
 
           {showModelParams && (
             <div className="rounded-lg border border-line bg-surface/60 p-3.5 space-y-3.5">

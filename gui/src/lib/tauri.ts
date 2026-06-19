@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { ApiProfile, FetchedModel, StatusInfo, TargetApp, SessionMeta, PreviewMessage, DeleteResult } from '@/types';
+import type { ApiProfile, FetchedModel, ModelTestResult, StatusInfo, TargetApp, SessionMeta, PreviewMessage, DeleteResult } from '@/types';
 
 const canUseTauri = () => typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
@@ -45,6 +45,9 @@ export const tauriApi = {
   // 模型列表加载（OpenAI 兼容 /v1/models）
   fetchModels: (apiUrl: string, apiKey: string) =>
     command<FetchedModel[]>('fetch_models', { apiUrl, apiKey }),
+
+  testModel: (apiUrl: string, apiKey: string, model: string) =>
+    command<ModelTestResult>('test_model', { apiUrl, apiKey, model }),
 
   // 配置管理
 

@@ -24,6 +24,11 @@ export interface FetchedModel {
   owned_by?: string;
 }
 
+export interface ModelTestResult {
+  model: string;
+  endpoint: string;
+}
+
 export type TargetApp = 'claude-code' | 'codex' | 'gemini' | 'opencode';
 
 /// 已注册工具的元数据，用于动态生成 UI
