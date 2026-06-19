@@ -4,12 +4,12 @@ import { Button } from '../components/common/Button';
 import { Spinner } from '../components/common/Spinner';
 import { PageHeader } from '../components/common/PageHeader';
 import { Modal, Field, ConfirmDialog } from '../components/common/Modal';
-import { Plus, Pencil, Trash2, Check, Layers, Search, Eye, EyeOff, Link2, FileJson } from 'lucide-react';
+import { Plus, Pencil, Trash2, Check, Layers, Search, Eye, EyeOff, Link2, KeyRound } from 'lucide-react';
 import type { ApiProfile, FetchedModel, StatusInfo, TargetApp } from '../types';
 import { SUPPORTED_TOOLS, toolById } from '../types';
 import { cn, maskApiKey } from '../lib/utils';
 import { PROVIDER_PRESETS, REASONING_LEVELS } from '../lib/presets';
-import { profileApiConfigText, profileApiUrlText } from '../lib/profileCopy';
+import { profileApiKeyText, profileApiUrlText } from '../lib/profileCopy';
 import { copyText } from '../lib/clipboard';
 
 export default function ProfilesPage() {
@@ -179,7 +179,7 @@ export default function ProfilesPage() {
                 onEdit={() => { setEditing(p); setShowModal(true); }}
                 onDelete={() => setDeleting(p.name)}
                 onCopyApiUrl={() => handleCopy('API URL', profileApiUrlText(p))}
-                onCopyApiConfig={() => handleCopy('API 配置', profileApiConfigText(p))}
+                onCopyApiKey={() => handleCopy('API Key', profileApiKeyText(p))}
                 onSwitch={() => handleSwitch(p.name)}
               />
             ))}
@@ -254,7 +254,7 @@ function EmptyState() {
 }
 
 function ProfileCard({
-  profile, active, justSwitched, onEdit, onDelete, onCopyApiUrl, onCopyApiConfig, onSwitch,
+  profile, active, justSwitched, onEdit, onDelete, onCopyApiUrl, onCopyApiKey, onSwitch,
 }: {
   profile: ApiProfile;
   active: boolean;
@@ -262,7 +262,7 @@ function ProfileCard({
   onEdit: () => void;
   onDelete: () => void;
   onCopyApiUrl: () => void;
-  onCopyApiConfig: () => void;
+  onCopyApiKey: () => void;
   onSwitch: () => void;
 }) {
   const tint = providerTint(profile.provider);
@@ -316,7 +316,7 @@ function ProfileCard({
         <div className="flex items-center gap-1.5">
           <IconBtn label="编辑" onClick={onEdit}><Pencil size={15} /></IconBtn>
           <IconBtn label="复制 API URL" onClick={onCopyApiUrl}><Link2 size={15} /></IconBtn>
-          <IconBtn label="复制 API 配置" onClick={onCopyApiConfig}><FileJson size={15} /></IconBtn>
+          <IconBtn label="复制 API Key" onClick={onCopyApiKey}><KeyRound size={15} /></IconBtn>
           <IconBtn label="删除" danger onClick={onDelete}><Trash2 size={15} /></IconBtn>
           {active ? (
             <span className="ml-1 rounded-md border border-ok/25 bg-ok/8 px-2.5 py-1.5 text-[12px] font-medium text-ok">当前</span>
