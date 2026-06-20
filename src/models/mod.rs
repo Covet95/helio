@@ -24,6 +24,23 @@ pub struct ApiProfile {
     /// 是否启用 1M 上下文窗口
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_1m: Option<bool>,
+    /// Codex 专用：provider 的 wire 协议（"responses" / "chat"）。
+    /// 写入 model_providers.<id>.wire_api。None = 沿用默认（新 provider 用 responses）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire_api: Option<String>,
+    /// Codex 专用：provider 是否要求 OpenAI 鉴权（model_providers.<id>.requires_openai_auth）。
+    /// None = 沿用默认（true）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_openai_auth: Option<bool>,
+    /// Codex 专用：顶层 model_effort_level（与 reasoning_effort 同档：minimal/low/medium/high/xhigh）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_effort_level: Option<String>,
+    /// Codex 专用：顶层 model_thinking_enabled 开关。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_thinking_enabled: Option<bool>,
+    /// Codex 专用：顶层 service_tier（如 "fast"）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
     /// 归属工具（per-tool profile；None = 通用，所有工具下都显示）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_app: Option<TargetApp>,
@@ -114,6 +131,11 @@ impl ApiProfile {
             models: None,
             reasoning_effort: None,
             context_1m: None,
+            wire_api: None,
+            requires_openai_auth: None,
+            model_effort_level: None,
+            model_thinking_enabled: None,
+            service_tier: None,
             target_app: None,
             created_at: None,
             updated_at: None,

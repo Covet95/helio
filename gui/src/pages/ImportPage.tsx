@@ -20,6 +20,11 @@ interface Scanned {
   model?: string;
   reasoning_effort?: string;
   context_1m?: boolean;
+  wire_api?: string;
+  requires_openai_auth?: boolean;
+  model_effort_level?: string;
+  model_thinking_enabled?: boolean;
+  service_tier?: string;
   source: string;
 }
 interface LocalInfo {
@@ -102,6 +107,11 @@ export default function ImportPage() {
         model: api.model,
         reasoning_effort: api.reasoning_effort,
         context_1m: api.context_1m,
+        wire_api: api.wire_api,
+        requires_openai_auth: api.requires_openai_auth,
+        model_effort_level: api.model_effort_level,
+        model_thinking_enabled: api.model_thinking_enabled,
+        service_tier: api.service_tier,
         target_app: tool,
       });
       setFeedback({ text: `已导入为配置档案「${name.trim()}」`, kind: 'success' });

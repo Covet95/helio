@@ -107,6 +107,18 @@ export const tauriApi = {
   importSharedConfig: (targetApp: TargetApp) =>
     command<any>('import_shared_config', { targetApp }),
 
+  // Codex config.toml 原始文本编辑（仅 Codex）
+  readCodexConfigRaw: () =>
+    command<string>('read_codex_config_raw', undefined, ''),
+
+  saveCodexConfigRaw: (content: string) =>
+    command<void>('save_codex_config_raw', { content }),
+
+  // 编辑 Codex 全局行为字段（顶层键），写回 ~/.codex/config.toml。
+  // null 值表示删除该字段。
+  updateCodexFields: (fields: Record<string, unknown>) =>
+    command<void>('update_codex_fields', { fields }),
+
   // 从 cc-switch 导入
   scanCcSwitch: (targetApp: string) =>
     command<CcSwitchProvider[]>('scan_cc_switch', { targetApp }, []),

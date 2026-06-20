@@ -23,6 +23,30 @@ impl CodexAdapter {
         self.config_dir.join("auth.json")
     }
 
+    /// 清理指定前缀的备份文件，保留最新的 `keep` 个。失败容错（不中断主流程）。
+    fn cleanup_backups_with_prefix(&self, prefix: &str, keep: usize) {
+        let entries = match fs::read_dir(&self.config_dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        let mut backups: Vec<_> = entries
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(prefix))
+            .collect();
+
+        backups.sort_by_key(|entry| {
+            entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+        });
+        backups.reverse();
+
+        for entry in backups.iter().skip(keep) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+
     /// Codex 内置（保留）的 provider id —— 不允许在 model_providers 中覆盖。
     /// 参见 Codex 报错：`model_providers contains reserved built-in provider IDs`。
     fn is_reserved_provider_id(id: &str) -> bool {
@@ -173,14 +197,43 @@ impl ConfigAdapter for CodexAdapter {
                     "base_url".to_string(),
                     serde_json::Value::String(api_profile.api_url.clone()),
                 );
-                p.entry("requires_openai_auth".to_string())
-                    .or_insert_with(|| serde_json::Value::Bool(true));
+                // requires_openai_auth：profile 显式指定则覆盖，否则保持已有值 / 新 provider 补 true。
+                match api_profile.requires_openai_auth {
+                    Some(flag) => {
+                        p.insert(
+                            "requires_openai_auth".to_string(),
+                            serde_json::Value::Bool(flag),
+                        );
+                    }
+                    None => {
+                        p.entry("requires_openai_auth".to_string())
+                            .or_insert_with(|| serde_json::Value::Bool(true));
+                    }
+                }
+                // wire_api：profile 显式指定则覆盖（responses/chat），否则新 provider 补 responses 默认。
+                match api_profile
+                    .wire_api
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    Some(wire_api) => {
+                        p.insert(
+                            "wire_api".to_string(),
+                            serde_json::Value::String(wire_api.to_string()),
+                        );
+                    }
+                    None => {
+                        if is_new {
+                            p.entry("wire_api".to_string())
+                                .or_insert_with(|| serde_json::Value::String("responses".to_string()));
+                        }
+                    }
+                }
                 if is_new {
-                    // 全新 provider：补上 Codex 必需的协议默认值。
+                    // 全新 provider：补上 Codex 必需的 name 默认值。
                     p.entry("name".to_string())
                         .or_insert_with(|| serde_json::Value::String(provider_id.clone()));
-                    p.entry("wire_api".to_string())
-                        .or_insert_with(|| serde_json::Value::String("responses".to_string()));
                 }
                 // 历史版本误写入的 env_key 不再使用（key 走 auth.json）
                 p.remove("env_key");
@@ -233,6 +286,52 @@ impl ConfigAdapter for CodexAdapter {
                     obj.remove("model_context_window");
                 }
             }
+
+            match api_profile
+                .model_effort_level
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                Some(effort) => {
+                    obj.insert(
+                        "model_effort_level".to_string(),
+                        serde_json::Value::String(effort.to_string()),
+                    );
+                }
+                None => {
+                    obj.remove("model_effort_level");
+                }
+            }
+
+            match api_profile.model_thinking_enabled {
+                Some(enabled) => {
+                    obj.insert(
+                        "model_thinking_enabled".to_string(),
+                        serde_json::Value::Bool(enabled),
+                    );
+                }
+                None => {
+                    obj.remove("model_thinking_enabled");
+                }
+            }
+
+            match api_profile
+                .service_tier
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                Some(tier) => {
+                    obj.insert(
+                        "service_tier".to_string(),
+                        serde_json::Value::String(tier.to_string()),
+                    );
+                }
+                None => {
+                    obj.remove("service_tier");
+                }
+            }
         }
 
         config
@@ -276,34 +375,25 @@ impl ConfigAdapter for CodexAdapter {
 
         fs::copy(&path, &backup_path).context("Failed to backup config")?;
 
+        // 同时备份 auth.json（如果存在）—— API key + 登录态（tokens.refresh 等）都在这里，
+        // 仅备份 config.toml 不足以在误操作后完整恢复。备份失败不中断主备份。
+        let auth_path = self.auth_file_path();
+        if auth_path.exists() {
+            let auth_backup = self
+                .config_dir
+                .join(format!("auth.backup.{}.json", timestamp));
+            let _ = fs::copy(&auth_path, &auth_backup);
+        }
+
         self.cleanup_old_backups(10)?;
 
         Ok(backup_path)
     }
 
     fn cleanup_old_backups(&self, keep: usize) -> Result<()> {
-        let mut backups: Vec<_> = fs::read_dir(&self.config_dir)?
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("config.backup.")
-            })
-            .collect();
-
-        backups.sort_by_key(|entry| {
-            entry
-                .metadata()
-                .and_then(|m| m.modified())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-        });
-        backups.reverse();
-
-        for entry in backups.iter().skip(keep) {
-            let _ = fs::remove_file(entry.path());
-        }
-
+        // config.backup.* 与 auth.backup.* 各自独立计数，互不挤占。
+        self.cleanup_backups_with_prefix("config.backup.", keep);
+        self.cleanup_backups_with_prefix("auth.backup.", keep);
         Ok(())
     }
 
@@ -512,6 +602,75 @@ command = "npx"
     }
 
     #[test]
+    fn test_merge_applies_wire_api_and_openai_auth_overrides() {
+        let adapter = CodexAdapter::new();
+        // 已有 provider 用 responses，profile 指定 chat + requires_openai_auth=false
+        let shared = serde_json::json!({
+            "model_providers": {
+                "myproxy": {
+                    "name": "myproxy",
+                    "wire_api": "responses",
+                    "requires_openai_auth": true,
+                    "base_url": "https://old.api.com"
+                }
+            }
+        });
+        let profile = ApiProfile {
+            provider: "myproxy".to_string(),
+            wire_api: Some("chat".to_string()),
+            requires_openai_auth: Some(false),
+            ..sample_profile()
+        };
+
+        let merged = adapter.merge_config(&profile, &shared);
+
+        assert_eq!(merged["model_providers"]["myproxy"]["wire_api"], "chat");
+        assert_eq!(
+            merged["model_providers"]["myproxy"]["requires_openai_auth"],
+            false
+        );
+    }
+
+    #[test]
+    fn test_merge_applies_top_level_codex_params() {
+        let adapter = CodexAdapter::new();
+        let profile = ApiProfile {
+            model_effort_level: Some("high".to_string()),
+            model_thinking_enabled: Some(true),
+            service_tier: Some("fast".to_string()),
+            ..sample_profile()
+        };
+
+        let merged = adapter.merge_config(&profile, &serde_json::json!({}));
+
+        assert_eq!(merged["model_effort_level"], "high");
+        assert_eq!(merged["model_thinking_enabled"], true);
+        assert_eq!(merged["service_tier"], "fast");
+    }
+
+    #[test]
+    fn test_merge_clears_disabled_top_level_codex_params() {
+        let adapter = CodexAdapter::new();
+        let shared = serde_json::json!({
+            "model_effort_level": "high",
+            "model_thinking_enabled": true,
+            "service_tier": "fast",
+        });
+        let profile = ApiProfile {
+            model_effort_level: None,
+            model_thinking_enabled: None,
+            service_tier: None,
+            ..sample_profile()
+        };
+
+        let merged = adapter.merge_config(&profile, &shared);
+
+        assert!(merged.get("model_effort_level").is_none());
+        assert!(merged.get("model_thinking_enabled").is_none());
+        assert!(merged.get("service_tier").is_none());
+    }
+
+    #[test]
     fn test_merge_preserves_existing_provider_protocol() {
         let adapter = CodexAdapter::new();
         // 已有 custom provider，带 wire_api / requires_openai_auth
@@ -602,6 +761,55 @@ command = "npx"
         assert_eq!(written["OPENAI_API_KEY"], "sk-test-key");
         // 其他字段保留
         assert_eq!(written["tokens"]["refresh"], "abc");
+
+        let _ = fs::remove_dir_all(&config_dir);
+    }
+
+    #[test]
+    fn test_backup_config_also_backs_up_auth_json() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let config_dir = std::env::temp_dir().join(format!(
+            "switch-api-codex-backup-test-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&config_dir).unwrap();
+        // 预置 config.toml + auth.json（含 API key 和登录态 tokens.refresh）
+        fs::write(
+            config_dir.join("config.toml"),
+            "model_provider = \"openai-custom\"\n",
+        )
+        .unwrap();
+        fs::write(
+            config_dir.join("auth.json"),
+            r#"{"OPENAI_API_KEY":"sk-secret","tokens":{"refresh":"refresh-token-xyz"}}"#,
+        )
+        .unwrap();
+
+        let adapter = CodexAdapter {
+            config_dir: config_dir.clone(),
+        };
+        let backup_path = adapter.backup_config().unwrap();
+
+        // config 备份生成
+        assert!(backup_path.exists());
+        assert!(backup_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("config.backup."));
+
+        // auth 备份生成，内容含登录态 refresh
+        let auth_backup = fs::read_dir(&config_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| e.file_name().to_string_lossy().starts_with("auth.backup."))
+            .expect("auth backup should exist");
+        let auth_content = fs::read_to_string(auth_backup.path()).unwrap();
+        let auth_json: serde_json::Value = serde_json::from_str(&auth_content).unwrap();
+        assert_eq!(auth_json["OPENAI_API_KEY"], "sk-secret");
+        assert_eq!(auth_json["tokens"]["refresh"], "refresh-token-xyz");
 
         let _ = fs::remove_dir_all(&config_dir);
     }

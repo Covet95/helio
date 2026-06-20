@@ -9,10 +9,20 @@ export interface ApiProfile {
   model?: string;
   /** OpenCode 专用：provider 下挂载的模型列表（多选） */
   models?: string[];
-  /** 推理强度 low/medium/high/xhigh */
+  /** 推理强度 minimal/low/medium/high/xhigh */
   reasoning_effort?: string;
   /** 1M 上下文 */
   context_1m?: boolean;
+  /** Codex provider 的 wire 协议（responses / chat） */
+  wire_api?: string;
+  /** Codex provider 是否要求 OpenAI 鉴权 */
+  requires_openai_auth?: boolean;
+  /** Codex 顶层 model_effort_level（minimal/low/medium/high/xhigh） */
+  model_effort_level?: string;
+  /** Codex 顶层 model_thinking_enabled 开关 */
+  model_thinking_enabled?: boolean;
+  /** Codex 顶层 service_tier（如 fast） */
+  service_tier?: string;
   /** 归属工具；undefined = 通用（所有工具下都显示）*/
   target_app?: TargetApp;
   created_at?: number;

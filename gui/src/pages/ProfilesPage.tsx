@@ -677,6 +677,94 @@ function ProfileModal({
                 </div>
               )}
 
+              {tool === 'codex' && (
+                <div>
+                  <span className="block mb-1.5 text-[12px] font-medium text-ink-dim">Wire 协议</span>
+                  <div className="flex gap-1.5">
+                    {[
+                      { value: '', label: '默认' },
+                      { value: 'responses', label: 'Responses' },
+                      { value: 'chat', label: 'Chat' },
+                    ].map((w) => (
+                      <button
+                        key={w.value}
+                        type="button"
+                        onClick={() => setForm({ ...form, wire_api: w.value || undefined })}
+                        className={`flex-1 rounded-md px-2 py-1.5 text-[12px] font-medium border transition-all ${
+                          (form.wire_api || '') === w.value
+                            ? 'border-accent text-accent bg-accent/8'
+                            : 'border-line text-ink-dim hover:border-line-strong'
+                        }`}
+                      >
+                        {w.label}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="mt-1 text-[11px] text-ink-faint">wire_api：第三方中转若不支持 Responses 选 Chat</div>
+                </div>
+              )}
+
+              {tool === 'codex' && (
+                <div>
+                  <span className="block mb-1.5 text-[12px] font-medium text-ink-dim">Effort Level</span>
+                  <div className="flex gap-1.5">
+                    {REASONING_LEVELS.map((r) => (
+                      <button
+                        key={r.value}
+                        type="button"
+                        onClick={() => setForm({ ...form, model_effort_level: r.value || undefined })}
+                        className={`flex-1 rounded-md px-2 py-1.5 text-[12px] font-medium border transition-all ${
+                          (form.model_effort_level || '') === r.value
+                            ? 'border-accent text-accent bg-accent/8'
+                            : 'border-line text-ink-dim hover:border-line-strong'
+                        }`}
+                      >
+                        {r.label}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="mt-1 text-[11px] text-ink-faint">model_effort_level</div>
+                </div>
+              )}
+
+              {tool === 'codex' && (
+                <label className="flex cursor-pointer items-center justify-between">
+                  <div>
+                    <div className="text-[13px] font-medium text-ink">思考模式</div>
+                    <div className="text-[11px] text-ink-faint">model_thinking_enabled</div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setForm({ ...form, model_thinking_enabled: form.model_thinking_enabled ? undefined : true })}
+                    className={`relative h-6 w-11 rounded-full transition-colors ${form.model_thinking_enabled ? 'bg-accent' : 'bg-line-strong'}`}
+                  >
+                    <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow-soft transition-transform ${form.model_thinking_enabled ? 'translate-x-[22px]' : 'translate-x-0.5'}`} />
+                  </button>
+                </label>
+              )}
+
+              {tool === 'codex' && (
+                <label className="flex cursor-pointer items-center justify-between">
+                  <div>
+                    <div className="text-[13px] font-medium text-ink">要求 OpenAI 鉴权</div>
+                    <div className="text-[11px] text-ink-faint">requires_openai_auth（留默认即可）</div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setForm({ ...form, requires_openai_auth: form.requires_openai_auth === false ? undefined : false })}
+                    className={`relative h-6 w-11 rounded-full transition-colors ${form.requires_openai_auth !== false ? 'bg-accent' : 'bg-line-strong'}`}
+                  >
+                    <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow-soft transition-transform ${form.requires_openai_auth !== false ? 'translate-x-[22px]' : 'translate-x-0.5'}`} />
+                  </button>
+                </label>
+              )}
+
+              {tool === 'codex' && (
+                <Field label="Service Tier" value={form.service_tier || ''} mono
+                       onChange={(e) => setForm({ ...form, service_tier: e.target.value || undefined })}
+                       placeholder="留空 / fast" />
+              )}
+
               {(tool === 'claude-code' || tool === 'codex') && (
                 <label className="flex cursor-pointer items-center justify-between">
                   <div>

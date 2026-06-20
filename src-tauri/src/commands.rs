@@ -105,6 +105,10 @@ pub struct LocalConfigInfo {
     pub skills: Vec<String>,
     pub hooks: serde_json::Value,
     pub permissions: serde_json::Value,
+    /// 其余被同步但未单独归类的顶层配置(tui / plugins / features /
+    /// skills_configuration / marketplaces / projects 等)。只读展示用,
+    /// 让用户看到「切换时还带着同步了哪些东西」。
+    pub other: serde_json::Value,
 }
 
 #[tauri::command]
@@ -220,6 +224,7 @@ pub async fn get_local_config_info(target_app: String) -> Result<LocalConfigInfo
         skills: Vec::new(),
         hooks: serde_json::json!({}),
         permissions: serde_json::json!({}),
+        other: serde_json::json!({}),
     };
 
     // 直接用适配器读取配置（read_config 自带 local→global 回退、TOML/JSON 分派）。
@@ -240,8 +245,17 @@ pub async fn get_local_config_info(target_app: String) -> Result<LocalConfigInfo
     // Skills
     info.skills = read_local_skills(target)?;
 
-    // Hooks（仅当存在且非空）
-    if let Some(hooks) = config.get("hooks") {
+    // Hooks
+    // Codex 的真正 hook 定义在 ~/.codex/hooks.json（{"hooks":{...}}），而 config.toml 里
+    // 的 [hooks.state."..."] 只是 trusted_hash 校验记录，不能当 hook 展示。
+    // 其他工具仍从 config 的 hooks 键读取。
+    if target == TargetApp::Codex {
+        let hooks_path = dirs::home_dir()
+            .map(|h| h.join(".codex").join("hooks.json"));
+        if let Some(path) = hooks_path {
+            info.hooks = read_codex_hooks(&path);
+        }
+    } else if let Some(hooks) = config.get("hooks") {
         let empty = hooks.as_object().map(|o| o.is_empty()).unwrap_or(false);
         if !empty {
             info.hooks = hooks.clone();
@@ -253,6 +267,25 @@ pub async fn get_local_config_info(target_app: String) -> Result<LocalConfigInfo
         let empty = permissions.as_object().map(|o| o.is_empty()).unwrap_or(false);
         if !empty {
             info.permissions = permissions.clone();
+        }
+    }
+
+    // 其余顶层键:展示「切换时还带着同步了哪些东西」。
+    // 排除已单独归类的(mcp/hooks/permissions)和 API 凭证类(切换会改、不算共享)。
+    if let Some(obj) = config.as_object() {
+        const EXCLUDED: &[&str] = &[
+            "mcp_servers", "mcpServers", "mcp",
+            "hooks", "permissions",
+            "model_provider", "model_providers", "api_key", "env",
+        ];
+        let mut other = serde_json::Map::new();
+        for (k, v) in obj {
+            if !EXCLUDED.contains(&k.as_str()) {
+                other.insert(k.clone(), v.clone());
+            }
+        }
+        if !other.is_empty() {
+            info.other = serde_json::Value::Object(other);
         }
     }
 
@@ -341,7 +374,16 @@ pub(crate) fn apply_profile_config(
 
     let adapter = get_adapter(target);
     let current_config = adapter.read_config().unwrap_or_else(|_| serde_json::json!({}));
-    let shared_config = adapter.extract_shared_config(&current_config);
+    let mut shared_config = adapter.extract_shared_config(&current_config);
+
+    // 防残缺护栏:外部工具(如 Codex 自升级)可能把 config 写残,导致 live 里
+    // 顶层键大量消失。若直接用残缺的 live 覆盖 DB 快照并 merge,会把残缺状态固化
+    // 并持续传播。这里用 DB 里更全的旧快照补回 live 缺失的顶层键(只补 live 没有的,
+    // 不覆盖 live 已有的较新值),既止损又自动恢复。
+    if let Ok(Some(prev)) = db.get_shared_config(target) {
+        backfill_missing_top_level(&mut shared_config, &prev.config);
+    }
+
     let _ = db.save_shared_config(target, shared_config.clone());
 
     if adapter.config_path().exists() {
@@ -355,6 +397,19 @@ pub(crate) fn apply_profile_config(
         .map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+/// 用 `prev`(DB 已存的较全快照)里的顶层键补回 `live` 缺失的键。
+/// 只补 `live` 完全没有的顶层键;`live` 已有的键(哪怕值更旧)一律保留不动,
+/// 避免覆盖用户在外部刚改的较新值。
+fn backfill_missing_top_level(live: &mut serde_json::Value, prev: &serde_json::Value) {
+    if let (Some(live_obj), Some(prev_obj)) = (live.as_object_mut(), prev.as_object()) {
+        for (k, v) in prev_obj {
+            if !live_obj.contains_key(k) {
+                live_obj.insert(k.clone(), v.clone());
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -412,6 +467,145 @@ pub async fn save_shared_config(
         .map_err(|e| e.to_string())
 }
 
+/// 读取 Codex 的 config.toml 原始文本（不经 JSON 往返，保留用户格式/注释）。
+/// 文件不存在时返回空字符串。仅 Codex 提供此能力。
+#[tauri::command]
+pub async fn read_codex_config_raw() -> Result<String, String> {
+    use crate::adapters::get_adapter;
+    let path = get_adapter(TargetApp::Codex).config_path();
+    if !path.exists() {
+        return Ok(String::new());
+    }
+    std::fs::read_to_string(&path).map_err(|e| format!("读取 config.toml 失败：{}", e))
+}
+
+/// 保存用户在 GUI 里手编的 Codex config.toml 原始文本。
+/// 高风险写操作：必须「校验通过才写」+「写前备份」。
+#[tauri::command]
+pub async fn save_codex_config_raw(
+    content: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    use crate::adapters::get_adapter;
+    let adapter = get_adapter(TargetApp::Codex);
+    let path = adapter.config_path();
+
+    // 先校验语法：非法 TOML 直接返回，绝不触碰磁盘（不备份、不写入）。
+    toml::from_str::<toml::Value>(&content)
+        .map_err(|e| format!("TOML 语法错误，未保存：{}", e))?;
+
+    // 校验通过后，写前备份当前配置（config.toml + auth.json）。
+    if path.exists() {
+        adapter
+            .backup_config()
+            .map_err(|e| format!("备份当前配置失败：{}", e))?;
+    }
+
+    // 原子写入原始文本（再次校验 + 临时文件 rename）。
+    let parsed = validate_and_write_codex_config_raw(&content, &path)?;
+
+    // 写盘成功后，把解析结果的共享部分同步进 DB，保持库与磁盘一致。
+    // 这一步失败不影响整体结果——磁盘已写成功是主目标。
+    let json = serde_json::to_value(&parsed).unwrap_or_else(|_| serde_json::json!({}));
+    let shared = adapter.extract_shared_config(&json);
+    if let Ok(db) = state.db.lock() {
+        let _ = db.save_shared_config(TargetApp::Codex, shared);
+    }
+
+    Ok(())
+}
+
+/// 「校验 + 原子写入」核心逻辑，接受路径参数便于单测（不依赖真实 HOME）。
+/// 先用 toml::from_str 校验，非法则返回 Err 且不写盘；合法则临时文件 + rename
+/// 原子写入原始文本，返回解析出的 toml::Value。
+fn validate_and_write_codex_config_raw(
+    content: &str,
+    path: &std::path::Path,
+) -> Result<toml::Value, String> {
+    let parsed = toml::from_str::<toml::Value>(content)
+        .map_err(|e| format!("TOML 语法错误，未保存：{}", e))?;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败：{}", e))?;
+    }
+
+    let temp_path = path.with_extension("toml.tmp");
+    std::fs::write(&temp_path, content).map_err(|e| format!("写入临时文件失败：{}", e))?;
+    if let Ok(file) = std::fs::File::open(&temp_path) {
+        let _ = file.sync_all();
+    }
+    std::fs::rename(&temp_path, path).map_err(|e| format!("替换 config.toml 失败：{}", e))?;
+
+    Ok(parsed)
+}
+
+/// 在完整 config（JSON）上对若干顶层字段做最小改动：
+/// - value 非 null → set 该顶层键（覆盖旧值）
+/// - value 为 null → remove 该顶层键
+///
+/// 其余字段一律不动。纯函数，便于单测。
+fn apply_field_updates(config: &mut serde_json::Value, fields: &serde_json::Value) {
+    let updates = match fields.as_object() {
+        Some(m) => m,
+        None => return,
+    };
+    let obj = match config.as_object_mut() {
+        Some(o) => o,
+        None => return,
+    };
+    for (key, value) in updates {
+        if value.is_null() {
+            obj.remove(key);
+        } else {
+            obj.insert(key.clone(), value.clone());
+        }
+    }
+}
+
+/// 编辑 Codex 全局行为字段（approval_policy / sandbox_mode 等顶层键）并写回
+/// ~/.codex/config.toml。复用磁盘写路径：读 live config → 在完整配置上做最小
+/// 改动 → 转回 TOML 文本 → 校验+备份+原子写 → 同步 DB。绝不因改一个字段丢失其他字段。
+#[tauri::command]
+pub async fn update_codex_fields(
+    fields: serde_json::Value,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    use crate::adapters::get_adapter;
+    let adapter = get_adapter(TargetApp::Codex);
+    let path = adapter.config_path();
+
+    // 读 live config（不存在则为空对象），在完整配置上做最小改动。
+    let mut config = adapter
+        .read_config()
+        .map_err(|e| format!("读取 config.toml 失败：{}", e))?;
+    apply_field_updates(&mut config, &fields);
+
+    // JSON → TOML 文本。toml::Value::try_from 走 Serialize，自动处理表/值排序。
+    let toml_value = toml::Value::try_from(&config)
+        .map_err(|e| format!("转换为 TOML 失败：{}", e))?;
+    let content = toml::to_string_pretty(&toml_value)
+        .map_err(|e| format!("序列化 TOML 失败：{}", e))?;
+
+    // 写前备份当前配置（config.toml + auth.json）。
+    if path.exists() {
+        adapter
+            .backup_config()
+            .map_err(|e| format!("备份当前配置失败：{}", e))?;
+    }
+
+    // 校验 + 原子写入（与 save_codex_config_raw 同一写路径）。
+    let parsed = validate_and_write_codex_config_raw(&content, &path)?;
+
+    // 同步 DB 的共享部分，保持库与磁盘一致。失败不影响主目标（磁盘已写成功）。
+    let json = serde_json::to_value(&parsed).unwrap_or_else(|_| serde_json::json!({}));
+    let shared = adapter.extract_shared_config(&json);
+    if let Ok(db) = state.db.lock() {
+        let _ = db.save_shared_config(TargetApp::Codex, shared);
+    }
+
+    Ok(())
+}
+
 /// 从本地配置文件扫描出的 API 凭据（用于导入为 Profile）
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ScannedApi {
@@ -422,6 +616,11 @@ pub struct ScannedApi {
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub context_1m: Option<bool>,
+    pub wire_api: Option<String>,
+    pub requires_openai_auth: Option<bool>,
+    pub model_effort_level: Option<String>,
+    pub model_thinking_enabled: Option<bool>,
+    pub service_tier: Option<String>,
     /// 来源配置文件路径，便于用户确认
     pub source: String,
 }
@@ -437,6 +636,9 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
     let cfg = adapter.read_config().map_err(|e| e.to_string())?;
 
     let (mut url, mut key, provider) = (String::new(), String::new(), default_provider(target));
+    // Codex provider 块内的协议字段（仅 Codex 用到）
+    let mut wire_api: Option<String> = None;
+    let mut requires_openai_auth: Option<bool> = None;
 
     match target {
         TargetApp::ClaudeCode => {
@@ -481,6 +683,12 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
                     if key.is_empty() && !env_key.is_empty() {
                         key = std::env::var(&env_key).unwrap_or_default();
                     }
+                    // 回带 provider 块内的协议字段，供导入还原
+                    let w = str_field(b, "wire_api");
+                    if !w.trim().is_empty() {
+                        wire_api = Some(w);
+                    }
+                    requires_openai_auth = b.get("requires_openai_auth").and_then(|v| v.as_bool());
                 }
             }
             // 顶层兜底
@@ -575,6 +783,11 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
         model: codex_string_field(target, &cfg, "model"),
         reasoning_effort: codex_string_field(target, &cfg, "model_reasoning_effort"),
         context_1m: codex_context_1m(target, &cfg),
+        wire_api,
+        requires_openai_auth,
+        model_effort_level: codex_string_field(target, &cfg, "model_effort_level"),
+        model_thinking_enabled: codex_bool_field(target, &cfg, "model_thinking_enabled"),
+        service_tier: codex_string_field(target, &cfg, "service_tier"),
         source,
     })
 }
@@ -627,6 +840,13 @@ fn codex_context_1m(target: TargetApp, cfg: &serde_json::Value) -> Option<bool> 
     cfg.get("model_context_window")
         .and_then(|w| w.as_i64())
         .map(|w| w >= 1_000_000)
+}
+
+fn codex_bool_field(target: TargetApp, cfg: &serde_json::Value, key: &str) -> Option<bool> {
+    if target != TargetApp::Codex {
+        return None;
+    }
+    cfg.get(key).and_then(|v| v.as_bool())
 }
 
 fn default_provider(target: TargetApp) -> String {
@@ -795,6 +1015,25 @@ fn read_local_skills(target: TargetApp) -> Result<Vec<String>, String> {
     Ok(scan_skill_dirs(&dirs_to_scan))
 }
 
+/// 从 Codex 独立的 hooks.json 提取 `hooks` 字段用于展示。
+/// 文件结构：{"hooks":{"PreToolUse":[...]}}。
+/// 文件不存在或解析失败时返回空对象（不报错）。
+fn read_codex_hooks(path: &std::path::Path) -> serde_json::Value {
+    let empty = serde_json::json!({});
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return empty,
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return empty,
+    };
+    match parsed.get("hooks") {
+        Some(hooks) if hooks.is_object() && !hooks.as_object().unwrap().is_empty() => hooks.clone(),
+        _ => empty,
+    }
+}
+
 fn default_db_path() -> Result<std::path::PathBuf, String> {
     dirs::home_dir()
         .ok_or("Failed to get home directory".to_string())
@@ -953,6 +1192,114 @@ fn parse_cc_provider(
 }
 
 #[cfg(test)]
+mod codex_hooks_tests {
+    use super::read_codex_hooks;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static CTR: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_path(name: &str) -> std::path::PathBuf {
+        let n = CTR.fetch_add(1, Ordering::SeqCst);
+        std::env::temp_dir().join(format!(
+            "switch-api-codex-hooks-{}-{n}-{name}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn test_reads_hooks_field_from_hooks_json() {
+        let path = temp_path("hooks.json");
+        std::fs::write(
+            &path,
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"echo hi"}]}]}}"#,
+        )
+        .unwrap();
+
+        let hooks = read_codex_hooks(&path);
+        assert_eq!(hooks["PreToolUse"][0]["matcher"], "Bash");
+        assert_eq!(
+            hooks["PreToolUse"][0]["hooks"][0]["command"],
+            "echo hi"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_missing_file_returns_empty_object() {
+        let hooks = read_codex_hooks(&std::path::PathBuf::from("/no/such/codex/hooks.json"));
+        assert!(hooks.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_invalid_json_returns_empty_object() {
+        let path = temp_path("bad.json");
+        std::fs::write(&path, "{not valid json").unwrap();
+        let hooks = read_codex_hooks(&path);
+        assert!(hooks.as_object().unwrap().is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_does_not_use_config_toml_hooks_state() {
+        // hooks.json 无 hooks 字段（只有 config.toml 风格的 state hash）→ 返回空
+        let path = temp_path("state-only.json");
+        std::fs::write(
+            &path,
+            r#"{"state":{"some.hooks.json:pre_tool_use:0:0":{"trusted_hash":"abc"}}}"#,
+        )
+        .unwrap();
+        let hooks = read_codex_hooks(&path);
+        assert!(hooks.as_object().unwrap().is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod backfill_tests {
+    use super::backfill_missing_top_level;
+
+    #[test]
+    fn test_backfill_restores_missing_keys_without_overwriting() {
+        // live 被外部写残(只剩 model_provider + 较新的 base_url),
+        // prev(DB 旧快照)更全。补回缺失键,但不动 live 已有的较新值。
+        let mut live = serde_json::json!({
+            "model_provider": "openai-custom",
+            "model_providers": { "openai-custom": { "base_url": "https://new.api.com/v1" } },
+        });
+        let prev = serde_json::json!({
+            "model_provider": "openai-custom",
+            "model_providers": { "openai-custom": { "base_url": "https://OLD.api.com/v1" } },
+            "plugins": { "browser": { "enabled": true } },
+            "skills_configuration": { "enabled_skills": ["brainstorming"] },
+            "tui": { "status_line": ["model", "git-branch"] },
+        });
+
+        backfill_missing_top_level(&mut live, &prev);
+
+        // 缺失的顶层键被补回
+        assert!(live.get("plugins").is_some());
+        assert!(live.get("skills_configuration").is_some());
+        assert_eq!(live["tui"]["status_line"].as_array().unwrap().len(), 2);
+        // live 已有的较新值不被旧快照覆盖
+        assert_eq!(
+            live["model_providers"]["openai-custom"]["base_url"],
+            "https://new.api.com/v1"
+        );
+    }
+
+    #[test]
+    fn test_backfill_noop_when_live_complete() {
+        let mut live = serde_json::json!({ "a": 1, "b": 2 });
+        let prev = serde_json::json!({ "a": 9 });
+        backfill_missing_top_level(&mut live, &prev);
+        // live 已有 a,不被覆盖;没有新增键
+        assert_eq!(live["a"], 1);
+        assert_eq!(live.as_object().unwrap().len(), 2);
+    }
+}
+
+#[cfg(test)]
 mod mcp_config_tests {
     use super::McpServerConfig;
 
@@ -1051,5 +1398,137 @@ mod clipboard_tests {
     #[test]
     fn test_copy_text_with_pbcopy_accepts_empty_text() {
         copy_text_with_pbcopy("").expect("empty clipboard text should copy");
+    }
+}
+
+#[cfg(test)]
+mod codex_raw_config_tests {
+    use super::validate_and_write_codex_config_raw;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static CTR: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_path(name: &str) -> std::path::PathBuf {
+        let n = CTR.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "switch-api-codex-raw-{}-{n}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join(name)
+    }
+
+    #[test]
+    fn test_bad_toml_returns_err_and_does_not_write() {
+        let path = temp_path("config.toml");
+        // 预置一个已存在的合法文件，验证坏 TOML 不会覆盖它
+        std::fs::write(&path, "model_provider = \"openai\"\n").unwrap();
+
+        let result = validate_and_write_codex_config_raw("this is = = not valid", &path);
+        assert!(result.is_err());
+        // 原文件未被改动
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(on_disk, "model_provider = \"openai\"\n");
+        // 不留临时文件
+        assert!(!path.with_extension("toml.tmp").exists());
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn test_good_toml_writes_raw_content_verbatim() {
+        let path = temp_path("config.toml");
+        // 带注释和格式，验证原始文本被逐字写入（不经序列化往返）
+        let content = "# my codex config\nmodel_provider = \"openai-custom\"\n\n[model_providers.openai-custom]\nbase_url = \"https://api.example.com/v1\"\n";
+
+        let parsed = validate_and_write_codex_config_raw(content, &path).unwrap();
+        // 返回解析结果可用
+        assert_eq!(parsed["model_provider"].as_str(), Some("openai-custom"));
+        // 磁盘内容与输入逐字一致（注释保留）
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(on_disk, content);
+        // 不留临时文件
+        assert!(!path.with_extension("toml.tmp").exists());
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+}
+
+#[cfg(test)]
+mod codex_field_update_tests {
+    use super::apply_field_updates;
+    use serde_json::json;
+
+    #[test]
+    fn test_set_new_field() {
+        let mut config = json!({ "model_provider": "openai" });
+        apply_field_updates(&mut config, &json!({ "approval_policy": "never" }));
+        assert_eq!(config["approval_policy"], "never");
+        // 原有字段不受影响
+        assert_eq!(config["model_provider"], "openai");
+    }
+
+    #[test]
+    fn test_override_existing_field() {
+        let mut config = json!({ "sandbox_mode": "read-only" });
+        apply_field_updates(&mut config, &json!({ "sandbox_mode": "workspace-write" }));
+        assert_eq!(config["sandbox_mode"], "workspace-write");
+    }
+
+    #[test]
+    fn test_null_removes_field() {
+        let mut config = json!({ "service_tier": "fast", "model_provider": "openai" });
+        apply_field_updates(&mut config, &json!({ "service_tier": null }));
+        assert!(config.get("service_tier").is_none());
+        // 其他字段保留
+        assert_eq!(config["model_provider"], "openai");
+    }
+
+    #[test]
+    fn test_does_not_touch_other_fields() {
+        let mut config = json!({
+            "model_provider": "openai",
+            "model_providers": { "openai": { "base_url": "https://api.com" } },
+            "mcp_servers": { "fs": { "command": "npx" } },
+            "approval_policy": "on-request",
+        });
+        apply_field_updates(
+            &mut config,
+            &json!({
+                "approval_policy": "untrusted",
+                "model_auto_compact_token_limit": 200000,
+                "disable_response_storage": true,
+            }),
+        );
+        // 改了/加了指定字段
+        assert_eq!(config["approval_policy"], "untrusted");
+        assert_eq!(config["model_auto_compact_token_limit"], 200000);
+        assert_eq!(config["disable_response_storage"], true);
+        // 完整保留嵌套结构
+        assert_eq!(
+            config["model_providers"]["openai"]["base_url"],
+            "https://api.com"
+        );
+        assert_eq!(config["mcp_servers"]["fs"]["command"], "npx");
+        assert_eq!(config["model_provider"], "openai");
+    }
+
+    #[test]
+    fn test_mixed_set_and_remove() {
+        let mut config = json!({
+            "personality": "friendly",
+            "enable_workflows": true,
+        });
+        apply_field_updates(
+            &mut config,
+            &json!({
+                "personality": null,
+                "model_reasoning_effort": "high",
+                "enable_workflows": false,
+            }),
+        );
+        assert!(config.get("personality").is_none());
+        assert_eq!(config["model_reasoning_effort"], "high");
+        assert_eq!(config["enable_workflows"], false);
     }
 }

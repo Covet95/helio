@@ -37,6 +37,7 @@ export const PROVIDER_PRESETS: Record<TargetApp, ProviderPreset[]> = {
 /** 推理强度选项（Codex） */
 export const REASONING_LEVELS = [
   { value: '', label: '默认' },
+  { value: 'minimal', label: '极简' },
   { value: 'low', label: '低' },
   { value: 'medium', label: '中' },
   { value: 'high', label: '高' },
