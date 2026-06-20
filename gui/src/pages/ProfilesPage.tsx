@@ -293,10 +293,10 @@ function ProfileCard({
               </span>
             )}
           </div>
-          <div className="mt-1 flex items-center gap-3 text-[12px] text-ink-dim">
-            <span className="truncate font-mono">{profile.api_url}</span>
+          <div className="mt-1 flex min-w-0 items-center gap-3 text-[12px] text-ink-dim">
+            <span className="min-w-0 flex-1 truncate font-mono">{profile.api_url}</span>
             <span className="inline-flex shrink-0 items-center gap-1 font-mono text-ink-faint">
-              <span className="break-all">{keyRevealed ? profile.api_key : maskApiKey(profile.api_key)}</span>
+              <span className="max-w-[160px] truncate">{keyRevealed ? profile.api_key : maskApiKey(profile.api_key)}</span>
               {profile.api_key && (
                 <button
                   type="button"
@@ -311,7 +311,7 @@ function ProfileCard({
           </div>
         </div>
 
-        <div className="flex items-center gap-1.5">
+        <div className="flex shrink-0 items-center gap-1.5">
           <IconBtn label="编辑" onClick={onEdit}><Pencil size={15} /></IconBtn>
           <IconBtn label="复制 URL + Key" onClick={onCopyCredentials}><Link2 size={15} /></IconBtn>
           <IconBtn label="删除" danger onClick={onDelete}><Trash2 size={15} /></IconBtn>
@@ -442,8 +442,9 @@ function ProfileModal({
         setApiHealth({ kind: 'error', text: '先选择或填写模型' });
         return;
       }
-      const result = await tauriApi.testModel(form.api_url, form.api_key, model);
-      setApiHealth({ kind: 'success', text: `模型 ${result.model} 可用` });
+      const result = await tauriApi.testModel(form.api_url, form.api_key, model, form.wire_api);
+      const wireLabel = form.wire_api === 'responses' ? ' · Responses' : form.wire_api === 'chat' ? ' · Chat' : '';
+      setApiHealth({ kind: 'success', text: `模型 ${result.model} 可用${wireLabel}` });
     } catch (error) {
       setApiHealth({ kind: 'error', text: error instanceof Error ? error.message : String(error) });
     } finally {
@@ -623,20 +624,20 @@ function ProfileModal({
                     const mm = form.model_mapping || {};
                     const setMM = (k: string, v: string) => setForm({ ...form, model_mapping: { ...mm, [k]: v } });
                     return (
-                      <div key={role} className="flex items-center gap-2">
+                      <div key={role} className="flex flex-wrap items-center gap-2">
                         <span className="w-14 shrink-0 text-[12px] font-medium text-ink">{labels[role]}</span>
                         <input
                           list={`helio-models-${role}`}
                           value={mm[`${role}_model`] || ''}
                           onChange={(e) => setMM(`${role}_model`, e.target.value)}
                           placeholder="实际模型"
-                          className="h-8 flex-1 rounded-md border border-line bg-card px-2 font-mono text-[12px] text-ink outline-none focus:border-accent/50"
+                          className="h-8 min-w-0 flex-1 rounded-md border border-line bg-card px-2 font-mono text-[12px] text-ink outline-none focus:border-accent/50"
                         />
                         <input
                           value={mm[`${role}_name`] || ''}
                           onChange={(e) => setMM(`${role}_name`, e.target.value)}
                           placeholder="显示名"
-                          className="h-8 w-28 rounded-md border border-line bg-card px-2 text-[12px] text-ink outline-none focus:border-accent/50"
+                          className="h-8 w-24 shrink-0 rounded-md border border-line bg-card px-2 text-[12px] text-ink outline-none focus:border-accent/50"
                         />
                         <label className="flex shrink-0 items-center gap-1 text-[11px] text-ink-dim">
                           <input

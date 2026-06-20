@@ -90,8 +90,8 @@ export default function HistoryPage() {
       />
 
       <div className="max-w-5xl px-4 py-4 sm:px-7 sm:py-5">
-        <div className="mb-3 flex items-center gap-2">
-          <div className="flex rounded-md border border-line bg-surface p-0.5">
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <div className="flex shrink-0 rounded-md border border-line bg-surface p-0.5">
             {TOOLS.map((t) => (
               <button key={t.id} onClick={() => setTool(t.id)}
                 className={`rounded px-3 py-1 text-[12px] font-medium ${tool === t.id ? 'bg-elevated text-ink' : 'text-ink-dim'}`}>
@@ -99,7 +99,7 @@ export default function HistoryPage() {
               </button>
             ))}
           </div>
-          <div className="relative flex-1">
+          <div className="relative min-w-[140px] flex-1">
             <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-faint" />
             <input value={search} onChange={(e) => setSearch(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && load()}
@@ -116,23 +116,23 @@ export default function HistoryPage() {
           <div className="overflow-hidden rounded-lg border border-line bg-card">
             {list.map((m) => (
               <div key={key(m)} className="flex items-center gap-3 border-b border-line px-3.5 py-2.5 last:border-b-0 hover:bg-elevated/45">
-                <input type="checkbox" checked={selected.has(key(m))} onChange={() => toggle(m)} />
+                <input type="checkbox" className="shrink-0" checked={selected.has(key(m))} onChange={() => toggle(m)} />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
-                    <span className="font-mono text-[10px] text-accent">{m.tool}</span>
+                    <span className="shrink-0 font-mono text-[10px] text-accent">{m.tool}</span>
                     <span className="truncate text-[13px] text-ink">{m.title ?? m.cwd ?? m.id}</span>
-                    {!m.parseable && <span className="text-[10px] text-warn">不可解析</span>}
+                    {!m.parseable && <span className="shrink-0 text-[10px] text-warn">不可解析</span>}
                   </div>
                   <div className="truncate font-mono text-[10.5px] text-ink-faint">{m.cwd}</div>
                 </div>
-                <div className="text-right text-[10.5px] text-ink-faint tabular-nums">
+                <div className="shrink-0 text-right text-[10.5px] text-ink-faint tabular-nums">
                   <div>{new Date(m.modified_at * 1000).toLocaleString()}</div>
                   <div>{formatBytes(m.size_bytes)} · {m.message_count} 条</div>
                 </div>
-                <button onClick={() => openPreview(m)} className="rounded p-1.5 text-ink-dim hover:text-ink hover:bg-elevated" title="预览">
+                <button onClick={() => openPreview(m)} className="shrink-0 rounded p-1.5 text-ink-dim hover:text-ink hover:bg-elevated" title="预览">
                   <Eye size={15} />
                 </button>
-                <button onClick={() => deleteOne(m)} className="rounded p-1.5 text-ink-dim hover:text-danger hover:bg-elevated" title="删除">
+                <button onClick={() => deleteOne(m)} className="shrink-0 rounded p-1.5 text-ink-dim hover:text-danger hover:bg-elevated" title="删除">
                   <Trash2 size={15} />
                 </button>
               </div>
@@ -143,7 +143,7 @@ export default function HistoryPage() {
 
       {preview && (
         <div className="fixed inset-0 z-50 flex justify-end bg-black/30" onClick={() => setPreview(null)}>
-          <div className="h-full w-[480px] overflow-y-auto bg-card p-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
+          <div className="h-full w-full max-w-[480px] overflow-y-auto bg-card p-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
             <div className="mb-3 flex items-center justify-between">
               <div className="text-[13px] font-semibold text-ink">{preview.meta.title ?? preview.meta.cwd}</div>
               <button onClick={() => setPreview(null)} className="text-ink-faint hover:text-ink">✕</button>

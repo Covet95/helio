@@ -15,7 +15,7 @@ export function PageHeader({
         <h1 className="truncate text-[18px] font-semibold text-ink sm:text-[19px]">{title}</h1>
         {subtitle && <p className="mt-1 text-[13px] text-ink-dim">{subtitle}</p>}
       </div>
-      <div className="no-drag flex items-center gap-2.5">{actions}</div>
+      <div className="no-drag flex flex-wrap items-center justify-end gap-2.5 shrink-0">{actions}</div>
     </div>
   );
 }

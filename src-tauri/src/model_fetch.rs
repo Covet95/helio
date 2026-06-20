@@ -37,6 +37,15 @@ struct ChatCompletionResponse {
     choices: Vec<serde_json::Value>,
 }
 
+/// OpenAI Responses API 的成功响应（探活只看是否含 output/status 字段）。
+#[derive(Deserialize)]
+struct ResponsesResponse {
+    #[serde(default)]
+    output: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    status: Option<String>,
+}
+
 /// Anthropic 协议兼容子路径；命中则追加「剥后缀再拼 /v1/models」的候选
 const COMPAT_SUFFIXES: &[&str] = &[
     "/api/claudecode",
@@ -125,6 +134,16 @@ fn chat_completions_url(api_url: &str) -> String {
     }
 }
 
+/// Responses API 端点（wire_api = "responses" 时使用）。
+fn responses_url(api_url: &str) -> String {
+    let base = openai_base_url(api_url);
+    if base.ends_with("/v1") || base.ends_with("/paas/v4") {
+        format!("{}/responses", base)
+    } else {
+        format!("{}/v1/responses", base)
+    }
+}
+
 /// 拉取供应商可用模型列表：按候选 URL 顺序试，第一个成功（{data:[{id}]}}）的返回。
 #[tauri::command]
 pub async fn fetch_models(api_url: String, api_key: String) -> Result<Vec<FetchedModel>, String> {
@@ -178,12 +197,16 @@ pub async fn fetch_models(api_url: String, api_key: String) -> Result<Vec<Fetche
     ))
 }
 
-/// 用指定模型发起一次极小的 OpenAI-compatible chat completion，请求成功才表示模型可用。
+/// 用指定模型发起一次极小的探活请求，请求成功才表示模型可用。
+/// wire_api 决定端点与请求/响应格式：
+/// - "responses" → POST /v1/responses（body 用 input/max_output_tokens，响应看 output/status）
+/// - 其他（含 None/"chat"/"") → POST /v1/chat/completions（body 用 messages，响应看 choices）
 #[tauri::command]
 pub async fn test_model(
     api_url: String,
     api_key: String,
     model: String,
+    wire_api: Option<String>,
 ) -> Result<ModelTestResult, String> {
     if api_key.trim().is_empty() {
         return Err("需要 API Key 才能测试模型".to_string());
@@ -193,15 +216,31 @@ pub async fn test_model(
         return Err("先选择或填写模型".to_string());
     }
 
-    let endpoint = chat_completions_url(&api_url);
+    let use_responses = wire_api.as_deref() == Some("responses");
     let client = http_client(&api_url)?;
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [{"role": "user", "content": "ping"}],
-        "max_tokens": 1,
-        "temperature": 0,
-        "stream": false
-    });
+
+    let (endpoint, body) = if use_responses {
+        (
+            responses_url(&api_url),
+            serde_json::json!({
+                "model": model,
+                "input": "ping",
+                "max_output_tokens": 16,
+                "stream": false
+            }),
+        )
+    } else {
+        (
+            chat_completions_url(&api_url),
+            serde_json::json!({
+                "model": model,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+                "temperature": 0,
+                "stream": false
+            }),
+        )
+    };
 
     let response = client
         .post(&endpoint)
@@ -225,10 +264,20 @@ pub async fn test_model(
         return Err(format!("{} 返回 {}: {}", endpoint, status, detail));
     }
 
-    let parsed: ChatCompletionResponse = serde_json::from_str(&text)
-        .map_err(|e| format!("{} 解析失败: {}", endpoint, e))?;
-    if parsed.choices.is_empty() {
-        return Err(format!("{} 没有返回 completion choice", endpoint));
+    // 探活只需确认 HTTP 2xx 且返回体能解析为对应协议的成功结构。
+    if use_responses {
+        let parsed: ResponsesResponse = serde_json::from_str(&text)
+            .map_err(|e| format!("{} 解析失败: {}", endpoint, e))?;
+        // responses 返回应含 output 数组或 status 字段；两者皆空视为异常。
+        if parsed.output.is_none() && parsed.status.is_none() {
+            return Err(format!("{} 未返回有效 responses 结构", endpoint));
+        }
+    } else {
+        let parsed: ChatCompletionResponse = serde_json::from_str(&text)
+            .map_err(|e| format!("{} 解析失败: {}", endpoint, e))?;
+        if parsed.choices.is_empty() {
+            return Err(format!("{} 没有返回 completion choice", endpoint));
+        }
     }
 
     Ok(ModelTestResult {
@@ -246,6 +295,22 @@ mod tests {
         assert_eq!(
             chat_completions_url("https://api.openai.com/v1"),
             "https://api.openai.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn test_responses_url_keeps_v1() {
+        assert_eq!(
+            responses_url("https://api.openai.com/v1"),
+            "https://api.openai.com/v1/responses"
+        );
+    }
+
+    #[test]
+    fn test_responses_url_adds_v1_for_plain_base() {
+        assert_eq!(
+            responses_url("https://chybenzun.top"),
+            "https://chybenzun.top/v1/responses"
         );
     }
 

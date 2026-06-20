@@ -376,7 +376,7 @@ function CodexBehaviorSettings({
         </div>
       </div>
       <div className="space-y-4 p-4">
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
           {CODEX_SELECT_FIELDS.map((f) => (
             <Field key={f.key} label={f.label}>
               <select
@@ -417,7 +417,7 @@ function CodexBehaviorSettings({
           </Field>
         </div>
 
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
           {CODEX_BOOL_FIELDS.map((f) => (
             <Toggle
               key={f.key}
@@ -464,10 +464,10 @@ function Field({
 }) {
   return (
     <label className="block">
-      <span className="mb-1 flex items-center gap-1.5 font-mono text-[12px] text-ink-dim">
-        {label}
+      <span className="mb-1 flex min-w-0 items-center gap-1.5 font-mono text-[12px] text-ink-dim">
+        <span className="truncate">{label}</span>
         {unofficial && (
-          <span className="rounded bg-elevated px-1 py-0.5 font-sans text-[10px] text-ink-faint">非官方</span>
+          <span className="shrink-0 rounded bg-elevated px-1 py-0.5 font-sans text-[10px] text-ink-faint">非官方</span>
         )}
       </span>
       {children}
@@ -492,10 +492,10 @@ function Toggle({
       onClick={() => onChange(!checked)}
       className="flex items-center justify-between gap-2 rounded-md border border-line bg-surface px-3 py-2 text-left transition-colors hover:border-accent/50"
     >
-      <span className="flex items-center gap-1.5 font-mono text-[12px] text-ink-dim">
-        {label}
+      <span className="flex min-w-0 items-center gap-1.5 font-mono text-[12px] text-ink-dim">
+        <span className="truncate">{label}</span>
         {unofficial && (
-          <span className="rounded bg-elevated px-1 py-0.5 font-sans text-[10px] text-ink-faint">非官方</span>
+          <span className="shrink-0 rounded bg-elevated px-1 py-0.5 font-sans text-[10px] text-ink-faint">非官方</span>
         )}
       </span>
       <span
@@ -593,7 +593,7 @@ function CodexConfigEditor({ onSaved }: { onSaved: () => void }) {
                 <span className="flex-1 whitespace-pre-wrap break-words font-mono">{err}</span>
               </div>
             )}
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <Button onClick={save} disabled={saving}>
                 <Save size={15} />
                 {saving ? '保存中…' : '保存'}
@@ -602,7 +602,7 @@ function CodexConfigEditor({ onSaved }: { onSaved: () => void }) {
                 <X size={15} />
                 取消
               </Button>
-              <span className="text-[11px] text-ink-faint">
+              <span className="min-w-0 flex-1 text-[11px] text-ink-faint">
                 保存前自动备份当前配置，并校验 TOML 语法，通过后才写入
               </span>
             </div>

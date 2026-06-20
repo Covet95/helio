@@ -12,7 +12,7 @@ const NAV = [
 
 export default function Sidebar() {
   return (
-    <aside className="hidden h-full w-[212px] shrink-0 flex-col border-r border-line bg-surface md:flex">
+    <aside className="flex h-full w-[212px] shrink-0 flex-col border-r border-line bg-surface">
       <div className="drag-region px-4 pb-4 pt-5">
         <div className="flex items-center gap-3">
           <div

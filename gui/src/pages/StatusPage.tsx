@@ -47,10 +47,10 @@ export default function StatusPage() {
                 <HardDrive size={16} className="text-accent" />
                 <h3 className="text-[14px] font-semibold text-ink">数据库</h3>
               </div>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
                 <Stat icon={<HardDrive size={16} />} value={status?.database ? formatBytes(status.database.size) : '—'} label="大小" />
                 <Stat icon={<Layers size={16} />} value={String(status?.database?.profile_count ?? 0)} label="档案" />
-                <div className="rounded-md border border-line bg-surface p-3">
+                <div className="rounded-md border border-line bg-surface p-3 sm:col-span-2 lg:col-span-1">
                   <div className="flex items-center gap-1.5 text-ink-faint mb-1.5">
                     <FolderOpen size={14} /><span className="text-[11px] font-medium">路径</span>
                   </div>
@@ -94,7 +94,7 @@ function ToolCard({ tool, status }: { tool: ToolInfo; status?: TargetStatus }) {
       </div>
 
       {status?.profile ? (
-        <div className="relative mt-3 grid grid-cols-1 gap-1.5 sm:grid-cols-3">
+        <div className="relative mt-3 grid grid-cols-1 gap-1.5 sm:grid-cols-2 lg:grid-cols-3">
           <Row label="Profile" value={status.profile.name} strong />
           <Row label="Provider" value={status.profile.provider} />
           <Row label="URL" value={status.profile.api_url} mono />

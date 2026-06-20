@@ -173,8 +173,8 @@ export default function ImportPage() {
         </div>
 
         <section className="overflow-hidden rounded-lg border border-line bg-card">
-          <div className="flex items-center justify-between border-b border-line px-4 py-3">
-            <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-4 py-3">
+            <div className="flex min-w-0 items-center gap-2">
               <Boxes size={15} className="text-accent" />
               <span className="text-[14px] font-semibold text-ink">从 cc-switch 导入</span>
             </div>
@@ -264,7 +264,7 @@ export default function ImportPage() {
                   <>
                     <div className="grid grid-cols-1 gap-3">
                       <Field label="档案名称" value={name} onChange={(e) => setName(e.target.value)} />
-                      <div className="grid grid-cols-2 gap-3">
+                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                         <ReadField label="API URL" value={api.api_url || '—'} />
                         <ReadField label="API Key" value={api.api_key ? maskApiKey(api.api_key) : '—'} />
                         {api.model && <ReadField label="默认模型" value={api.model} />}
@@ -272,8 +272,8 @@ export default function ImportPage() {
                         {api.context_1m !== undefined && <ReadField label="1M 上下文" value={api.context_1m ? '启用' : '关闭'} />}
                       </div>
                     </div>
-                    <div className="flex items-center justify-between gap-3">
-                      <span className="truncate font-mono text-[11px] text-ink-faint">{api.source}</span>
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink-faint">{api.source}</span>
                       <Button onClick={importProfile} disabled={!name.trim() || !api.api_url}>
                         <FileDown size={15} />导入为配置档案
                       </Button>

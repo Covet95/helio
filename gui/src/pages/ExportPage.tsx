@@ -103,12 +103,12 @@ function ActionRow({ icon, title, meta, button }: {
   icon: React.ReactNode; title: string; meta: string; button: React.ReactNode;
 }) {
   return (
-    <div className="flex items-center justify-between gap-4 border-b border-line px-4 py-3.5 last:border-b-0">
+    <div className="flex flex-wrap items-center justify-between gap-4 border-b border-line px-4 py-3.5 last:border-b-0">
       <div className="flex min-w-0 items-center gap-3">
         <div className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-line bg-surface">{icon}</div>
         <div className="min-w-0">
-          <h3 className="text-[14px] font-semibold text-ink">{title}</h3>
-          <p className="text-[12px] text-ink-faint">{meta}</p>
+          <h3 className="truncate text-[14px] font-semibold text-ink">{title}</h3>
+          <p className="truncate text-[12px] text-ink-faint">{meta}</p>
         </div>
       </div>
       {button}

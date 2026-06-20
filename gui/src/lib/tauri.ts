@@ -24,9 +24,6 @@ export const tauriApi = {
   listProfiles: () =>
     command<ApiProfile[]>('list_profiles', undefined, []),
 
-  getProfile: (targetApp: TargetApp, name: string) =>
-    command<ApiProfile>('get_profile', { name, targetApp }),
-
   addProfile: (profile: ApiProfile) =>
     command<number>('add_profile', { profile }),
 
@@ -46,8 +43,8 @@ export const tauriApi = {
   fetchModels: (apiUrl: string, apiKey: string) =>
     command<FetchedModel[]>('fetch_models', { apiUrl, apiKey }),
 
-  testModel: (apiUrl: string, apiKey: string, model: string) =>
-    command<ModelTestResult>('test_model', { apiUrl, apiKey, model }),
+  testModel: (apiUrl: string, apiKey: string, model: string, wireApi?: string) =>
+    command<ModelTestResult>('test_model', { apiUrl, apiKey, model, wireApi }),
 
   // 配置管理
 
@@ -61,13 +58,6 @@ export const tauriApi = {
 
   importDatabase: (inputPath: string) =>
     command<void>('import_database', { inputPath }),
-
-  // MCP 和 Skills
-  scanLocalMcpServers: (targetApp: TargetApp) =>
-    command<Record<string, any>>('scan_local_mcp_servers', { targetApp }, {}),
-
-  scanLocalSkills: (targetApp: TargetApp) =>
-    command<string[]>('scan_local_skills', { targetApp }, []),
 
   getLocalConfigInfo: (targetApp: TargetApp) =>
     command<{
