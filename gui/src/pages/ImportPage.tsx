@@ -18,6 +18,7 @@ interface Scanned {
   api_key: string;
   provider: string;
   model?: string;
+  model_mapping?: Record<string, string>;
   reasoning_effort?: string;
   context_1m?: boolean;
   wire_api?: string;
@@ -105,6 +106,7 @@ export default function ImportPage() {
         api_url: api.api_url,
         api_key: api.api_key,
         model: api.model,
+        model_mapping: api.model_mapping,
         reasoning_effort: api.reasoning_effort,
         context_1m: api.context_1m,
         wire_api: api.wire_api,
@@ -270,6 +272,20 @@ export default function ImportPage() {
                         {api.model && <ReadField label="默认模型" value={api.model} />}
                         {api.reasoning_effort && <ReadField label="推理强度" value={api.reasoning_effort} />}
                         {api.context_1m !== undefined && <ReadField label="1M 上下文" value={api.context_1m ? '启用' : '关闭'} />}
+                        {api.model_mapping && Object.keys(api.model_mapping).length > 0 && (
+                          <ReadField
+                            label="角色映射"
+                            value={(['sonnet', 'opus', 'haiku'] as const)
+                              .map((r) => {
+                                const m = api.model_mapping?.[`${r}_model`];
+                                if (!m) return null;
+                                const one = api.model_mapping?.[`${r}_one_m`] === 'true' ? ' [1M]' : '';
+                                return `${r}→${m}${one}`;
+                              })
+                              .filter(Boolean)
+                              .join('，') || '—'}
+                          />
+                        )}
                       </div>
                     </div>
                     <div className="flex flex-wrap items-center justify-between gap-3">

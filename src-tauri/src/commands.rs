@@ -614,6 +614,8 @@ pub struct ScannedApi {
     pub api_key: String,
     pub provider: String,
     pub model: Option<String>,
+    /// Claude Code 专用：Sonnet/Opus/Haiku 角色映射（从 ANTHROPIC_DEFAULT_*_MODEL 反向重建）
+    pub model_mapping: Option<std::collections::HashMap<String, String>>,
     pub reasoning_effort: Option<String>,
     pub context_1m: Option<bool>,
     pub wire_api: Option<String>,
@@ -639,6 +641,9 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
     // Codex provider 块内的协议字段（仅 Codex 用到）
     let mut wire_api: Option<String> = None;
     let mut requires_openai_auth: Option<bool> = None;
+    // Claude Code 的默认模型 / 角色映射（仅 ClaudeCode 用到）
+    let mut claude_model: Option<String> = None;
+    let mut claude_mapping: Option<std::collections::HashMap<String, String>> = None;
 
     match target {
         TargetApp::ClaudeCode => {
@@ -647,8 +652,14 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
             if let Some(env) = cfg.get("env") {
                 url = str_field(env, "ANTHROPIC_BASE_URL");
                 key = str_field(env, "ANTHROPIC_AUTH_TOKEN");
+                claude_extract_models(env, &mut claude_model, &mut claude_mapping);
             }
-            if url.is_empty() || key.is_empty() {
+            // local 缺 URL/Key/模型时，回退读全局 settings.json 补齐
+            if url.is_empty()
+                || key.is_empty()
+                || claude_model.is_none()
+                || claude_mapping.is_none()
+            {
                 if let Some(home) = dirs::home_dir() {
                     let global = home.join(".claude").join("settings.json");
                     if let Ok(c) = std::fs::read_to_string(&global) {
@@ -656,6 +667,7 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
                             if let Some(env) = j.get("env") {
                                 if url.is_empty() { url = str_field(env, "ANTHROPIC_BASE_URL"); }
                                 if key.is_empty() { key = str_field(env, "ANTHROPIC_AUTH_TOKEN"); }
+                                claude_extract_models(env, &mut claude_model, &mut claude_mapping);
                             }
                         }
                     }
@@ -780,7 +792,8 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
         api_url: url,
         api_key: key,
         provider,
-        model: codex_string_field(target, &cfg, "model"),
+        model: codex_string_field(target, &cfg, "model").or(claude_model),
+        model_mapping: claude_mapping,
         reasoning_effort: codex_string_field(target, &cfg, "model_reasoning_effort"),
         context_1m: codex_context_1m(target, &cfg),
         wire_api,
@@ -847,6 +860,61 @@ fn codex_bool_field(target: TargetApp, cfg: &serde_json::Value, key: &str) -> Op
         return None;
     }
     cfg.get(key).and_then(|v| v.as_bool())
+}
+
+/// 从 Claude Code 的 env 对象反向提取默认模型与角色映射，与 `ClaudeCodeAdapter::merge_config`
+/// 的写入格式对称：
+/// - `ANTHROPIC_MODEL` → 默认模型
+/// - `ANTHROPIC_DEFAULT_{ROLE}_MODEL`（可能带 `[1M]` 后缀）→ mapping 的 `{role}_model` / `{role}_one_m`
+/// - `ANTHROPIC_DEFAULT_{ROLE}_MODEL_NAME` → mapping 的 `{role}_name`
+///
+/// 用 `&mut Option` 累加：已有值（来自更高优先级的 settings.local.json）不覆盖，仅补空。
+fn claude_extract_models(
+    env: &serde_json::Value,
+    model: &mut Option<String>,
+    mapping: &mut Option<std::collections::HashMap<String, String>>,
+) {
+    if model.is_none() {
+        let m = str_field(env, "ANTHROPIC_MODEL");
+        if !m.trim().is_empty() {
+            *model = Some(m);
+        }
+    }
+
+    let mut found = std::collections::HashMap::new();
+    for role in ["sonnet", "opus", "haiku"] {
+        let upper = role.to_uppercase();
+        let raw = str_field(env, &format!("ANTHROPIC_DEFAULT_{upper}_MODEL"));
+        if raw.trim().is_empty() {
+            continue;
+        }
+        // [1M] 后缀 = 1M 上下文标记，剥离后才是真实模型 id
+        let (base, one_m) = match raw.strip_suffix("[1M]") {
+            Some(b) => (b.to_string(), true),
+            None => (raw.clone(), false),
+        };
+        found.insert(format!("{role}_model"), base);
+        if one_m {
+            found.insert(format!("{role}_one_m"), "true".to_string());
+        }
+        let name = str_field(env, &format!("ANTHROPIC_DEFAULT_{upper}_MODEL_NAME"));
+        if !name.trim().is_empty() {
+            found.insert(format!("{role}_name"), name);
+        }
+    }
+
+    if found.is_empty() {
+        return;
+    }
+    match mapping {
+        // 已有更高优先级的映射，只补尚未出现的键
+        Some(existing) => {
+            for (k, v) in found {
+                existing.entry(k).or_insert(v);
+            }
+        }
+        None => *mapping = Some(found),
+    }
 }
 
 fn default_provider(target: TargetApp) -> String {
@@ -1185,9 +1253,142 @@ fn parse_cc_provider(
                 .and_then(|k| k.as_str())
                 .unwrap_or("")
                 .to_string();
-            (url, key, "anthropic".to_string(), None, None, false)
+            let model = env
+                .and_then(|e| e.get("ANTHROPIC_MODEL"))
+                .and_then(|m| m.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(String::from);
+            (url, key, "anthropic".to_string(), model, None, false)
         }
         _ => (String::new(), String::new(), "custom".to_string(), None, None, false),
+    }
+}
+
+#[cfg(test)]
+mod claude_extract_tests {
+    use super::claude_extract_models;
+    use serde_json::json;
+
+    #[test]
+    fn test_extracts_default_model() {
+        let env = json!({ "ANTHROPIC_MODEL": "claude-opus-4" });
+        let mut model = None;
+        let mut mapping = None;
+        claude_extract_models(&env, &mut model, &mut mapping);
+        assert_eq!(model, Some("claude-opus-4".to_string()));
+        assert!(mapping.is_none());
+    }
+
+    #[test]
+    fn test_extracts_role_mapping() {
+        let env = json!({
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-5.5",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "Sonnet-Proxy",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "grok-4.3",
+        });
+        let mut model = None;
+        let mut mapping = None;
+        claude_extract_models(&env, &mut model, &mut mapping);
+        let m = mapping.expect("mapping should exist");
+        assert_eq!(m.get("sonnet_model"), Some(&"gpt-5.5".to_string()));
+        assert_eq!(m.get("sonnet_name"), Some(&"Sonnet-Proxy".to_string()));
+        assert_eq!(m.get("opus_model"), Some(&"grok-4.3".to_string()));
+        assert!(m.get("haiku_model").is_none());
+        assert!(m.get("opus_name").is_none());
+    }
+
+    #[test]
+    fn test_strips_one_m_suffix() {
+        let env = json!({ "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-4[1M]" });
+        let mut model = None;
+        let mut mapping = None;
+        claude_extract_models(&env, &mut model, &mut mapping);
+        let m = mapping.unwrap();
+        assert_eq!(m.get("opus_model"), Some(&"claude-opus-4".to_string()));
+        assert_eq!(m.get("opus_one_m"), Some(&"true".to_string()));
+    }
+
+    #[test]
+    fn test_no_one_m_flag_when_absent() {
+        let env = json!({ "ANTHROPIC_DEFAULT_HAIKU_MODEL": "fast-model" });
+        let mut model = None;
+        let mut mapping = None;
+        claude_extract_models(&env, &mut model, &mut mapping);
+        let m = mapping.unwrap();
+        assert!(m.get("haiku_one_m").is_none());
+    }
+
+    #[test]
+    fn test_empty_env_yields_nothing() {
+        let env = json!({});
+        let mut model = None;
+        let mut mapping = None;
+        claude_extract_models(&env, &mut model, &mut mapping);
+        assert!(model.is_none());
+        assert!(mapping.is_none());
+    }
+
+    #[test]
+    fn test_does_not_override_higher_priority() {
+        let local = json!({
+            "ANTHROPIC_MODEL": "local-model",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "local-sonnet",
+        });
+        let global = json!({
+            "ANTHROPIC_MODEL": "global-model",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "global-sonnet",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "global-opus",
+        });
+        let mut model = None;
+        let mut mapping = None;
+        claude_extract_models(&local, &mut model, &mut mapping);
+        claude_extract_models(&global, &mut model, &mut mapping);
+        assert_eq!(model, Some("local-model".to_string()));
+        let m = mapping.unwrap();
+        assert_eq!(m.get("sonnet_model"), Some(&"local-sonnet".to_string()));
+        assert_eq!(m.get("opus_model"), Some(&"global-opus".to_string()));
+    }
+
+    #[test]
+    fn test_round_trip_with_merge_config() {
+        // 关键回归：merge_config 写出的 env 必须能被 claude_extract_models 完整读回
+        use crate::adapters::{claude_code::ClaudeCodeAdapter, ConfigAdapter};
+        use crate::models::ApiProfile;
+        use std::collections::HashMap;
+
+        let mut mm = HashMap::new();
+        mm.insert("sonnet_model".to_string(), "gpt-5.5".to_string());
+        mm.insert("sonnet_name".to_string(), "Sonnet-Proxy".to_string());
+        mm.insert("opus_model".to_string(), "claude-opus-4".to_string());
+        mm.insert("opus_one_m".to_string(), "true".to_string());
+
+        let profile = ApiProfile {
+            name: "rt".to_string(),
+            provider: "anthropic".to_string(),
+            api_url: "https://x".to_string(),
+            api_key: "sk-x".to_string(),
+            model: Some("claude-sonnet-4".to_string()),
+            model_mapping: Some(mm),
+            ..Default::default()
+        };
+
+        let adapter = ClaudeCodeAdapter::new();
+        let merged = adapter.merge_config(&profile, &json!({}));
+        let env = merged.get("env").cloned().unwrap();
+
+        let mut model = None;
+        let mut mapping = None;
+        claude_extract_models(&env, &mut model, &mut mapping);
+
+        assert_eq!(model, Some("claude-sonnet-4".to_string()));
+        let m = mapping.expect("round-trip mapping");
+        assert_eq!(m.get("sonnet_model"), Some(&"gpt-5.5".to_string()));
+        assert_eq!(m.get("sonnet_name"), Some(&"Sonnet-Proxy".to_string()));
+        // [1M] 后缀被正确剥离 + 标记还原
+        assert_eq!(m.get("opus_model"), Some(&"claude-opus-4".to_string()));
+        assert_eq!(m.get("opus_one_m"), Some(&"true".to_string()));
+        // 没设的 haiku 不应出现
+        assert!(m.get("haiku_model").is_none());
     }
 }
 

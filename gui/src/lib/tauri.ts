@@ -80,8 +80,14 @@ export const tauriApi = {
       api_key: string;
       provider: string;
       model?: string;
+      model_mapping?: Record<string, string>;
       reasoning_effort?: string;
       context_1m?: boolean;
+      wire_api?: string;
+      requires_openai_auth?: boolean;
+      model_effort_level?: string;
+      model_thinking_enabled?: boolean;
+      service_tier?: string;
       source: string;
     }>('scan_local_api', { targetApp }, {
       found: false,
@@ -89,8 +95,14 @@ export const tauriApi = {
       api_key: '',
       provider: '',
       model: undefined,
+      model_mapping: undefined,
       reasoning_effort: undefined,
       context_1m: undefined,
+      wire_api: undefined,
+      requires_openai_auth: undefined,
+      model_effort_level: undefined,
+      model_thinking_enabled: undefined,
+      service_tier: undefined,
       source: `${targetApp} config`,
     }),
 
