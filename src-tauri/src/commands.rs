@@ -647,31 +647,12 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
 
     match target {
         TargetApp::ClaudeCode => {
-            // Claude: API 在 env.ANTHROPIC_*。settings.local.json 优先，
-            // 但若 local 没有 API 字段，回退到 settings.json
+            // Claude: API 在 env.ANTHROPIC_*，全局配置 = ~/.claude/settings.json
+            // （adapter.read_config 已直接返回该文件内容）
             if let Some(env) = cfg.get("env") {
                 url = str_field(env, "ANTHROPIC_BASE_URL");
                 key = str_field(env, "ANTHROPIC_AUTH_TOKEN");
                 claude_extract_models(env, &mut claude_model, &mut claude_mapping);
-            }
-            // local 缺 URL/Key/模型时，回退读全局 settings.json 补齐
-            if url.is_empty()
-                || key.is_empty()
-                || claude_model.is_none()
-                || claude_mapping.is_none()
-            {
-                if let Some(home) = dirs::home_dir() {
-                    let global = home.join(".claude").join("settings.json");
-                    if let Ok(c) = std::fs::read_to_string(&global) {
-                        if let Ok(j) = serde_json::from_str::<serde_json::Value>(&c) {
-                            if let Some(env) = j.get("env") {
-                                if url.is_empty() { url = str_field(env, "ANTHROPIC_BASE_URL"); }
-                                if key.is_empty() { key = str_field(env, "ANTHROPIC_AUTH_TOKEN"); }
-                                claude_extract_models(env, &mut claude_model, &mut claude_mapping);
-                            }
-                        }
-                    }
-                }
             }
         }
         TargetApp::Codex => {
@@ -868,7 +849,7 @@ fn codex_bool_field(target: TargetApp, cfg: &serde_json::Value, key: &str) -> Op
 /// - `ANTHROPIC_DEFAULT_{ROLE}_MODEL`（可能带 `[1M]` 后缀）→ mapping 的 `{role}_model` / `{role}_one_m`
 /// - `ANTHROPIC_DEFAULT_{ROLE}_MODEL_NAME` → mapping 的 `{role}_name`
 ///
-/// 用 `&mut Option` 累加：已有值（来自更高优先级的 settings.local.json）不覆盖，仅补空。
+/// 用 `&mut Option` 累加：已有值不覆盖，仅补空（便于多个 env 来源依次补齐）。
 fn claude_extract_models(
     env: &serde_json::Value,
     model: &mut Option<String>,

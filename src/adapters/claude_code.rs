@@ -15,12 +15,7 @@ impl ClaudeCodeAdapter {
         Self { config_dir }
     }
 
-    /// 获取 settings.local.json 路径
-    fn local_settings_path(&self) -> PathBuf {
-        self.config_dir.join("settings.local.json")
-    }
-
-    /// 获取 settings.json 路径
+    /// 获取 settings.json 路径（Claude Code 的用户级/全局配置文件）
     fn global_settings_path(&self) -> PathBuf {
         self.config_dir.join("settings.json")
     }
@@ -28,17 +23,10 @@ impl ClaudeCodeAdapter {
 
 impl ConfigAdapter for ClaudeCodeAdapter {
     fn config_path(&self) -> PathBuf {
-        self.local_settings_path()
+        self.global_settings_path()
     }
 
     fn read_config(&self) -> Result<serde_json::Value> {
-        let local_path = self.local_settings_path();
-        if local_path.exists() {
-            let content =
-                fs::read_to_string(&local_path).context("Failed to read local settings")?;
-            return serde_json::from_str(&content).context("Failed to parse local settings");
-        }
-
         let global_path = self.global_settings_path();
         if global_path.exists() {
             let content =
@@ -326,43 +314,19 @@ mod tests {
     }
 
     #[test]
-    fn test_config_path_returns_settings_local_json() {
+    fn test_config_path_returns_settings_json() {
         let adapter = test_adapter();
 
         assert_eq!(
             adapter.config_path(),
-            adapter.config_dir.join("settings.local.json")
+            adapter.config_dir.join("settings.json")
         );
 
         let _ = fs::remove_dir_all(&adapter.config_dir);
     }
 
     #[test]
-    fn test_read_config_prefers_settings_local_json() {
-        let adapter = test_adapter();
-        fs::write(
-            adapter.global_settings_path(),
-            r#"{"env":{"ANTHROPIC_BASE_URL":"https://global.example"}}"#,
-        )
-        .unwrap();
-        fs::write(
-            adapter.local_settings_path(),
-            r#"{"env":{"ANTHROPIC_BASE_URL":"https://local.example"}}"#,
-        )
-        .unwrap();
-
-        let config = adapter.read_config().unwrap();
-
-        assert_eq!(
-            config["env"]["ANTHROPIC_BASE_URL"],
-            "https://local.example"
-        );
-
-        let _ = fs::remove_dir_all(&adapter.config_dir);
-    }
-
-    #[test]
-    fn test_read_config_falls_back_to_settings_json() {
+    fn test_read_config_reads_settings_json() {
         let adapter = test_adapter();
         fs::write(
             adapter.global_settings_path(),
@@ -381,24 +345,42 @@ mod tests {
     }
 
     #[test]
-    fn test_write_config_writes_settings_local_json() {
+    fn test_read_config_ignores_settings_local_json() {
+        // 全局配置只认 settings.json；settings.local.json 不再被读取
+        let adapter = test_adapter();
+        fs::write(
+            adapter.config_dir.join("settings.local.json"),
+            r#"{"env":{"ANTHROPIC_BASE_URL":"https://local.example"}}"#,
+        )
+        .unwrap();
+
+        let config = adapter.read_config().unwrap();
+
+        // settings.json 不存在 → 返回空对象，不回退读 local
+        assert!(config["env"]["ANTHROPIC_BASE_URL"].is_null());
+
+        let _ = fs::remove_dir_all(&adapter.config_dir);
+    }
+
+    #[test]
+    fn test_write_config_writes_settings_json() {
         let adapter = test_adapter();
         let config = serde_json::json!({
             "env": {
-                "ANTHROPIC_BASE_URL": "https://local.example"
+                "ANTHROPIC_BASE_URL": "https://global.example"
             }
         });
 
         adapter.write_config(&config).unwrap();
 
-        assert!(adapter.local_settings_path().exists());
-        assert!(!adapter.global_settings_path().exists());
+        assert!(adapter.global_settings_path().exists());
+        assert!(!adapter.config_dir.join("settings.local.json").exists());
         let written: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(adapter.local_settings_path()).unwrap())
+            serde_json::from_str(&fs::read_to_string(adapter.global_settings_path()).unwrap())
                 .unwrap();
         assert_eq!(
             written["env"]["ANTHROPIC_BASE_URL"],
-            "https://local.example"
+            "https://global.example"
         );
 
         let _ = fs::remove_dir_all(&adapter.config_dir);
