@@ -85,7 +85,6 @@ export const tauriApi = {
       context_1m?: boolean;
       wire_api?: string;
       requires_openai_auth?: boolean;
-      model_effort_level?: string;
       model_thinking_enabled?: boolean;
       service_tier?: string;
       source: string;
@@ -100,7 +99,6 @@ export const tauriApi = {
       context_1m: undefined,
       wire_api: undefined,
       requires_openai_auth: undefined,
-      model_effort_level: undefined,
       model_thinking_enabled: undefined,
       service_tier: undefined,
       source: `${targetApp} config`,

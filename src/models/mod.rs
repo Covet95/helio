@@ -32,9 +32,6 @@ pub struct ApiProfile {
     /// None = 沿用默认（true）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requires_openai_auth: Option<bool>,
-    /// Codex 专用：顶层 model_effort_level（与 reasoning_effort 同档：minimal/low/medium/high/xhigh）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_effort_level: Option<String>,
     /// Codex 专用：顶层 model_thinking_enabled 开关。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_thinking_enabled: Option<bool>,
@@ -133,7 +130,6 @@ impl ApiProfile {
             context_1m: None,
             wire_api: None,
             requires_openai_auth: None,
-            model_effort_level: None,
             model_thinking_enabled: None,
             service_tier: None,
             target_app: None,

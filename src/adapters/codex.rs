@@ -287,23 +287,6 @@ impl ConfigAdapter for CodexAdapter {
                 }
             }
 
-            match api_profile
-                .model_effort_level
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            {
-                Some(effort) => {
-                    obj.insert(
-                        "model_effort_level".to_string(),
-                        serde_json::Value::String(effort.to_string()),
-                    );
-                }
-                None => {
-                    obj.remove("model_effort_level");
-                }
-            }
-
             match api_profile.model_thinking_enabled {
                 Some(enabled) => {
                     obj.insert(
@@ -635,7 +618,6 @@ command = "npx"
     fn test_merge_applies_top_level_codex_params() {
         let adapter = CodexAdapter::new();
         let profile = ApiProfile {
-            model_effort_level: Some("high".to_string()),
             model_thinking_enabled: Some(true),
             service_tier: Some("fast".to_string()),
             ..sample_profile()
@@ -643,7 +625,6 @@ command = "npx"
 
         let merged = adapter.merge_config(&profile, &serde_json::json!({}));
 
-        assert_eq!(merged["model_effort_level"], "high");
         assert_eq!(merged["model_thinking_enabled"], true);
         assert_eq!(merged["service_tier"], "fast");
     }
@@ -652,12 +633,10 @@ command = "npx"
     fn test_merge_clears_disabled_top_level_codex_params() {
         let adapter = CodexAdapter::new();
         let shared = serde_json::json!({
-            "model_effort_level": "high",
             "model_thinking_enabled": true,
             "service_tier": "fast",
         });
         let profile = ApiProfile {
-            model_effort_level: None,
             model_thinking_enabled: None,
             service_tier: None,
             ..sample_profile()
@@ -665,7 +644,6 @@ command = "npx"
 
         let merged = adapter.merge_config(&profile, &shared);
 
-        assert!(merged.get("model_effort_level").is_none());
         assert!(merged.get("model_thinking_enabled").is_none());
         assert!(merged.get("service_tier").is_none());
     }

@@ -620,7 +620,6 @@ pub struct ScannedApi {
     pub context_1m: Option<bool>,
     pub wire_api: Option<String>,
     pub requires_openai_auth: Option<bool>,
-    pub model_effort_level: Option<String>,
     pub model_thinking_enabled: Option<bool>,
     pub service_tier: Option<String>,
     /// 来源配置文件路径，便于用户确认
@@ -779,7 +778,6 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
         context_1m: codex_context_1m(target, &cfg),
         wire_api,
         requires_openai_auth,
-        model_effort_level: codex_string_field(target, &cfg, "model_effort_level"),
         model_thinking_enabled: codex_bool_field(target, &cfg, "model_thinking_enabled"),
         service_tier: codex_string_field(target, &cfg, "service_tier"),
         source,

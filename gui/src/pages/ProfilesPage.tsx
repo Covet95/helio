@@ -705,28 +705,6 @@ function ProfileModal({
                 </div>
               )}
 
-              {tool === 'codex' && (
-                <div>
-                  <span className="block mb-1.5 text-[12px] font-medium text-ink-dim">Effort Level</span>
-                  <div className="flex gap-1.5">
-                    {REASONING_LEVELS.map((r) => (
-                      <button
-                        key={r.value}
-                        type="button"
-                        onClick={() => setForm({ ...form, model_effort_level: r.value || undefined })}
-                        className={`flex-1 rounded-md px-2 py-1.5 text-[12px] font-medium border transition-all ${
-                          (form.model_effort_level || '') === r.value
-                            ? 'border-accent text-accent bg-accent/8'
-                            : 'border-line text-ink-dim hover:border-line-strong'
-                        }`}
-                      >
-                        {r.label}
-                      </button>
-                    ))}
-                  </div>
-                  <div className="mt-1 text-[11px] text-ink-faint">model_effort_level</div>
-                </div>
-              )}
 
               {tool === 'codex' && (
                 <label className="flex cursor-pointer items-center justify-between">

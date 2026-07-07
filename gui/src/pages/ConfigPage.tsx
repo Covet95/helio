@@ -256,13 +256,12 @@ function CodexBehaviorSettings({
   current: Record<string, unknown>;
   onSaved: () => void;
 }) {
-  // 字符串型字段（下拉 + model_auto_compact_token_limit 数字框 + model_effort_level 文本框）
+  // 字符串型字段（下拉 + model_auto_compact_token_limit 数字框）
   // 统一存为字符串，'' 表示「不设置」。
   const buildStr = () => {
     const s: Record<string, string> = {};
     for (const f of CODEX_SELECT_FIELDS) s[f.key] = toStr(current[f.key]);
     s.model_auto_compact_token_limit = toStr(current.model_auto_compact_token_limit);
-    s.model_effort_level = toStr(current.model_effort_level);
     return s;
   };
   const buildBool = () => {
@@ -293,7 +292,6 @@ function CodexBehaviorSettings({
   const dirty =
     CODEX_SELECT_FIELDS.some((f) => strVals[f.key] !== initStr[f.key]) ||
     strVals.model_auto_compact_token_limit !== initStr.model_auto_compact_token_limit ||
-    strVals.model_effort_level !== initStr.model_effort_level ||
     CODEX_BOOL_FIELDS.some((f) => boolVals[f.key] !== initBool[f.key]);
 
   const dangerCombo =
@@ -317,10 +315,6 @@ function CodexBehaviorSettings({
       if (strVals[f.key] !== initStr[f.key]) {
         fields[f.key] = strVals[f.key] === '' ? null : strVals[f.key];
       }
-    }
-    if (strVals.model_effort_level !== initStr.model_effort_level) {
-      const v = strVals.model_effort_level.trim();
-      fields.model_effort_level = v === '' ? null : v;
     }
     if (strVals.model_auto_compact_token_limit !== initStr.model_auto_compact_token_limit) {
       const raw = strVals.model_auto_compact_token_limit.trim();
@@ -403,16 +397,6 @@ function CodexBehaviorSettings({
               onChange={(e) => setStr('model_auto_compact_token_limit', e.target.value)}
               placeholder="(不设置)"
               className="w-full rounded-md border border-line bg-surface px-2.5 py-1.5 text-[13px] text-ink focus:border-accent focus:outline-none"
-            />
-          </Field>
-
-          <Field label="model_effort_level" unofficial>
-            <input
-              type="text"
-              value={strVals.model_effort_level}
-              onChange={(e) => setStr('model_effort_level', e.target.value)}
-              placeholder="(不设置)"
-              className="w-full rounded-md border border-line bg-surface px-2.5 py-1.5 font-mono text-[13px] text-ink focus:border-accent focus:outline-none"
             />
           </Field>
         </div>
