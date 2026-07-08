@@ -614,7 +614,7 @@ pub struct ScannedApi {
     pub api_key: String,
     pub provider: String,
     pub model: Option<String>,
-    /// Claude Code 专用：Sonnet/Opus/Haiku 角色映射（从 ANTHROPIC_DEFAULT_*_MODEL 反向重建）
+    /// Claude Code 专用：Sonnet/Opus/Fable/Haiku 角色映射（从 ANTHROPIC_DEFAULT_*_MODEL 反向重建）
     pub model_mapping: Option<std::collections::HashMap<String, String>>,
     pub reasoning_effort: Option<String>,
     pub context_1m: Option<bool>,
@@ -861,7 +861,7 @@ fn claude_extract_models(
     }
 
     let mut found = std::collections::HashMap::new();
-    for role in ["sonnet", "opus", "haiku"] {
+    for role in ["sonnet", "opus", "fable", "haiku"] {
         let upper = role.to_uppercase();
         let raw = str_field(env, &format!("ANTHROPIC_DEFAULT_{upper}_MODEL"));
         if raw.trim().is_empty() {

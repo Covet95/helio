@@ -617,10 +617,10 @@ function ProfileModal({
               {tool === 'claude-code' && (
                 <div className="space-y-2">
                   <div className="text-[12px] font-medium text-ink-dim">
-                    模型角色映射 <span className="font-normal text-ink-faint">（Sonnet/Opus/Haiku → 实际模型；写入 ANTHROPIC_DEFAULT_*_MODEL）</span>
+                    模型角色映射 <span className="font-normal text-ink-faint">（Sonnet/Opus/Fable/Haiku → 实际模型；写入 ANTHROPIC_DEFAULT_*_MODEL）</span>
                   </div>
-                  {(['sonnet', 'opus', 'haiku'] as const).map((role) => {
-                    const labels: Record<string, string> = { sonnet: 'Sonnet', opus: 'Opus', haiku: 'Haiku' };
+                  {(['sonnet', 'opus', 'fable', 'haiku'] as const).map((role) => {
+                    const labels: Record<string, string> = { sonnet: 'Sonnet', opus: 'Opus', fable: 'Fable', haiku: 'Haiku' };
                     const mm = form.model_mapping || {};
                     const setMM = (k: string, v: string) => setForm({ ...form, model_mapping: { ...mm, [k]: v } });
                     return (

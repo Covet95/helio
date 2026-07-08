@@ -273,7 +273,7 @@ export default function ImportPage() {
                         {api.model_mapping && Object.keys(api.model_mapping).length > 0 && (
                           <ReadField
                             label="角色映射"
-                            value={(['sonnet', 'opus', 'haiku'] as const)
+                            value={(['sonnet', 'opus', 'fable', 'haiku'] as const)
                               .map((r) => {
                                 const m = api.model_mapping?.[`${r}_model`];
                                 if (!m) return null;

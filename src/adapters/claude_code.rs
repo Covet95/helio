@@ -105,9 +105,9 @@ impl ConfigAdapter for ClaudeCodeAdapter {
                 }
             }
 
-            // 角色映射（Sonnet/Opus/Haiku）—— 有则写，无则清（避免旧角色残留覆盖切换后的实际模型）
+            // 角色映射（Sonnet/Opus/Fable/Haiku）—— 有则写，无则清（避免旧角色残留覆盖切换后的实际模型）
             let mm = api_profile.model_mapping.as_ref();
-            for role in ["sonnet", "opus", "haiku"] {
+            for role in ["sonnet", "opus", "fable", "haiku"] {
                 let model = mm
                     .and_then(|m| m.get(&format!("{role}_model")))
                     .map(|s| s.as_str())
