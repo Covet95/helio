@@ -23,6 +23,7 @@ interface Scanned {
   context_1m?: boolean;
   wire_api?: string;
   requires_openai_auth?: boolean;
+  experimental_bearer_token?: string;
   model_thinking_enabled?: boolean;
   service_tier?: string;
   source: string;
@@ -110,6 +111,7 @@ export default function ImportPage() {
         context_1m: api.context_1m,
         wire_api: api.wire_api,
         requires_openai_auth: api.requires_openai_auth,
+        experimental_bearer_token: api.experimental_bearer_token,
         model_thinking_enabled: api.model_thinking_enabled,
         service_tier: api.service_tier,
         target_app: tool,

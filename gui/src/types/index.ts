@@ -17,6 +17,8 @@ export interface ApiProfile {
   wire_api?: string;
   /** Codex provider 是否要求 OpenAI 鉴权 */
   requires_openai_auth?: boolean;
+  /** Codex provider 的实验性 Bearer Token（部分第三方中转在 requires_openai_auth 鉴权失败时需要） */
+  experimental_bearer_token?: string;
   /** Codex 顶层 model_thinking_enabled 开关 */
   model_thinking_enabled?: boolean;
   /** Codex 顶层 service_tier（如 fast） */

@@ -76,6 +76,7 @@ impl Database {
         let _ = self.conn.execute("ALTER TABLE api_profiles ADD COLUMN model_effort_level TEXT", []);
         let _ = self.conn.execute("ALTER TABLE api_profiles ADD COLUMN model_thinking_enabled INTEGER", []);
         let _ = self.conn.execute("ALTER TABLE api_profiles ADD COLUMN service_tier TEXT", []);
+        let _ = self.conn.execute("ALTER TABLE api_profiles ADD COLUMN experimental_bearer_token TEXT", []);
 
         Ok(())
     }
@@ -180,8 +181,8 @@ impl Database {
             .transpose()?;
 
         self.conn.execute(
-            "INSERT INTO api_profiles (name, provider, api_url, api_key, model_mapping, model, reasoning_effort, context_1m, target_app, models, wire_api, requires_openai_auth, model_thinking_enabled, service_tier, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            "INSERT INTO api_profiles (name, provider, api_url, api_key, model_mapping, model, reasoning_effort, context_1m, target_app, models, wire_api, requires_openai_auth, model_thinking_enabled, service_tier, experimental_bearer_token, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 &profile.name,
                 &profile.provider,
@@ -197,6 +198,7 @@ impl Database {
                 profile.requires_openai_auth.map(|b| b as i64),
                 profile.model_thinking_enabled.map(|b| b as i64),
                 &profile.service_tier,
+                &profile.experimental_bearer_token,
                 now,
                 now
             ],
@@ -240,6 +242,7 @@ impl Database {
             requires_openai_auth: requires_openai_auth.map(|v| v != 0),
             model_thinking_enabled: model_thinking_enabled.map(|v| v != 0),
             service_tier: row.get(16)?,
+            experimental_bearer_token: row.get(17)?,
             created_at: Some(row.get(9)?),
             updated_at: Some(row.get(10)?),
             target_app,
@@ -249,7 +252,7 @@ impl Database {
     /// 按 (name, target_app) 精确获取 profile。
     pub fn get_profile_by_name_and_target(&self, name: &str, target: TargetApp) -> Result<ApiProfile> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, provider, api_url, api_key, model_mapping, model, reasoning_effort, context_1m, created_at, updated_at, target_app, models, wire_api, requires_openai_auth, model_thinking_enabled, service_tier
+            "SELECT id, name, provider, api_url, api_key, model_mapping, model, reasoning_effort, context_1m, created_at, updated_at, target_app, models, wire_api, requires_openai_auth, model_thinking_enabled, service_tier, experimental_bearer_token
              FROM api_profiles WHERE name = ?1 AND target_app = ?2",
         )?;
         let profile = stmt.query_row(params![name, target.as_str()], Self::row_to_profile)?;
@@ -272,7 +275,7 @@ impl Database {
     /// 列出所有 API Profiles
     pub fn list_profiles(&self) -> Result<Vec<ApiProfile>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, provider, api_url, api_key, model_mapping, model, reasoning_effort, context_1m, created_at, updated_at, target_app, models, wire_api, requires_openai_auth, model_thinking_enabled, service_tier
+            "SELECT id, name, provider, api_url, api_key, model_mapping, model, reasoning_effort, context_1m, created_at, updated_at, target_app, models, wire_api, requires_openai_auth, model_thinking_enabled, service_tier, experimental_bearer_token
              FROM api_profiles ORDER BY name",
         )?;
 
@@ -304,7 +307,7 @@ impl Database {
             Some(id) => {
                 self.conn.execute(
                     "UPDATE api_profiles SET name = ?1, provider = ?2, api_url = ?3, api_key = ?4,
-                     model_mapping = ?5, model = ?6, reasoning_effort = ?7, context_1m = ?8, target_app = ?9, models = ?10, wire_api = ?11, requires_openai_auth = ?12, model_thinking_enabled = ?13, service_tier = ?14, updated_at = ?15 WHERE id = ?16",
+                     model_mapping = ?5, model = ?6, reasoning_effort = ?7, context_1m = ?8, target_app = ?9, models = ?10, wire_api = ?11, requires_openai_auth = ?12, model_thinking_enabled = ?13, service_tier = ?14, experimental_bearer_token = ?15, updated_at = ?16 WHERE id = ?17",
                     params![
                         &profile.name,
                         &profile.provider,
@@ -320,6 +323,7 @@ impl Database {
                         profile.requires_openai_auth.map(|b| b as i64),
                         profile.model_thinking_enabled.map(|b| b as i64),
                         &profile.service_tier,
+                        &profile.experimental_bearer_token,
                         now,
                         id
                     ],
@@ -329,7 +333,7 @@ impl Database {
                 // 无 id：按 name 定位，不改名
                 self.conn.execute(
                     "UPDATE api_profiles SET provider = ?1, api_url = ?2, api_key = ?3,
-                     model_mapping = ?4, model = ?5, reasoning_effort = ?6, context_1m = ?7, target_app = ?8, models = ?9, wire_api = ?10, requires_openai_auth = ?11, model_thinking_enabled = ?12, service_tier = ?13, updated_at = ?14 WHERE name = ?15",
+                     model_mapping = ?4, model = ?5, reasoning_effort = ?6, context_1m = ?7, target_app = ?8, models = ?9, wire_api = ?10, requires_openai_auth = ?11, model_thinking_enabled = ?12, service_tier = ?13, experimental_bearer_token = ?14, updated_at = ?15 WHERE name = ?16",
                     params![
                         &profile.provider,
                         &profile.api_url,
@@ -344,6 +348,7 @@ impl Database {
                         profile.requires_openai_auth.map(|b| b as i64),
                         profile.model_thinking_enabled.map(|b| b as i64),
                         &profile.service_tier,
+                        &profile.experimental_bearer_token,
                         now,
                         &profile.name
                     ],

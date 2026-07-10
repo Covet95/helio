@@ -32,6 +32,10 @@ pub struct ApiProfile {
     /// None = 沿用默认（true）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requires_openai_auth: Option<bool>,
+    /// Codex 专用：provider 的实验性 Bearer Token（model_providers.<id>.experimental_bearer_token）。
+    /// 用于要求 OpenAI 鉴权失败时的第三方中转站鉴权，None = 不写入该字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experimental_bearer_token: Option<String>,
     /// Codex 专用：顶层 model_thinking_enabled 开关。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_thinking_enabled: Option<bool>,
@@ -130,6 +134,7 @@ impl ApiProfile {
             context_1m: None,
             wire_api: None,
             requires_openai_auth: None,
+            experimental_bearer_token: None,
             model_thinking_enabled: None,
             service_tier: None,
             target_app: None,

@@ -139,8 +139,9 @@ impl ConfigAdapter for CodexAdapter {
         let mut shared = config.clone();
 
         // Codex 的 API key 存在独立的 ~/.codex/auth.json，不在 config.toml 里。
-        // config.toml 里唯一的 API 端点信息是各 provider 的 base_url。
-        // 因此只移除 base_url，保留 wire_api / requires_openai_auth / name 等协议字段。
+        // config.toml 里唯一的 API 端点/凭据信息是各 provider 的 base_url 和
+        // experimental_bearer_token（第三方中转专用鉴权）。因此都要移除，
+        // 保留 wire_api / requires_openai_auth / name 等协议字段。
         if let Some(obj) = shared.as_object_mut() {
             // 兼容历史版本误写入的顶层 api_key
             obj.remove("api_key");
@@ -149,6 +150,7 @@ impl ConfigAdapter for CodexAdapter {
                 for (_name, provider) in providers.iter_mut() {
                     if let Some(p) = provider.as_object_mut() {
                         p.remove("base_url");
+                        p.remove("experimental_bearer_token");
                     }
                 }
             }
@@ -208,6 +210,25 @@ impl ConfigAdapter for CodexAdapter {
                     None => {
                         p.entry("requires_openai_auth".to_string())
                             .or_insert_with(|| serde_json::Value::Bool(true));
+                    }
+                }
+                // experimental_bearer_token：部分第三方中转在 requires_openai_auth
+                // 鉴权失败时需要额外的 Bearer Token。profile 显式指定则写入/覆盖，
+                // 未指定则移除（不残留旧 token）。
+                match api_profile
+                    .experimental_bearer_token
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    Some(token) => {
+                        p.insert(
+                            "experimental_bearer_token".to_string(),
+                            serde_json::Value::String(token.to_string()),
+                        );
+                    }
+                    None => {
+                        p.remove("experimental_bearer_token");
                     }
                 }
                 // wire_api：profile 显式指定则覆盖（responses/chat），否则新 provider 补 responses 默认。
@@ -473,7 +494,8 @@ command = "npx"
             "model_providers": {
                 "openai": {
                     "base_url": "https://api.com",
-                    "name": "OpenAI"
+                    "name": "OpenAI",
+                    "experimental_bearer_token": "bearer-secret"
                 }
             },
             "mcp_servers": {
@@ -486,6 +508,7 @@ command = "npx"
         // API 字段被移除
         assert!(shared.get("api_key").is_none());
         assert!(shared["model_providers"]["openai"].get("base_url").is_none());
+        assert!(shared["model_providers"]["openai"].get("experimental_bearer_token").is_none());
         // 共享字段保留
         assert_eq!(shared["model_providers"]["openai"]["name"], "OpenAI");
         assert_eq!(shared["mcp_servers"]["fs"]["command"], "npx");
@@ -612,6 +635,33 @@ command = "npx"
             merged["model_providers"]["myproxy"]["requires_openai_auth"],
             false
         );
+    }
+
+    #[test]
+    fn test_merge_applies_and_clears_experimental_bearer_token() {
+        let adapter = CodexAdapter::new();
+        let profile = ApiProfile {
+            provider: "myproxy".to_string(),
+            experimental_bearer_token: Some("sk-bearer-xyz".to_string()),
+            ..sample_profile()
+        };
+
+        let merged = adapter.merge_config(&profile, &serde_json::json!({}));
+        assert_eq!(
+            merged["model_providers"]["myproxy"]["experimental_bearer_token"],
+            "sk-bearer-xyz"
+        );
+
+        // 再次 merge，profile 未指定 token → 已有的旧 token 应被清除，不残留
+        let profile_no_token = ApiProfile {
+            provider: "myproxy".to_string(),
+            experimental_bearer_token: None,
+            ..sample_profile()
+        };
+        let merged2 = adapter.merge_config(&profile_no_token, &merged);
+        assert!(merged2["model_providers"]["myproxy"]
+            .get("experimental_bearer_token")
+            .is_none());
     }
 
     #[test]

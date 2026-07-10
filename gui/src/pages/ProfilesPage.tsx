@@ -739,6 +739,12 @@ function ProfileModal({
               )}
 
               {tool === 'codex' && (
+                <Field label="Bearer Token" type="password" value={form.experimental_bearer_token || ''} mono
+                       onChange={(e) => setForm({ ...form, experimental_bearer_token: e.target.value || undefined })}
+                       placeholder="留空 / 部分中转在鉴权失败时需要" />
+              )}
+
+              {tool === 'codex' && (
                 <Field label="Service Tier" value={form.service_tier || ''} mono
                        onChange={(e) => setForm({ ...form, service_tier: e.target.value || undefined })}
                        placeholder="留空 / fast" />

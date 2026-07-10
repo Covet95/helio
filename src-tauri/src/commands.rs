@@ -620,6 +620,7 @@ pub struct ScannedApi {
     pub context_1m: Option<bool>,
     pub wire_api: Option<String>,
     pub requires_openai_auth: Option<bool>,
+    pub experimental_bearer_token: Option<String>,
     pub model_thinking_enabled: Option<bool>,
     pub service_tier: Option<String>,
     /// 来源配置文件路径，便于用户确认
@@ -640,6 +641,7 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
     // Codex provider 块内的协议字段（仅 Codex 用到）
     let mut wire_api: Option<String> = None;
     let mut requires_openai_auth: Option<bool> = None;
+    let mut experimental_bearer_token: Option<String> = None;
     // Claude Code 的默认模型 / 角色映射（仅 ClaudeCode 用到）
     let mut claude_model: Option<String> = None;
     let mut claude_mapping: Option<std::collections::HashMap<String, String>> = None;
@@ -681,6 +683,10 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
                         wire_api = Some(w);
                     }
                     requires_openai_auth = b.get("requires_openai_auth").and_then(|v| v.as_bool());
+                    let bearer = str_field(b, "experimental_bearer_token");
+                    if !bearer.trim().is_empty() {
+                        experimental_bearer_token = Some(bearer);
+                    }
                 }
             }
             // 顶层兜底
@@ -778,6 +784,7 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
         context_1m: codex_context_1m(target, &cfg),
         wire_api,
         requires_openai_auth,
+        experimental_bearer_token,
         model_thinking_enabled: codex_bool_field(target, &cfg, "model_thinking_enabled"),
         service_tier: codex_string_field(target, &cfg, "service_tier"),
         source,
