@@ -152,7 +152,13 @@ export interface CcSwitchProvider {
   api_key: string;
   provider: string;
   model?: string;
+  model_mapping?: Record<string, string>;
   reasoning_effort?: string;
   context_1m: boolean;
+  wire_api?: string;
+  requires_openai_auth?: boolean;
+  experimental_bearer_token?: string;
+  model_thinking_enabled?: boolean;
+  service_tier?: string;
   is_current: boolean;
 }

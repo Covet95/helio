@@ -7,6 +7,7 @@ edition = "2021"
 tauri-build = { version = "2.1", features = [] }
 
 [dependencies]
+switch-api = { path = "..", features = ["tauri-gui"] }
 tauri = { version = "2.1", features = ["tray-icon"] }
 tauri-plugin-dialog = "2.3"
 tauri-plugin-notification = "2"

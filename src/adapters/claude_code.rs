@@ -65,10 +65,16 @@ impl ConfigAdapter for ClaudeCodeAdapter {
     fn extract_shared_config(&self, config: &serde_json::Value) -> serde_json::Value {
         let mut shared = config.clone();
 
-        // 移除 API 相关字段
+        // 移除 API / 模型映射相关 env（与 merge_config 写入对称）
         if let Some(env) = shared.get_mut("env").and_then(|v| v.as_object_mut()) {
             env.remove("ANTHROPIC_BASE_URL");
             env.remove("ANTHROPIC_AUTH_TOKEN");
+            env.remove("ANTHROPIC_API_KEY");
+            env.remove("ANTHROPIC_MODEL");
+            for role in ["SONNET", "OPUS", "FABLE", "HAIKU"] {
+                env.remove(&format!("ANTHROPIC_DEFAULT_{role}_MODEL"));
+                env.remove(&format!("ANTHROPIC_DEFAULT_{role}_MODEL_NAME"));
+            }
         }
 
         shared
@@ -106,7 +112,7 @@ impl ConfigAdapter for ClaudeCodeAdapter {
             }
 
             // 角色映射（Sonnet/Opus/Fable/Haiku）—— 有则写，无则清（避免旧角色残留覆盖切换后的实际模型）
-            let mm = api_profile.model_mapping.as_ref();
+            let mm = api_profile.claude.model_mapping.as_ref();
             for role in ["sonnet", "opus", "fable", "haiku"] {
                 let model = mm
                     .and_then(|m| m.get(&format!("{role}_model")))
@@ -261,6 +267,8 @@ mod tests {
             "env": {
                 "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
                 "ANTHROPIC_AUTH_TOKEN": "sk-test",
+                "ANTHROPIC_MODEL": "claude-opus-4-8",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "x[1M]",
                 "OTHER_VAR": "value"
             },
             "permissions": {
@@ -273,6 +281,8 @@ mod tests {
         // API 字段应该被移除
         assert!(shared["env"]["ANTHROPIC_BASE_URL"].is_null());
         assert!(shared["env"]["ANTHROPIC_AUTH_TOKEN"].is_null());
+        assert!(shared["env"]["ANTHROPIC_MODEL"].is_null());
+        assert!(shared["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"].is_null());
 
         // 其他字段应该保留
         assert_eq!(shared["env"]["OTHER_VAR"], "value");
@@ -289,7 +299,6 @@ mod tests {
             provider: "anthropic".to_string(),
             api_url: "https://test.api".to_string(),
             api_key: "sk-new-key".to_string(),
-            model_mapping: None,
             ..Default::default()
         };
 

@@ -1,5 +1,5 @@
 use super::ConfigAdapter;
-use crate::models::ApiProfile;
+use crate::models::{ApiProfile, CodexProfileFields};
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
@@ -200,7 +200,7 @@ impl ConfigAdapter for CodexAdapter {
                     serde_json::Value::String(api_profile.api_url.clone()),
                 );
                 // requires_openai_auth：profile 显式指定则覆盖，否则保持已有值 / 新 provider 补 true。
-                match api_profile.requires_openai_auth {
+                match api_profile.codex.requires_openai_auth {
                     Some(flag) => {
                         p.insert(
                             "requires_openai_auth".to_string(),
@@ -216,7 +216,7 @@ impl ConfigAdapter for CodexAdapter {
                 // 鉴权失败时需要额外的 Bearer Token。profile 显式指定则写入/覆盖，
                 // 未指定则移除（不残留旧 token）。
                 match api_profile
-                    .experimental_bearer_token
+                    .codex.experimental_bearer_token
                     .as_deref()
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
@@ -233,7 +233,7 @@ impl ConfigAdapter for CodexAdapter {
                 }
                 // wire_api：profile 显式指定则覆盖（responses/chat），否则新 provider 补 responses 默认。
                 match api_profile
-                    .wire_api
+                    .codex.wire_api
                     .as_deref()
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
@@ -280,7 +280,7 @@ impl ConfigAdapter for CodexAdapter {
             }
 
             match api_profile
-                .reasoning_effort
+                .codex.reasoning_effort
                 .as_deref()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
@@ -302,13 +302,20 @@ impl ConfigAdapter for CodexAdapter {
                         "model_context_window".to_string(),
                         serde_json::Value::Number(1_000_000.into()),
                     );
+                    obj.insert(
+                        "model_auto_compact_token_limit".to_string(),
+                        serde_json::Value::Number(900_000.into()),
+                    );
                 }
                 Some(false) | None => {
                     obj.remove("model_context_window");
+                    obj.remove("model_auto_compact_token_limit");
                 }
             }
 
-            match api_profile.model_thinking_enabled {
+            obj.remove("model_effort_level");
+
+            match api_profile.codex.model_thinking_enabled {
                 Some(enabled) => {
                     obj.insert(
                         "model_thinking_enabled".to_string(),
@@ -321,7 +328,7 @@ impl ConfigAdapter for CodexAdapter {
             }
 
             match api_profile
-                .service_tier
+                .codex.service_tier
                 .as_deref()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
@@ -454,7 +461,6 @@ mod tests {
             provider: "openai".to_string(),
             api_url: "https://api.example.com/v1".to_string(),
             api_key: "sk-test-key".to_string(),
-            model_mapping: None,
             ..Default::default()
         }
     }
@@ -573,8 +579,11 @@ command = "npx"
         let adapter = CodexAdapter::new();
         let profile = ApiProfile {
             model: Some("gpt-5.5".to_string()),
-            reasoning_effort: Some("xhigh".to_string()),
             context_1m: Some(true),
+            codex: CodexProfileFields {
+                reasoning_effort: Some("xhigh".to_string()),
+                ..Default::default()
+            },
             ..sample_profile()
         };
 
@@ -595,7 +604,6 @@ command = "npx"
         });
         let profile = ApiProfile {
             model: None,
-            reasoning_effort: None,
             context_1m: Some(false),
             ..sample_profile()
         };
@@ -623,8 +631,11 @@ command = "npx"
         });
         let profile = ApiProfile {
             provider: "myproxy".to_string(),
-            wire_api: Some("chat".to_string()),
-            requires_openai_auth: Some(false),
+            codex: CodexProfileFields {
+                wire_api: Some("chat".to_string()),
+                requires_openai_auth: Some(false),
+                ..Default::default()
+            },
             ..sample_profile()
         };
 
@@ -642,7 +653,10 @@ command = "npx"
         let adapter = CodexAdapter::new();
         let profile = ApiProfile {
             provider: "myproxy".to_string(),
-            experimental_bearer_token: Some("sk-bearer-xyz".to_string()),
+            codex: CodexProfileFields {
+                experimental_bearer_token: Some("sk-bearer-xyz".to_string()),
+                ..Default::default()
+            },
             ..sample_profile()
         };
 
@@ -655,7 +669,6 @@ command = "npx"
         // 再次 merge，profile 未指定 token → 已有的旧 token 应被清除，不残留
         let profile_no_token = ApiProfile {
             provider: "myproxy".to_string(),
-            experimental_bearer_token: None,
             ..sample_profile()
         };
         let merged2 = adapter.merge_config(&profile_no_token, &merged);
@@ -668,8 +681,11 @@ command = "npx"
     fn test_merge_applies_top_level_codex_params() {
         let adapter = CodexAdapter::new();
         let profile = ApiProfile {
-            model_thinking_enabled: Some(true),
-            service_tier: Some("fast".to_string()),
+            codex: CodexProfileFields {
+                model_thinking_enabled: Some(true),
+                service_tier: Some("fast".to_string()),
+                ..Default::default()
+            },
             ..sample_profile()
         };
 
@@ -687,8 +703,6 @@ command = "npx"
             "service_tier": "fast",
         });
         let profile = ApiProfile {
-            model_thinking_enabled: None,
-            service_tier: None,
             ..sample_profile()
         };
 

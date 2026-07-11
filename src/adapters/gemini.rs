@@ -227,7 +227,6 @@ mod tests {
             provider: "google".to_string(),
             api_url: "https://proxy.com".to_string(),
             api_key: "key123".to_string(),
-            model_mapping: None,
             ..Default::default()
         };
         let shared = serde_json::json!({

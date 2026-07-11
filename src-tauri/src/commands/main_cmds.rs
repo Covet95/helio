@@ -1,6 +1,6 @@
 // Tauri commands
-use crate::db::Database;
-use crate::models::{ApiProfile, TargetApp};
+use switch_api::db::Database;
+use switch_api::models::{ApiProfile, TargetApp, ClaudeProfileFields, CodexProfileFields, OpenCodeProfileFields};
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "macos")]
 use std::io::Write;
@@ -8,6 +8,11 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use tauri::State;
+
+use crate::commands::helpers::{
+    claude_extract_models, codex_bool_field, codex_context_1m, codex_string_field,
+    default_provider, str_field,
+};
 
 pub struct AppState {
     pub db: Mutex<Database>,
@@ -161,7 +166,7 @@ pub async fn scan_local_mcp_servers(
     let target = TargetApp::from_str(&target_app)
         .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
 
-    use crate::adapters::get_adapter;
+    use switch_api::adapters::get_adapter;
     let adapter = get_adapter(target);
     // MCP 来源因工具而异（Claude 在 ~/.claude.json），交给适配器决定
     let mcp_servers = adapter
@@ -216,7 +221,7 @@ pub async fn get_local_config_info(target_app: String) -> Result<LocalConfigInfo
     let target = TargetApp::from_str(&target_app)
         .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
 
-    use crate::adapters::get_adapter;
+    use switch_api::adapters::get_adapter;
     let adapter = get_adapter(target);
 
     let mut info = LocalConfigInfo {
@@ -358,8 +363,10 @@ pub async fn switch_profile(
 
     apply_profile_config(&db, target, &api_profile)?;
 
-    // 更新活动记录
-    db.set_active_profile(target, api_profile.id.unwrap())
+    let profile_id = api_profile
+        .id
+        .ok_or_else(|| format!("Profile '{}' has no id", profile_name))?;
+    db.set_active_profile(target, profile_id)
         .map_err(|e| e.to_string())?;
 
     Ok(())
@@ -370,7 +377,7 @@ pub(crate) fn apply_profile_config(
     target: TargetApp,
     api_profile: &ApiProfile,
 ) -> Result<(), String> {
-    use crate::adapters::get_adapter;
+    use switch_api::adapters::get_adapter;
 
     let adapter = get_adapter(target);
     let current_config = adapter.read_config().unwrap_or_else(|_| serde_json::json!({}));
@@ -437,7 +444,7 @@ pub async fn get_shared_config(
     }
 
     // 回退：从实时配置文件提取共享配置（让用户能看到当前工具的真实配置）
-    use crate::adapters::get_adapter;
+    use switch_api::adapters::get_adapter;
     let adapter = get_adapter(target);
     if adapter.config_path().exists() {
         match adapter.read_config() {
@@ -471,7 +478,7 @@ pub async fn save_shared_config(
 /// 文件不存在时返回空字符串。仅 Codex 提供此能力。
 #[tauri::command]
 pub async fn read_codex_config_raw() -> Result<String, String> {
-    use crate::adapters::get_adapter;
+    use switch_api::adapters::get_adapter;
     let path = get_adapter(TargetApp::Codex).config_path();
     if !path.exists() {
         return Ok(String::new());
@@ -486,7 +493,7 @@ pub async fn save_codex_config_raw(
     content: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    use crate::adapters::get_adapter;
+    use switch_api::adapters::get_adapter;
     let adapter = get_adapter(TargetApp::Codex);
     let path = adapter.config_path();
 
@@ -570,7 +577,7 @@ pub async fn update_codex_fields(
     fields: serde_json::Value,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    use crate::adapters::get_adapter;
+    use switch_api::adapters::get_adapter;
     let adapter = get_adapter(TargetApp::Codex);
     let path = adapter.config_path();
 
@@ -630,7 +637,7 @@ pub struct ScannedApi {
 /// 读取某工具当前配置文件，提取其中的 API URL / Key（不写库，仅返回供预览）
 #[tauri::command]
 pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
-    use crate::adapters::get_adapter;
+    use switch_api::adapters::get_adapter;
     let target = TargetApp::from_str(&target_app)
         .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
     let adapter = get_adapter(target);
@@ -797,7 +804,7 @@ pub async fn import_shared_config(
     target_app: String,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
-    use crate::adapters::get_adapter;
+    use switch_api::adapters::get_adapter;
     let target = TargetApp::from_str(&target_app)
         .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
     let adapter = get_adapter(target);
@@ -808,109 +815,6 @@ pub async fn import_shared_config(
     db.save_shared_config(target, shared.clone())
         .map_err(|e| e.to_string())?;
     Ok(shared)
-}
-
-fn str_field(v: &serde_json::Value, key: &str) -> String {
-    v.get(key).and_then(|x| x.as_str()).unwrap_or("").to_string()
-}
-
-fn codex_string_field(
-    target: TargetApp,
-    cfg: &serde_json::Value,
-    key: &str,
-) -> Option<String> {
-    if target != TargetApp::Codex {
-        return None;
-    }
-
-    let value = str_field(cfg, key);
-    if value.trim().is_empty() {
-        None
-    } else {
-        Some(value)
-    }
-}
-
-fn codex_context_1m(target: TargetApp, cfg: &serde_json::Value) -> Option<bool> {
-    if target != TargetApp::Codex {
-        return None;
-    }
-
-    cfg.get("model_context_window")
-        .and_then(|w| w.as_i64())
-        .map(|w| w >= 1_000_000)
-}
-
-fn codex_bool_field(target: TargetApp, cfg: &serde_json::Value, key: &str) -> Option<bool> {
-    if target != TargetApp::Codex {
-        return None;
-    }
-    cfg.get(key).and_then(|v| v.as_bool())
-}
-
-/// 从 Claude Code 的 env 对象反向提取默认模型与角色映射，与 `ClaudeCodeAdapter::merge_config`
-/// 的写入格式对称：
-/// - `ANTHROPIC_MODEL` → 默认模型
-/// - `ANTHROPIC_DEFAULT_{ROLE}_MODEL`（可能带 `[1M]` 后缀）→ mapping 的 `{role}_model` / `{role}_one_m`
-/// - `ANTHROPIC_DEFAULT_{ROLE}_MODEL_NAME` → mapping 的 `{role}_name`
-///
-/// 用 `&mut Option` 累加：已有值不覆盖，仅补空（便于多个 env 来源依次补齐）。
-fn claude_extract_models(
-    env: &serde_json::Value,
-    model: &mut Option<String>,
-    mapping: &mut Option<std::collections::HashMap<String, String>>,
-) {
-    if model.is_none() {
-        let m = str_field(env, "ANTHROPIC_MODEL");
-        if !m.trim().is_empty() {
-            *model = Some(m);
-        }
-    }
-
-    let mut found = std::collections::HashMap::new();
-    for role in ["sonnet", "opus", "fable", "haiku"] {
-        let upper = role.to_uppercase();
-        let raw = str_field(env, &format!("ANTHROPIC_DEFAULT_{upper}_MODEL"));
-        if raw.trim().is_empty() {
-            continue;
-        }
-        // [1M] 后缀 = 1M 上下文标记，剥离后才是真实模型 id
-        let (base, one_m) = match raw.strip_suffix("[1M]") {
-            Some(b) => (b.to_string(), true),
-            None => (raw.clone(), false),
-        };
-        found.insert(format!("{role}_model"), base);
-        if one_m {
-            found.insert(format!("{role}_one_m"), "true".to_string());
-        }
-        let name = str_field(env, &format!("ANTHROPIC_DEFAULT_{upper}_MODEL_NAME"));
-        if !name.trim().is_empty() {
-            found.insert(format!("{role}_name"), name);
-        }
-    }
-
-    if found.is_empty() {
-        return;
-    }
-    match mapping {
-        // 已有更高优先级的映射，只补尚未出现的键
-        Some(existing) => {
-            for (k, v) in found {
-                existing.entry(k).or_insert(v);
-            }
-        }
-        None => *mapping = Some(found),
-    }
-}
-
-fn default_provider(target: TargetApp) -> String {
-    match target {
-        TargetApp::ClaudeCode => "anthropic",
-        TargetApp::Codex => "openai",
-        TargetApp::Gemini => "google",
-        TargetApp::OpenCode => "anthropic",
-    }
-    .to_string()
 }
 
 #[tauri::command]
@@ -1002,7 +906,7 @@ pub async fn get_status(state: State<'_, AppState>) -> Result<StatusInfo, String
     // Database info
     let profiles = db.list_profiles().map_err(|e| e.to_string())?;
     let db_path = dirs::home_dir()
-        .unwrap()
+        .ok_or_else(|| "Failed to get home directory".to_string())?
         .join(".switch-api")
         .join("db.sqlite");
     let size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
@@ -1083,7 +987,7 @@ fn read_codex_hooks(path: &std::path::Path) -> serde_json::Value {
         Err(_) => return empty,
     };
     match parsed.get("hooks") {
-        Some(hooks) if hooks.is_object() && !hooks.as_object().unwrap().is_empty() => hooks.clone(),
+        Some(hooks) if hooks.as_object().is_some_and(|o| !o.is_empty()) => hooks.clone(),
         _ => empty,
     }
 }
@@ -1094,165 +998,9 @@ fn default_db_path() -> Result<std::path::PathBuf, String> {
         .map(|home| home.join(".switch-api").join("db.sqlite"))
 }
 
-// ============ 从 cc-switch 导入 ============
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CcSwitchProvider {
-    pub name: String,
-    pub app_type: String,
-    pub api_url: String,
-    pub api_key: String,
-    pub provider: String,
-    pub model: Option<String>,
-    pub reasoning_effort: Option<String>,
-    pub context_1m: bool,
-    pub is_current: bool,
-}
-
-/// 扫描 ~/.cc-switch/cc-switch.db，列出指定工具的 provider（供预览/选择导入）
-#[tauri::command]
-pub async fn scan_cc_switch(target_app: String) -> Result<Vec<CcSwitchProvider>, String> {
-    let home = dirs::home_dir().ok_or("无法获取主目录")?;
-    let db_path = home.join(".cc-switch").join("cc-switch.db");
-    if !db_path.exists() {
-        return Err(format!("未找到 cc-switch 数据库: {}", db_path.display()));
-    }
-
-    let conn = rusqlite::Connection::open(&db_path)
-        .map_err(|e| format!("打开 cc-switch 数据库失败: {}", e))?;
-
-    let mut stmt = conn
-        .prepare("SELECT name, settings_config, is_current FROM providers WHERE app_type = ?1 ORDER BY sort_index")
-        .map_err(|e| e.to_string())?;
-
-    let rows = stmt
-        .query_map([&target_app], |row| {
-            let name: String = row.get(0)?;
-            let settings: String = row.get(1)?;
-            let is_current: i64 = row.get(2).unwrap_or(0);
-            Ok((name, settings, is_current != 0))
-        })
-        .map_err(|e| e.to_string())?;
-
-    let mut out = Vec::new();
-    for r in rows {
-        let (name, settings, is_current) = r.map_err(|e| e.to_string())?;
-        let parsed = parse_cc_provider(&target_app, &settings);
-        out.push(CcSwitchProvider {
-            name,
-            app_type: target_app.clone(),
-            api_url: parsed.0,
-            api_key: parsed.1,
-            provider: parsed.2,
-            model: parsed.3,
-            reasoning_effort: parsed.4,
-            context_1m: parsed.5,
-            is_current,
-        });
-    }
-    Ok(out)
-}
-
-/// 将选中的 cc-switch provider 导入为我们的 ApiProfile
-#[tauri::command]
-pub async fn import_cc_switch(
-    target_app: String,
-    providers: Vec<CcSwitchProvider>,
-    state: State<'_, AppState>,
-) -> Result<usize, String> {
-    let target = TargetApp::from_str(&target_app)
-        .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    let mut count = 0;
-    for p in providers {
-        // 名称冲突则加后缀
-        let mut name = p.name.clone();
-        if db.profile_name_exists(&name, target, None).unwrap_or(false) {
-            name = format!("{}-{}", p.name, target.as_str());
-        }
-        let profile = ApiProfile {
-            name,
-            provider: p.provider,
-            api_url: p.api_url,
-            api_key: p.api_key,
-            model: p.model,
-            reasoning_effort: p.reasoning_effort,
-            context_1m: Some(p.context_1m),
-            target_app: Some(target),
-            ..Default::default()
-        };
-        if db.add_profile(&profile).is_ok() {
-            count += 1;
-        }
-    }
-    Ok(count)
-}
-
-/// 解析 cc-switch 的 settings_config，返回 (url, key, provider, model, reasoning, context_1m)
-fn parse_cc_provider(
-    app_type: &str,
-    settings: &str,
-) -> (String, String, String, Option<String>, Option<String>, bool) {
-    let v: serde_json::Value = serde_json::from_str(settings).unwrap_or(serde_json::json!({}));
-
-    match app_type {
-        "codex" => {
-            let key = v
-                .get("auth")
-                .and_then(|a| a.get("OPENAI_API_KEY"))
-                .and_then(|k| k.as_str())
-                .unwrap_or("")
-                .to_string();
-            let config_str = v.get("config").and_then(|c| c.as_str()).unwrap_or("");
-            // 解析 TOML
-            let toml_v: toml::Value = toml::from_str(config_str).unwrap_or(toml::Value::Table(Default::default()));
-            let cfg: serde_json::Value = serde_json::to_value(&toml_v).unwrap_or(serde_json::json!({}));
-
-            let url = cfg
-                .get("model_providers")
-                .and_then(|p| p.get("custom"))
-                .and_then(|c| c.get("base_url"))
-                .and_then(|u| u.as_str())
-                .unwrap_or("")
-                .to_string();
-            let model = cfg.get("model").and_then(|m| m.as_str()).map(String::from);
-            let reasoning = cfg
-                .get("model_reasoning_effort")
-                .and_then(|r| r.as_str())
-                .map(String::from);
-            let ctx_1m = cfg
-                .get("model_context_window")
-                .and_then(|w| w.as_i64())
-                .map(|w| w >= 1_000_000)
-                .unwrap_or(false);
-            (url, key, "openai".to_string(), model, reasoning, ctx_1m)
-        }
-        "claude" | "claude-code" => {
-            let env = v.get("settingsConfig").and_then(|s| s.get("env")).or_else(|| v.get("env"));
-            let url = env
-                .and_then(|e| e.get("ANTHROPIC_BASE_URL"))
-                .and_then(|u| u.as_str())
-                .unwrap_or("")
-                .to_string();
-            let key = env
-                .and_then(|e| e.get("ANTHROPIC_AUTH_TOKEN").or_else(|| e.get("ANTHROPIC_API_KEY")))
-                .and_then(|k| k.as_str())
-                .unwrap_or("")
-                .to_string();
-            let model = env
-                .and_then(|e| e.get("ANTHROPIC_MODEL"))
-                .and_then(|m| m.as_str())
-                .filter(|s| !s.trim().is_empty())
-                .map(String::from);
-            (url, key, "anthropic".to_string(), model, None, false)
-        }
-        _ => (String::new(), String::new(), "custom".to_string(), None, None, false),
-    }
-}
-
 #[cfg(test)]
 mod claude_extract_tests {
-    use super::claude_extract_models;
+    use crate::commands::helpers::claude_extract_models;
     use serde_json::json;
 
     #[test]
@@ -1338,8 +1086,8 @@ mod claude_extract_tests {
     #[test]
     fn test_round_trip_with_merge_config() {
         // 关键回归：merge_config 写出的 env 必须能被 claude_extract_models 完整读回
-        use crate::adapters::{claude_code::ClaudeCodeAdapter, ConfigAdapter};
-        use crate::models::ApiProfile;
+        use switch_api::adapters::{claude_code::ClaudeCodeAdapter, ConfigAdapter};
+        use switch_api::models::ApiProfile;
         use std::collections::HashMap;
 
         let mut mm = HashMap::new();
@@ -1354,7 +1102,9 @@ mod claude_extract_tests {
             api_url: "https://x".to_string(),
             api_key: "sk-x".to_string(),
             model: Some("claude-sonnet-4".to_string()),
-            model_mapping: Some(mm),
+            claude: switch_api::models::ClaudeProfileFields {
+                model_mapping: Some(mm),
+            },
             ..Default::default()
         };
 

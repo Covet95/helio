@@ -1,6 +1,37 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Claude Code 专用字段（JSON flatten → IPC 仍为顶层键）
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ClaudeProfileFields {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_mapping: Option<HashMap<String, String>>,
+}
+
+/// Codex 专用字段（JSON flatten → IPC 仍为顶层键）
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CodexProfileFields {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire_api: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_openai_auth: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experimental_bearer_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_thinking_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
+}
+
+/// OpenCode 专用字段（JSON flatten → IPC 仍为顶层键）
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OpenCodeProfileFields {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<Vec<String>>,
+}
+
 /// API Profile - 只存储 API 相关信息
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApiProfile {
@@ -9,54 +40,32 @@ pub struct ApiProfile {
     pub provider: String,
     pub api_url: String,
     pub api_key: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model_mapping: Option<HashMap<String, String>>,
-    /// 默认模型（如 gpt-5.5 / claude-opus-4）
+    /// 默认模型（跨工具）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// OpenCode 专用：provider 下挂载的模型 id 列表（多选）。
-    /// 写入 opencode.json 的 provider.<id>.models，让 OpenCode 能列出/切换这些模型。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub models: Option<Vec<String>>,
-    /// 推理强度（Codex: low/medium/high/xhigh）
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<String>,
     /// 是否启用 1M 上下文窗口
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_1m: Option<bool>,
-    /// Codex 专用：provider 的 wire 协议（"responses" / "chat"）。
-    /// 写入 model_providers.<id>.wire_api。None = 沿用默认（新 provider 用 responses）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wire_api: Option<String>,
-    /// Codex 专用：provider 是否要求 OpenAI 鉴权（model_providers.<id>.requires_openai_auth）。
-    /// None = 沿用默认（true）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub requires_openai_auth: Option<bool>,
-    /// Codex 专用：provider 的实验性 Bearer Token（model_providers.<id>.experimental_bearer_token）。
-    /// 用于要求 OpenAI 鉴权失败时的第三方中转站鉴权，None = 不写入该字段。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub experimental_bearer_token: Option<String>,
-    /// Codex 专用：顶层 model_thinking_enabled 开关。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_thinking_enabled: Option<bool>,
-    /// Codex 专用：顶层 service_tier（如 "fast"）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub service_tier: Option<String>,
-    /// 归属工具（per-tool profile；None = 通用，所有工具下都显示）
+    /// 归属工具
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_app: Option<TargetApp>,
     pub created_at: Option<i64>,
     pub updated_at: Option<i64>,
+
+    #[serde(flatten)]
+    pub claude: ClaudeProfileFields,
+    #[serde(flatten)]
+    pub codex: CodexProfileFields,
+    #[serde(flatten)]
+    pub opencode: OpenCodeProfileFields,
 }
 
-/// 目标应用类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TargetApp {
     ClaudeCode,
     Codex,
     Gemini,
-    // kebab 规则会得到 "open-code"，但全局(as_str/from_str/前端/DB)统一用 "opencode"
     #[serde(rename = "opencode")]
     OpenCode,
 }
@@ -98,7 +107,6 @@ impl std::fmt::Display for TargetApp {
     }
 }
 
-/// 共享配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SharedConfig {
     pub target_app: TargetApp,
@@ -106,7 +114,6 @@ pub struct SharedConfig {
     pub updated_at: Option<i64>,
 }
 
-/// 当前活动的 Profile
 #[derive(Debug, Clone)]
 pub struct ActiveProfile {
     pub profile_id: i64,
@@ -127,19 +134,14 @@ impl ApiProfile {
             provider,
             api_url,
             api_key,
-            model_mapping,
             model: None,
-            models: None,
-            reasoning_effort: None,
             context_1m: None,
-            wire_api: None,
-            requires_openai_auth: None,
-            experimental_bearer_token: None,
-            model_thinking_enabled: None,
-            service_tier: None,
             target_app: None,
             created_at: None,
             updated_at: None,
+            claude: ClaudeProfileFields { model_mapping },
+            codex: CodexProfileFields::default(),
+            opencode: OpenCodeProfileFields::default(),
         }
     }
 
@@ -165,8 +167,7 @@ mod tests {
             TargetApp::Gemini,
             TargetApp::OpenCode,
         ] {
-            let s = app.as_str();
-            assert_eq!(TargetApp::from_str(s), Some(app));
+            assert_eq!(TargetApp::from_str(app.as_str()), Some(app));
         }
         assert_eq!(TargetApp::from_str("unknown"), None);
     }
@@ -179,7 +180,6 @@ mod tests {
 
     #[test]
     fn test_serde_matches_as_str() {
-        // serde 序列化必须与 as_str 一致（前端/DB/IPC 全用同一套字符串）
         for app in [
             TargetApp::ClaudeCode,
             TargetApp::Codex,
@@ -187,22 +187,59 @@ mod tests {
             TargetApp::OpenCode,
         ] {
             let json = serde_json::to_string(&app).unwrap();
-            assert_eq!(
-                json,
-                format!("\"{}\"", app.as_str()),
-                "{app:?} 的 serde 输出应等于 as_str"
-            );
-            // 反序列化：前端传的字符串（= as_str）必须能解析回来
+            assert_eq!(json, format!("\"{}\"", app.as_str()));
             let back: TargetApp =
                 serde_json::from_str(&format!("\"{}\"", app.as_str())).unwrap();
             assert_eq!(back, app);
         }
-        // 关键回归：OpenCode 必须是 "opencode"（不是 kebab 的 "open-code"）
         assert_eq!(
             serde_json::to_string(&TargetApp::OpenCode).unwrap(),
             "\"opencode\""
         );
-        serde_json::from_str::<TargetApp>("\"opencode\"").unwrap();
+    }
+
+    #[test]
+    fn test_profile_tool_groups_flatten_to_top_level_json() {
+        let mut mm = HashMap::new();
+        mm.insert("sonnet_model".into(), "x".into());
+        let p = ApiProfile {
+            name: "n".into(),
+            provider: "anthropic".into(),
+            api_url: "u".into(),
+            api_key: "k".into(),
+            model: Some("m".into()),
+            claude: ClaudeProfileFields {
+                model_mapping: Some(mm),
+            },
+            codex: CodexProfileFields {
+                reasoning_effort: Some("xhigh".into()),
+                wire_api: Some("responses".into()),
+                experimental_bearer_token: Some("sk-b".into()),
+                ..Default::default()
+            },
+            opencode: OpenCodeProfileFields {
+                models: Some(vec!["a".into()]),
+            },
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert!(v.get("claude").is_none());
+        assert!(v.get("codex").is_none());
+        assert_eq!(v["model_mapping"]["sonnet_model"], "x");
+        assert_eq!(v["reasoning_effort"], "xhigh");
+        assert_eq!(v["models"][0], "a");
+        let back: ApiProfile = serde_json::from_value(v).unwrap();
+        assert_eq!(
+            back.claude
+                .model_mapping
+                .as_ref()
+                .unwrap()
+                .get("sonnet_model")
+                .map(String::as_str),
+            Some("x")
+        );
+        assert_eq!(back.codex.reasoning_effort.as_deref(), Some("xhigh"));
+        assert_eq!(back.opencode.models.as_ref().unwrap()[0], "a");
     }
 
     #[cfg(not(feature = "tauri-gui"))]

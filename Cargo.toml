@@ -9,6 +9,10 @@ authors = ["Switch API Team"]
 description = "智能 AI CLI 工具 API 配置切换器"
 license = "MIT"
 
+[lib]
+name = "switch_api"
+path = "src/lib.rs"
+
 [[bin]]
 name = "switch-api"
 path = "src/main.rs"

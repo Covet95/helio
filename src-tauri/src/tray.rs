@@ -1,7 +1,7 @@
 //! macOS 状态栏(tray)：动态菜单 + 一键切换 profile。
-use crate::models::TargetApp;
+use switch_api::models::TargetApp;
 use crate::commands::AppState;
-use crate::models::ApiProfile;
+use switch_api::models::ApiProfile;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{TrayIconBuilder, TrayIconEvent, MouseButton, MouseButtonState};
 use tauri::{AppHandle, Manager};

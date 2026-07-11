@@ -1,5 +1,5 @@
 use super::ConfigAdapter;
-use crate::models::ApiProfile;
+use crate::models::{ApiProfile, OpenCodeProfileFields};
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
@@ -243,7 +243,7 @@ impl ConfigAdapter for OpenCodeAdapter {
                 // 模型列表：把 profile.models（多选）里的每个模型写进 provider 的
                 // models 声明，加上默认模型 model（OpenCode 要列出/切换这些模型）。
                 let mut model_ids: Vec<String> = Vec::new();
-                if let Some(list) = api_profile.models.as_ref() {
+                if let Some(list) = api_profile.opencode.models.as_ref() {
                     for m in list {
                         let m = m.trim();
                         if !m.is_empty() {
@@ -286,7 +286,7 @@ impl ConfigAdapter for OpenCodeAdapter {
             .filter(|m| !m.is_empty())
             .map(|m| m.to_string())
             .or_else(|| {
-                api_profile.models.as_ref().and_then(|list| {
+                api_profile.opencode.models.as_ref().and_then(|list| {
                     list.iter()
                         .map(|m| m.trim())
                         .find(|m| !m.is_empty())
@@ -392,7 +392,6 @@ mod tests {
             provider: "anthropic".to_string(),
             api_url: "https://api.example.com/v1".to_string(),
             api_key: "sk-test-key".to_string(),
-            model_mapping: None,
             ..Default::default()
         }
     }
@@ -486,7 +485,9 @@ mod tests {
         // 无 model 但有 models：顶层用 provider/models[0]
         let adapter = OpenCodeAdapter::new();
         let profile = ApiProfile {
-            models: Some(vec!["claude-sonnet-4-6".to_string(), "claude-haiku-4-5".to_string()]),
+            opencode: OpenCodeProfileFields {
+                models: Some(vec!["claude-sonnet-4-6".to_string(), "claude-haiku-4-5".to_string()]),
+            },
             ..sample_profile()
         };
         let merged = adapter.merge_config(&profile, &serde_json::json!({}));
@@ -526,10 +527,12 @@ mod tests {
         let adapter = OpenCodeAdapter::new();
         let profile = ApiProfile {
             model: Some("claude-opus-4-8".to_string()),
-            models: Some(vec![
-                "claude-sonnet-4-6".to_string(),
-                "claude-haiku-4-5".to_string(),
-            ]),
+            opencode: OpenCodeProfileFields {
+                models: Some(vec![
+                    "claude-sonnet-4-6".to_string(),
+                    "claude-haiku-4-5".to_string(),
+                ]),
+            },
             ..sample_profile()
         };
         let merged = adapter.merge_config(&profile, &serde_json::json!({}));

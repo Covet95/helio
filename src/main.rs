@@ -1,14 +1,10 @@
-mod adapters;
 mod cli;
-mod db;
-mod models;
-mod utils;
 
 use anyhow::Result;
 use clap::Parser;
+use switch_api::utils;
 
 fn main() -> Result<()> {
-    // 初始化日志
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -16,10 +12,8 @@ fn main() -> Result<()> {
         )
         .init();
 
-    // 解析命令行参数
     let cli = cli::Cli::parse();
 
-    // 执行命令
     if let Err(e) = cli::execute(cli) {
         utils::error(&format!("{}", e));
         std::process::exit(1);

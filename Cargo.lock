@@ -4010,6 +4010,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "switch-api",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

@@ -1,4 +1,4 @@
-use crate::models::{ActiveProfile, ApiProfile, SharedConfig, TargetApp};
+use crate::models::{ActiveProfile, ApiProfile, ClaudeProfileFields, CodexProfileFields, OpenCodeProfileFields, SharedConfig, TargetApp};
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
@@ -34,9 +34,9 @@ impl Database {
                 models TEXT,
                 wire_api TEXT,
                 requires_openai_auth INTEGER,
-                model_effort_level TEXT,
                 model_thinking_enabled INTEGER,
                 service_tier TEXT,
+                experimental_bearer_token TEXT,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
                 UNIQUE(name, target_app)
@@ -60,24 +60,67 @@ impl Database {
             "#,
         )?;
 
-        // 迁移：为已有数据库补充字段（幂等，忽略已存在错误）
-        let _ = self.conn.execute("ALTER TABLE api_profiles ADD COLUMN model TEXT", []);
-        let _ = self.conn.execute("ALTER TABLE api_profiles ADD COLUMN reasoning_effort TEXT", []);
-        let _ = self.conn.execute("ALTER TABLE api_profiles ADD COLUMN context_1m INTEGER", []);
-        let _ = self.conn.execute("ALTER TABLE api_profiles ADD COLUMN target_app TEXT", []);
-        let _ = self.conn.execute("ALTER TABLE api_profiles ADD COLUMN models TEXT", []);
+        self.try_add_column("ALTER TABLE api_profiles ADD COLUMN model TEXT")?;
+        self.try_add_column("ALTER TABLE api_profiles ADD COLUMN reasoning_effort TEXT")?;
+        self.try_add_column("ALTER TABLE api_profiles ADD COLUMN context_1m INTEGER")?;
+        self.try_add_column("ALTER TABLE api_profiles ADD COLUMN target_app TEXT")?;
+        self.try_add_column("ALTER TABLE api_profiles ADD COLUMN models TEXT")?;
 
         self.migrate_composite_unique()?;
 
-        // 新增的 Codex per-profile 字段:必须在 migrate_composite_unique 之后补,
-        // 因为重建表的列清单不含这些列,放在迁移前会被重建流程丢弃。
-        let _ = self.conn.execute("ALTER TABLE api_profiles ADD COLUMN wire_api TEXT", []);
-        let _ = self.conn.execute("ALTER TABLE api_profiles ADD COLUMN requires_openai_auth INTEGER", []);
-        let _ = self.conn.execute("ALTER TABLE api_profiles ADD COLUMN model_effort_level TEXT", []);
-        let _ = self.conn.execute("ALTER TABLE api_profiles ADD COLUMN model_thinking_enabled INTEGER", []);
-        let _ = self.conn.execute("ALTER TABLE api_profiles ADD COLUMN service_tier TEXT", []);
-        let _ = self.conn.execute("ALTER TABLE api_profiles ADD COLUMN experimental_bearer_token TEXT", []);
+        self.try_add_column("ALTER TABLE api_profiles ADD COLUMN wire_api TEXT")?;
+        self.try_add_column("ALTER TABLE api_profiles ADD COLUMN requires_openai_auth INTEGER")?;
+        self.try_add_column("ALTER TABLE api_profiles ADD COLUMN model_thinking_enabled INTEGER")?;
+        self.try_add_column("ALTER TABLE api_profiles ADD COLUMN service_tier TEXT")?;
+        self.try_add_column("ALTER TABLE api_profiles ADD COLUMN experimental_bearer_token TEXT")?;
+        self.migrate_drop_model_effort_level()?;
 
+        Ok(())
+    }
+
+    fn try_add_column(&self, ddl: &str) -> Result<()> {
+        match self.conn.execute(ddl, []) {
+            Ok(_) => Ok(()),
+            Err(e) if e.to_string().contains("duplicate column name") => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn migrate_drop_model_effort_level(&self) -> Result<()> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(api_profiles)")?;
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if !cols.iter().any(|c| c == "model_effort_level") {
+            return Ok(());
+        }
+        self.conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
+        self.conn.execute_batch(r#"
+            BEGIN;
+            CREATE TABLE api_profiles_no_effort (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL, provider TEXT NOT NULL, api_url TEXT NOT NULL, api_key TEXT NOT NULL,
+                model_mapping TEXT, model TEXT, reasoning_effort TEXT, context_1m INTEGER,
+                target_app TEXT, models TEXT, wire_api TEXT, requires_openai_auth INTEGER,
+                model_thinking_enabled INTEGER, service_tier TEXT, experimental_bearer_token TEXT,
+                created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+                UNIQUE(name, target_app)
+            );
+            INSERT INTO api_profiles_no_effort (
+                id, name, provider, api_url, api_key, model_mapping, model, reasoning_effort,
+                context_1m, target_app, models, wire_api, requires_openai_auth,
+                model_thinking_enabled, service_tier, experimental_bearer_token, created_at, updated_at
+            )
+            SELECT id, name, provider, api_url, api_key, model_mapping, model, reasoning_effort,
+                context_1m, target_app, models, wire_api, requires_openai_auth,
+                model_thinking_enabled, service_tier, experimental_bearer_token, created_at, updated_at
+            FROM api_profiles;
+            DROP TABLE api_profiles;
+            ALTER TABLE api_profiles_no_effort RENAME TO api_profiles;
+            CREATE INDEX IF NOT EXISTS idx_profiles_name ON api_profiles(name);
+            COMMIT;
+        "#)?;
+        self.conn.execute_batch("PRAGMA foreign_keys=ON;")?;
         Ok(())
     }
 
@@ -170,12 +213,12 @@ impl Database {
     pub fn add_profile(&self, profile: &ApiProfile) -> Result<i64> {
         let now = chrono::Utc::now().timestamp();
         let model_mapping_json = profile
-            .model_mapping
+            .claude.model_mapping
             .as_ref()
             .map(serde_json::to_string)
             .transpose()?;
         let models_json = profile
-            .models
+            .opencode.models
             .as_ref()
             .map(serde_json::to_string)
             .transpose()?;
@@ -190,15 +233,15 @@ impl Database {
                 &profile.api_key,
                 model_mapping_json,
                 &profile.model,
-                &profile.reasoning_effort,
+                &profile.codex.reasoning_effort,
                 profile.context_1m.map(|b| b as i64),
                 profile.target_app.as_ref().map(|t| t.as_str()),
                 models_json,
-                &profile.wire_api,
-                profile.requires_openai_auth.map(|b| b as i64),
-                profile.model_thinking_enabled.map(|b| b as i64),
-                &profile.service_tier,
-                &profile.experimental_bearer_token,
+                &profile.codex.wire_api,
+                profile.codex.requires_openai_auth.map(|b| b as i64),
+                profile.codex.model_thinking_enabled.map(|b| b as i64),
+                &profile.codex.service_tier,
+                &profile.codex.experimental_bearer_token,
                 now,
                 now
             ],
@@ -208,53 +251,62 @@ impl Database {
     }
 
     /// 把一行 (13 列固定顺序) 映射为 ApiProfile，供各 SELECT 复用。
+    const PROFILE_SELECT: &'static str = concat!(
+        "id, name, provider, api_url, api_key, model_mapping, model, ",
+        "reasoning_effort, context_1m, created_at, updated_at, target_app, models, ",
+        "wire_api, requires_openai_auth, model_thinking_enabled, service_tier, ",
+        "experimental_bearer_token"
+    );
+
     fn row_to_profile(row: &rusqlite::Row) -> rusqlite::Result<ApiProfile> {
-        let model_mapping_str: Option<String> = row.get(5)?;
+        let model_mapping_str: Option<String> = row.get("model_mapping")?;
         let model_mapping = model_mapping_str
             .as_deref()
             .map(serde_json::from_str)
             .transpose()
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-        let context_1m: Option<i64> = row.get(8)?;
-        let target_app_str: Option<String> = row.get(11)?;
+        let context_1m: Option<i64> = row.get("context_1m")?;
+        let target_app_str: Option<String> = row.get("target_app")?;
         let target_app = target_app_str.as_deref().and_then(TargetApp::from_str);
-        let models_str: Option<String> = row.get(12)?;
+        let models_str: Option<String> = row.get("models")?;
         let models = models_str
             .as_deref()
             .map(serde_json::from_str)
             .transpose()
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-        let requires_openai_auth: Option<i64> = row.get(14)?;
-        let model_thinking_enabled: Option<i64> = row.get(15)?;
+        let requires_openai_auth: Option<i64> = row.get("requires_openai_auth")?;
+        let model_thinking_enabled: Option<i64> = row.get("model_thinking_enabled")?;
 
         Ok(ApiProfile {
-            id: Some(row.get(0)?),
-            name: row.get(1)?,
-            provider: row.get(2)?,
-            api_url: row.get(3)?,
-            api_key: row.get(4)?,
-            model_mapping,
-            model: row.get(6)?,
-            models,
-            reasoning_effort: row.get(7)?,
+            id: Some(row.get("id")?),
+            name: row.get("name")?,
+            provider: row.get("provider")?,
+            api_url: row.get("api_url")?,
+            api_key: row.get("api_key")?,
+            model: row.get("model")?,
             context_1m: context_1m.map(|v| v != 0),
-            wire_api: row.get(13)?,
-            requires_openai_auth: requires_openai_auth.map(|v| v != 0),
-            model_thinking_enabled: model_thinking_enabled.map(|v| v != 0),
-            service_tier: row.get(16)?,
-            experimental_bearer_token: row.get(17)?,
-            created_at: Some(row.get(9)?),
-            updated_at: Some(row.get(10)?),
+            created_at: Some(row.get("created_at")?),
+            updated_at: Some(row.get("updated_at")?),
             target_app,
+            claude: ClaudeProfileFields { model_mapping },
+            codex: CodexProfileFields {
+                reasoning_effort: row.get("reasoning_effort")?,
+                wire_api: row.get("wire_api")?,
+                requires_openai_auth: requires_openai_auth.map(|v| v != 0),
+                model_thinking_enabled: model_thinking_enabled.map(|v| v != 0),
+                service_tier: row.get("service_tier")?,
+                experimental_bearer_token: row.get("experimental_bearer_token")?,
+            },
+            opencode: OpenCodeProfileFields { models },
         })
     }
 
     /// 按 (name, target_app) 精确获取 profile。
     pub fn get_profile_by_name_and_target(&self, name: &str, target: TargetApp) -> Result<ApiProfile> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, name, provider, api_url, api_key, model_mapping, model, reasoning_effort, context_1m, created_at, updated_at, target_app, models, wire_api, requires_openai_auth, model_thinking_enabled, service_tier, experimental_bearer_token
-             FROM api_profiles WHERE name = ?1 AND target_app = ?2",
-        )?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} FROM api_profiles WHERE name = ?1 AND target_app = ?2",
+            Self::PROFILE_SELECT
+        ))?;
         let profile = stmt.query_row(params![name, target.as_str()], Self::row_to_profile)?;
         Ok(profile)
     }
@@ -262,7 +314,7 @@ impl Database {
     /// 某工具下是否已存在同名 profile(可排除某 id,用于改名校验)。
     ///
     /// 仅 GUI(tauri-gui)的 import 流程调用;CLI bin 不走此路径,故对 CLI 编译标记 allow。
-    #[allow(dead_code)]
+    #[cfg_attr(not(feature = "tauri-gui"), allow(dead_code))]
     pub fn profile_name_exists(&self, name: &str, target: TargetApp, exclude_id: Option<i64>) -> Result<bool> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM api_profiles WHERE name = ?1 AND target_app = ?2 AND (?3 IS NULL OR id != ?3)",
@@ -274,10 +326,10 @@ impl Database {
 
     /// 列出所有 API Profiles
     pub fn list_profiles(&self) -> Result<Vec<ApiProfile>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, name, provider, api_url, api_key, model_mapping, model, reasoning_effort, context_1m, created_at, updated_at, target_app, models, wire_api, requires_openai_auth, model_thinking_enabled, service_tier, experimental_bearer_token
-             FROM api_profiles ORDER BY name",
-        )?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} FROM api_profiles ORDER BY name",
+            Self::PROFILE_SELECT
+        ))?;
 
         let profiles = stmt
             .query_map([], Self::row_to_profile)?
@@ -293,12 +345,12 @@ impl Database {
     pub fn update_profile(&self, profile: &ApiProfile) -> Result<()> {
         let now = chrono::Utc::now().timestamp();
         let model_mapping_json = profile
-            .model_mapping
+            .claude.model_mapping
             .as_ref()
             .map(serde_json::to_string)
             .transpose()?;
         let models_json = profile
-            .models
+            .opencode.models
             .as_ref()
             .map(serde_json::to_string)
             .transpose()?;
@@ -315,15 +367,15 @@ impl Database {
                         &profile.api_key,
                         model_mapping_json,
                         &profile.model,
-                        &profile.reasoning_effort,
+                        &profile.codex.reasoning_effort,
                         profile.context_1m.map(|b| b as i64),
                         profile.target_app.as_ref().map(|t| t.as_str()),
                         models_json,
-                        &profile.wire_api,
-                        profile.requires_openai_auth.map(|b| b as i64),
-                        profile.model_thinking_enabled.map(|b| b as i64),
-                        &profile.service_tier,
-                        &profile.experimental_bearer_token,
+                        &profile.codex.wire_api,
+                        profile.codex.requires_openai_auth.map(|b| b as i64),
+                        profile.codex.model_thinking_enabled.map(|b| b as i64),
+                        &profile.codex.service_tier,
+                        &profile.codex.experimental_bearer_token,
                         now,
                         id
                     ],
@@ -340,15 +392,15 @@ impl Database {
                         &profile.api_key,
                         model_mapping_json,
                         &profile.model,
-                        &profile.reasoning_effort,
+                        &profile.codex.reasoning_effort,
                         profile.context_1m.map(|b| b as i64),
                         profile.target_app.as_ref().map(|t| t.as_str()),
                         models_json,
-                        &profile.wire_api,
-                        profile.requires_openai_auth.map(|b| b as i64),
-                        profile.model_thinking_enabled.map(|b| b as i64),
-                        &profile.service_tier,
-                        &profile.experimental_bearer_token,
+                        &profile.codex.wire_api,
+                        profile.codex.requires_openai_auth.map(|b| b as i64),
+                        profile.codex.model_thinking_enabled.map(|b| b as i64),
+                        &profile.codex.service_tier,
+                        &profile.codex.experimental_bearer_token,
                         now,
                         &profile.name
                     ],
@@ -447,15 +499,18 @@ impl Database {
         Ok(result)
     }
 
-    /// 获取活动 Profile 的完整信息
-    pub fn get_active_profile_full(&self, target_app: TargetApp) -> Result<Option<ApiProfile>> {
-        let active = self.get_active_profile(target_app)?;
+    pub fn get_profile_by_id(&self, id: i64) -> Result<Option<ApiProfile>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} FROM api_profiles WHERE id = ?1",
+            Self::PROFILE_SELECT
+        ))?;
+        Ok(stmt.query_row(params![id], Self::row_to_profile).optional()?)
+    }
 
-        if let Some(active) = active {
-            let profiles = self.list_profiles()?;
-            Ok(profiles.into_iter().find(|p| p.id == Some(active.profile_id)))
-        } else {
-            Ok(None)
+    pub fn get_active_profile_full(&self, target_app: TargetApp) -> Result<Option<ApiProfile>> {
+        match self.get_active_profile(target_app)? {
+            Some(active) => self.get_profile_by_id(active.profile_id),
+            None => Ok(None),
         }
     }
 
@@ -508,6 +563,71 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+
+    #[test]
+    fn test_fresh_schema_has_no_effort_level() -> Result<()> {
+        let db = Database::open(":memory:")?;
+        let mut stmt = db.conn.prepare("PRAGMA table_info(api_profiles)")?;
+        let cols: Vec<String> = stmt.query_map([], |r| r.get(1))?.collect::<Result<Vec<_>,_>>()?;
+        assert!(cols.contains(&"experimental_bearer_token".into()));
+        assert!(!cols.contains(&"model_effort_level".into()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_nested_codex_fields_roundtrip() -> Result<()> {
+        let db = Database::open(":memory:")?;
+        let id = db.add_profile(&ApiProfile {
+            name: "w".into(), provider: "openai".into(), api_url: "https://x".into(), api_key: "sk".into(),
+            target_app: Some(TargetApp::Codex),
+            codex: CodexProfileFields {
+                reasoning_effort: Some("xhigh".into()),
+                wire_api: Some("responses".into()),
+                experimental_bearer_token: Some("sk-b".into()),
+                model_thinking_enabled: Some(true),
+                ..Default::default()
+            },
+            ..Default::default()
+        })?;
+        let got = db.get_profile_by_id(id)?.unwrap();
+        assert_eq!(got.codex.reasoning_effort.as_deref(), Some("xhigh"));
+        assert_eq!(got.codex.experimental_bearer_token.as_deref(), Some("sk-b"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_legacy_effort_level_column_is_dropped() -> Result<()> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static C: AtomicU64 = AtomicU64::new(0);
+        let n = C.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("helio-drop-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("l.sqlite");
+        {
+            let c = rusqlite::Connection::open(&path)?;
+            c.execute_batch(r#"
+                CREATE TABLE api_profiles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, provider TEXT NOT NULL,
+                    api_url TEXT NOT NULL, api_key TEXT NOT NULL, model_mapping TEXT, model TEXT,
+                    reasoning_effort TEXT, context_1m INTEGER, target_app TEXT, models TEXT,
+                    wire_api TEXT, requires_openai_auth INTEGER, model_effort_level TEXT,
+                    model_thinking_enabled INTEGER, service_tier TEXT, experimental_bearer_token TEXT,
+                    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(name, target_app)
+                );
+                INSERT INTO api_profiles (name,provider,api_url,api_key,target_app,model_effort_level,reasoning_effort,created_at,updated_at)
+                VALUES ('legacy','openai','u','k','codex','high','xhigh',0,0);
+            "#)?;
+        }
+        let db = Database::open(&path)?;
+        let got = db.get_profile_by_name_and_target("legacy", TargetApp::Codex)?;
+        assert_eq!(got.codex.reasoning_effort.as_deref(), Some("xhigh"));
+        let mut stmt = db.conn.prepare("PRAGMA table_info(api_profiles)")?;
+        let cols: Vec<String> = stmt.query_map([], |r| r.get(1))?.collect::<Result<Vec<_>,_>>()?;
+        assert!(!cols.contains(&"model_effort_level".into()));
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
     #[test]
     fn test_database_operations() -> Result<()> {
         let db = Database::open(":memory:")?;
@@ -518,10 +638,12 @@ mod tests {
             provider: "anthropic".to_string(),
             api_url: "https://api.anthropic.com".to_string(),
             api_key: "sk-test-key".to_string(),
-            model_mapping: Some(HashMap::from([(
-                "opus".to_string(),
-                "claude-opus-4".to_string(),
-            )])),
+            claude: ClaudeProfileFields {
+                model_mapping: Some(HashMap::from([(
+                    "opus".to_string(),
+                    "claude-opus-4".to_string(),
+                )])),
+            },
             target_app: Some(TargetApp::ClaudeCode),
             ..Default::default()
         };

@@ -1,7 +1,7 @@
-use crate::adapters::get_adapter;
-use crate::db::Database;
-use crate::models::{ApiProfile, TargetApp};
-use crate::utils;
+use switch_api::adapters::get_adapter;
+use switch_api::db::Database;
+use switch_api::models::{ApiProfile, ClaudeProfileFields, CodexProfileFields, OpenCodeProfileFields, TargetApp};
+use switch_api::utils;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
@@ -305,7 +305,7 @@ fn cmd_profile_add(
 
     let mut profile = ApiProfile::new(name.clone(), provider, url, key, model_mapping_map);
     profile.model = model.filter(|value| !value.trim().is_empty());
-    profile.reasoning_effort = reasoning_effort.filter(|value| !value.trim().is_empty());
+    profile.codex.reasoning_effort = reasoning_effort.filter(|value| !value.trim().is_empty());
     if context_1m {
         profile.context_1m = Some(true);
     }
@@ -338,7 +338,7 @@ fn cmd_profile_list(db: &Database, verbose: bool) -> Result<()> {
             println!("    Key: {}", profile.masked_key());
         }
 
-        if let Some(mapping) = profile.model_mapping {
+        if let Some(mapping) = profile.claude.model_mapping {
             println!("    Models:");
             for (key, value) in mapping {
                 println!("      {} → {}", key, value);
@@ -399,14 +399,14 @@ fn cmd_profile_show(db: &Database, name: String, target_app: Option<String>) -> 
     if let Some(model) = profile.model {
         println!("  Model: {}", model);
     }
-    if let Some(reasoning_effort) = profile.reasoning_effort {
+    if let Some(reasoning_effort) = profile.codex.reasoning_effort {
         println!("  Reasoning Effort: {}", reasoning_effort);
     }
     if let Some(context_1m) = profile.context_1m {
         println!("  1M Context: {}", if context_1m { "enabled" } else { "disabled" });
     }
 
-    if let Some(mapping) = profile.model_mapping {
+    if let Some(mapping) = profile.claude.model_mapping {
         println!("  Model Mapping:");
         for (key, value) in mapping {
             println!("    {} → {}", key, value);
@@ -455,7 +455,7 @@ fn cmd_profile_update(
     }
 
     if let Some(mapping_json) = model_mapping {
-        profile.model_mapping = Some(serde_json::from_str(&mapping_json)?);
+        profile.claude.model_mapping = Some(serde_json::from_str(&mapping_json)?);
         updated = true;
     }
 
@@ -469,7 +469,7 @@ fn cmd_profile_update(
     }
 
     if let Some(new_reasoning_effort) = reasoning_effort {
-        profile.reasoning_effort = if new_reasoning_effort.trim().is_empty() {
+        profile.codex.reasoning_effort = if new_reasoning_effort.trim().is_empty() {
             None
         } else {
             Some(new_reasoning_effort)
