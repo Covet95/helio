@@ -79,7 +79,7 @@ export function activeProfileFor(status: StatusInfo | null, targetApp: TargetApp
 
 export function emptyProfileForTool(tool: TargetApp): ApiProfile {
   const preset = PROVIDER_PRESETS[tool]?.[0];
-  return {
+  const base: ApiProfile = {
     name: '',
     provider: preset?.provider ?? 'anthropic',
     api_url: preset?.api_url ?? '',
@@ -87,4 +87,21 @@ export function emptyProfileForTool(tool: TargetApp): ApiProfile {
     model: preset?.model,
     target_app: tool,
   };
+  if (tool === 'openclaw') {
+    return {
+      ...base,
+      context_1m: true,
+      max_tokens: 128000,
+      api_mode: 'chat_completions',
+    };
+  }
+  if (tool === 'hermes') {
+    return {
+      ...base,
+      context_1m: true,
+      api_mode: 'chat_completions',
+      // 不设 max_tokens：Hermes 不使用该字段
+    };
+  }
+  return base;
 }

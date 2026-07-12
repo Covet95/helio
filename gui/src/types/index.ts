@@ -13,6 +13,8 @@ export interface ApiProfile {
   reasoning_effort?: string;
   /** 1M 上下文 */
   context_1m?: boolean;
+  /** OpenClaw: models[].maxTokens（仅 OpenClaw 使用，不与 Hermes 共用语义） */
+  max_tokens?: number;
   /** Codex provider 的 wire 协议（responses / chat） */
   wire_api?: string;
   /** Codex provider 是否要求 OpenAI 鉴权 */
@@ -23,6 +25,11 @@ export interface ApiProfile {
   model_thinking_enabled?: boolean;
   /** Codex 顶层 service_tier（如 fast） */
   service_tier?: string;
+  /**
+   * 协议模式。Hermes → model.api_mode / custom_providers[].api_mode；
+   * OpenClaw → models.providers.<id>.api。各工具独立解释，不共用适配逻辑。
+   */
+  api_mode?: string;
   /** 归属工具；undefined = 通用（所有工具下都显示）*/
   target_app?: TargetApp;
   created_at?: number;
@@ -39,7 +46,7 @@ export interface ModelTestResult {
   endpoint: string;
 }
 
-export type TargetApp = 'claude-code' | 'codex' | 'gemini' | 'opencode';
+export type TargetApp = 'claude-code' | 'codex' | 'gemini' | 'opencode' | 'hermes' | 'openclaw';
 
 /// 已注册工具的元数据，用于动态生成 UI
 export interface ToolInfo {
@@ -58,6 +65,8 @@ export const SUPPORTED_TOOLS: ToolInfo[] = [
   { id: 'codex', displayName: 'Codex', short: 'CX', color: '#10B981', format: 'TOML' },
   { id: 'gemini', displayName: 'Gemini CLI', short: 'GM', color: '#4F8DF6', format: '.env' },
   { id: 'opencode', displayName: 'OpenCode', short: 'OC', color: '#4B5563', format: 'JSON' },
+  { id: 'hermes', displayName: 'Hermes', short: 'HM', color: '#7C3AED', format: 'YAML' },
+  { id: 'openclaw', displayName: 'OpenClaw', short: 'OCW', color: '#0EA5E9', format: 'JSON' },
 ];
 
 export function toolById(id: TargetApp | string): ToolInfo | undefined {
@@ -81,6 +90,8 @@ export interface StatusInfo {
   codex?: TargetStatus;
   gemini?: TargetStatus;
   opencode?: TargetStatus;
+  hermes?: TargetStatus;
+  openclaw?: TargetStatus;
   database: DatabaseInfo;
 }
 

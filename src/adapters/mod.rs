@@ -47,6 +47,8 @@ pub trait ConfigAdapter {
 pub mod claude_code;
 pub mod codex;
 pub mod gemini;
+pub mod hermes;
+pub mod openclaw;
 pub mod opencode;
 
 /// 获取适配器
@@ -56,5 +58,7 @@ pub fn get_adapter(target_app: TargetApp) -> Box<dyn ConfigAdapter> {
         TargetApp::Codex => Box::new(codex::CodexAdapter::new()),
         TargetApp::Gemini => Box::new(gemini::GeminiAdapter::new()),
         TargetApp::OpenCode => Box::new(opencode::OpenCodeAdapter::new()),
+        TargetApp::Hermes => Box::new(hermes::HermesAdapter::new()),
+        TargetApp::OpenClaw => Box::new(openclaw::OpenClawAdapter::new()),
     }
 }

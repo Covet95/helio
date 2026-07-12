@@ -26,6 +26,8 @@ interface Scanned {
   experimental_bearer_token?: string;
   model_thinking_enabled?: boolean;
   service_tier?: string;
+  api_mode?: string;
+  max_tokens?: number;
   source: string;
 }
 interface LocalInfo {
@@ -109,7 +111,9 @@ export default function ImportPage() {
         model_mapping: api.model_mapping,
         reasoning_effort: api.reasoning_effort,
         context_1m: api.context_1m,
-        wire_api: api.wire_api,
+        wire_api: tool === 'hermes' || tool === 'openclaw' ? undefined : api.wire_api,
+        api_mode: tool === 'hermes' || tool === 'openclaw' ? api.api_mode : undefined,
+        max_tokens: tool === 'openclaw' ? api.max_tokens : undefined,
         requires_openai_auth: api.requires_openai_auth,
         experimental_bearer_token: api.experimental_bearer_token,
         model_thinking_enabled: api.model_thinking_enabled,

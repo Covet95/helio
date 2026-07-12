@@ -1,6 +1,6 @@
 // Tauri commands
 use switch_api::db::Database;
-use switch_api::models::{ApiProfile, TargetApp, ClaudeProfileFields, CodexProfileFields, OpenCodeProfileFields};
+use switch_api::models::{ApiProfile, TargetApp};
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "macos")]
 use std::io::Write;
@@ -24,6 +24,8 @@ pub struct StatusInfo {
     pub codex: Option<TargetStatus>,
     pub gemini: Option<TargetStatus>,
     pub opencode: Option<TargetStatus>,
+    pub hermes: Option<TargetStatus>,
+    pub openclaw: Option<TargetStatus>,
     pub database: DatabaseInfo,
 }
 
@@ -630,6 +632,10 @@ pub struct ScannedApi {
     pub experimental_bearer_token: Option<String>,
     pub model_thinking_enabled: Option<bool>,
     pub service_tier: Option<String>,
+    /// Hermes / OpenClaw 协议模式（独立字段，不再借用 wire_api）
+    pub api_mode: Option<String>,
+    /// OpenClaw models[].maxTokens
+    pub max_tokens: Option<i64>,
     /// 来源配置文件路径，便于用户确认
     pub source: String,
 }
@@ -652,6 +658,10 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
     // Claude Code 的默认模型 / 角色映射（仅 ClaudeCode 用到）
     let mut claude_model: Option<String> = None;
     let mut claude_mapping: Option<std::collections::HashMap<String, String>> = None;
+    // Hermes / OpenClaw
+    let mut api_mode: Option<String> = None;
+    let mut max_tokens: Option<i64> = None;
+    let mut context_1m: Option<bool> = None;
 
     match target {
         TargetApp::ClaudeCode => {
@@ -778,22 +788,179 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
                 }
             }
         }
+        TargetApp::Hermes => {
+            // model.provider = custom:<name> + custom_providers[].{base_url,api_key,api_mode}
+            let model_obj = cfg.get("model");
+            let provider_slug = model_obj
+                .and_then(|m| m.get("provider"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let name = provider_slug
+                .strip_prefix("custom:")
+                .unwrap_or(provider_slug)
+                .to_lowercase();
+            if let Some(arr) = cfg.get("custom_providers").and_then(|v| v.as_array()) {
+                for entry in arr {
+                    let ename = entry
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .replace(' ', "-");
+                    if ename == name || (!name.is_empty() && ename == name) {
+                        url = str_field(entry, "base_url");
+                        key = str_field(entry, "api_key");
+                        let mode = str_field(entry, "api_mode");
+                        if !mode.is_empty() {
+                            api_mode = Some(mode);
+                        }
+                        break;
+                    }
+                }
+            }
+            if let Some(m) = model_obj {
+                claude_model = m
+                    .get("default")
+                    .or_else(|| m.get("model"))
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string());
+                if api_mode.is_none() {
+                    let mode = str_field(m, "api_mode");
+                    if !mode.is_empty() {
+                        api_mode = Some(mode);
+                    }
+                }
+                if let Some(ctx) = m.get("context_length").and_then(|v| v.as_i64()) {
+                    context_1m = Some(ctx >= 1_000_000);
+                }
+            }
+        }
+        TargetApp::OpenClaw => {
+            // agents.defaults.model.primary = "provider/model"
+            // models.providers.<id>.{baseUrl,apiKey,api,models[]}
+            let primary = cfg
+                .pointer("/agents/defaults/model/primary")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let (pid, mid) = if let Some((p, m)) = primary.split_once('/') {
+                (p.to_string(), m.to_string())
+            } else {
+                (String::new(), String::new())
+            };
+            if let Some(providers) = cfg
+                .pointer("/models/providers")
+                .and_then(|v| v.as_object())
+            {
+                let block = if !pid.is_empty() {
+                    providers.get(&pid)
+                } else {
+                    providers.values().next()
+                };
+                if let Some(b) = block {
+                    url = str_field(b, "baseUrl");
+                    if url.is_empty() {
+                        url = str_field(b, "base_url");
+                    }
+                    key = str_field(b, "apiKey");
+                    if key.is_empty() {
+                        key = str_field(b, "api_key");
+                    }
+                    let mode = str_field(b, "api");
+                    if !mode.is_empty() {
+                        // normalize OpenClaw api string toward Helio form
+                        api_mode = Some(match mode.as_str() {
+                            "openai-completions" => "chat_completions".into(),
+                            "anthropic-messages" => "anthropic_messages".into(),
+                            "openai-responses" => "codex_responses".into(),
+                            other => other.to_string(),
+                        });
+                    }
+                    if !mid.is_empty() {
+                        if let Some(models) = b.get("models").and_then(|v| v.as_array()) {
+                            if let Some(m) = models.iter().find(|m| {
+                                m.get("id").and_then(|v| v.as_str()) == Some(mid.as_str())
+                            }) {
+                                if let Some(cw) = m.get("contextWindow").and_then(|v| v.as_i64()) {
+                                    context_1m = Some(cw >= 1_000_000);
+                                }
+                                if let Some(mt) = m.get("maxTokens").and_then(|v| v.as_i64()) {
+                                    if mt > 0 {
+                                        max_tokens = Some(mt);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if !mid.is_empty() {
+                claude_model = Some(mid);
+            }
+            // agents.defaults.contextTokens as fallback for 1M detection
+            if context_1m.is_none() {
+                if let Some(ct) = cfg
+                    .pointer("/agents/defaults/contextTokens")
+                    .and_then(|v| v.as_i64())
+                {
+                    context_1m = Some(ct >= 1_000_000);
+                }
+            }
+        }
     }
+
+    // Hermes 把 provider 名从 model.provider 还原（去 custom:）
+    // OpenClaw 从 agents.defaults.model.primary 的 provider/ 前缀还原
+    let mut provider = provider;
+    if target == TargetApp::Hermes {
+        let slug = cfg
+            .get("model")
+            .and_then(|m| m.get("provider"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let name = slug.strip_prefix("custom:").unwrap_or(slug);
+        if !name.is_empty() {
+            provider = name.to_string();
+        }
+    }
+    if target == TargetApp::OpenClaw {
+        let primary = cfg
+            .pointer("/agents/defaults/model/primary")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if let Some((p, _)) = primary.split_once('/') {
+            if !p.is_empty() {
+                provider = p.to_string();
+            }
+        }
+    }
+
+    // Codex/Claude keep their own context_1m path; Hermes/OpenClaw use local scan.
+    let resolved_context_1m = match target {
+        TargetApp::Hermes | TargetApp::OpenClaw => context_1m,
+        _ => codex_context_1m(target, &cfg),
+    };
 
     Ok(ScannedApi {
         found: !url.is_empty() || !key.is_empty(),
         api_url: url,
         api_key: key,
         provider,
-        model: codex_string_field(target, &cfg, "model").or(claude_model),
+        model: if target == TargetApp::Hermes || target == TargetApp::OpenClaw {
+            claude_model
+        } else {
+            codex_string_field(target, &cfg, "model").or(claude_model)
+        },
         model_mapping: claude_mapping,
         reasoning_effort: codex_string_field(target, &cfg, "model_reasoning_effort"),
-        context_1m: codex_context_1m(target, &cfg),
+        context_1m: resolved_context_1m,
         wire_api,
         requires_openai_auth,
         experimental_bearer_token,
         model_thinking_enabled: codex_bool_field(target, &cfg, "model_thinking_enabled"),
         service_tier: codex_string_field(target, &cfg, "service_tier"),
+        api_mode,
+        max_tokens,
         source,
     })
 }
@@ -903,6 +1070,24 @@ pub async fn get_status(state: State<'_, AppState>) -> Result<StatusInfo, String
         connected: false,
     });
 
+    // Hermes status
+    let hermes_profile = db
+        .get_active_profile_full(TargetApp::Hermes)
+        .map_err(|e| e.to_string())?;
+    let hermes = Some(TargetStatus {
+        profile: hermes_profile,
+        connected: false,
+    });
+
+    // OpenClaw status
+    let openclaw_profile = db
+        .get_active_profile_full(TargetApp::OpenClaw)
+        .map_err(|e| e.to_string())?;
+    let openclaw = Some(TargetStatus {
+        profile: openclaw_profile,
+        connected: false,
+    });
+
     // Database info
     let profiles = db.list_profiles().map_err(|e| e.to_string())?;
     let db_path = dirs::home_dir()
@@ -916,6 +1101,8 @@ pub async fn get_status(state: State<'_, AppState>) -> Result<StatusInfo, String
         codex,
         gemini,
         opencode,
+        hermes,
+        openclaw,
         database: DatabaseInfo {
             size,
             profile_count: profiles.len(),
@@ -967,6 +1154,11 @@ fn read_local_skills(target: TargetApp) -> Result<Vec<String>, String> {
             home.join(".config").join("opencode").join("skills"),
             home.join(".claude").join("skills"),
             home.join(".agents").join("skills"),
+        ],
+        TargetApp::Hermes => vec![home.join(".hermes").join("skills")],
+        TargetApp::OpenClaw => vec![
+            home.join(".openclaw").join("skills"),
+            home.join(".openclaw").join("workspace").join("skills"),
         ],
     };
 

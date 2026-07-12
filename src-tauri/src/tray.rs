@@ -42,6 +42,8 @@ fn tool_display_name(tool: TargetApp) -> &'static str {
         TargetApp::Codex => "Codex",
         TargetApp::Gemini => "Gemini",
         TargetApp::OpenCode => "OpenCode",
+        TargetApp::Hermes => "Hermes",
+        TargetApp::OpenClaw => "OpenClaw",
     }
 }
 
@@ -54,11 +56,13 @@ fn is_active(profile_id: Option<i64>, active_id: Option<i64>) -> bool {
 }
 
 /// 所有工具，固定顺序。
-const TOOLS: [TargetApp; 4] = [
+const TOOLS: [TargetApp; 6] = [
     TargetApp::ClaudeCode,
     TargetApp::Codex,
     TargetApp::Gemini,
     TargetApp::OpenCode,
+    TargetApp::Hermes,
+    TargetApp::OpenClaw,
 ];
 
 /// 从数据库读 profiles + 各工具 active，构建完整 tray 菜单。

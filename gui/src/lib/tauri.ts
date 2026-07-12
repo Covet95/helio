@@ -88,6 +88,8 @@ export const tauriApi = {
       experimental_bearer_token?: string;
       model_thinking_enabled?: boolean;
       service_tier?: string;
+      api_mode?: string;
+      max_tokens?: number;
       source: string;
     }>('scan_local_api', { targetApp }, {
       found: false,
@@ -103,6 +105,8 @@ export const tauriApi = {
       experimental_bearer_token: undefined,
       model_thinking_enabled: undefined,
       service_tier: undefined,
+      api_mode: undefined,
+      max_tokens: undefined,
       source: `${targetApp} config`,
     }),
 

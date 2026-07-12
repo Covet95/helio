@@ -1,4 +1,4 @@
-use crate::models::{ActiveProfile, ApiProfile, ClaudeProfileFields, CodexProfileFields, OpenCodeProfileFields, SharedConfig, TargetApp};
+use crate::models::{ActiveProfile, ApiProfile, ClaudeProfileFields, CodexProfileFields, HermesProfileFields, OpenClawProfileFields, OpenCodeProfileFields, SharedConfig, TargetApp};
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
@@ -73,6 +73,8 @@ impl Database {
         self.try_add_column("ALTER TABLE api_profiles ADD COLUMN model_thinking_enabled INTEGER")?;
         self.try_add_column("ALTER TABLE api_profiles ADD COLUMN service_tier TEXT")?;
         self.try_add_column("ALTER TABLE api_profiles ADD COLUMN experimental_bearer_token TEXT")?;
+        self.try_add_column("ALTER TABLE api_profiles ADD COLUMN api_mode TEXT")?;
+        self.try_add_column("ALTER TABLE api_profiles ADD COLUMN max_tokens INTEGER")?;
         self.migrate_drop_model_effort_level()?;
 
         Ok(())
@@ -103,17 +105,19 @@ impl Database {
                 model_mapping TEXT, model TEXT, reasoning_effort TEXT, context_1m INTEGER,
                 target_app TEXT, models TEXT, wire_api TEXT, requires_openai_auth INTEGER,
                 model_thinking_enabled INTEGER, service_tier TEXT, experimental_bearer_token TEXT,
+                api_mode TEXT, max_tokens INTEGER,
                 created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
                 UNIQUE(name, target_app)
             );
             INSERT INTO api_profiles_no_effort (
                 id, name, provider, api_url, api_key, model_mapping, model, reasoning_effort,
                 context_1m, target_app, models, wire_api, requires_openai_auth,
-                model_thinking_enabled, service_tier, experimental_bearer_token, created_at, updated_at
+                model_thinking_enabled, service_tier, experimental_bearer_token, api_mode, max_tokens, created_at, updated_at
             )
             SELECT id, name, provider, api_url, api_key, model_mapping, model, reasoning_effort,
                 context_1m, target_app, models, wire_api, requires_openai_auth,
-                model_thinking_enabled, service_tier, experimental_bearer_token, created_at, updated_at
+                model_thinking_enabled, service_tier, experimental_bearer_token,
+                api_mode, max_tokens, created_at, updated_at
             FROM api_profiles;
             DROP TABLE api_profiles;
             ALTER TABLE api_profiles_no_effort RENAME TO api_profiles;
@@ -222,10 +226,25 @@ impl Database {
             .as_ref()
             .map(serde_json::to_string)
             .transpose()?;
+        let (api_mode, max_tokens) = match profile.target_app {
+            Some(TargetApp::OpenClaw) => (
+                profile.openclaw.api_mode.as_ref(),
+                profile.openclaw.max_tokens,
+            ),
+            Some(TargetApp::Hermes) => (profile.hermes.api_mode.as_ref(), None),
+            _ => (
+                profile
+                    .hermes
+                    .api_mode
+                    .as_ref()
+                    .or(profile.openclaw.api_mode.as_ref()),
+                profile.openclaw.max_tokens,
+            ),
+        };
 
         self.conn.execute(
-            "INSERT INTO api_profiles (name, provider, api_url, api_key, model_mapping, model, reasoning_effort, context_1m, target_app, models, wire_api, requires_openai_auth, model_thinking_enabled, service_tier, experimental_bearer_token, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            "INSERT INTO api_profiles (name, provider, api_url, api_key, model_mapping, model, reasoning_effort, context_1m, target_app, models, wire_api, requires_openai_auth, model_thinking_enabled, service_tier, experimental_bearer_token, api_mode, max_tokens, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 &profile.name,
                 &profile.provider,
@@ -242,6 +261,8 @@ impl Database {
                 profile.codex.model_thinking_enabled.map(|b| b as i64),
                 &profile.codex.service_tier,
                 &profile.codex.experimental_bearer_token,
+                api_mode,
+                max_tokens,
                 now,
                 now
             ],
@@ -255,7 +276,7 @@ impl Database {
         "id, name, provider, api_url, api_key, model_mapping, model, ",
         "reasoning_effort, context_1m, created_at, updated_at, target_app, models, ",
         "wire_api, requires_openai_auth, model_thinking_enabled, service_tier, ",
-        "experimental_bearer_token"
+        "experimental_bearer_token, api_mode, max_tokens"
     );
 
     fn row_to_profile(row: &rusqlite::Row) -> rusqlite::Result<ApiProfile> {
@@ -276,6 +297,15 @@ impl Database {
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
         let requires_openai_auth: Option<i64> = row.get("requires_openai_auth")?;
         let model_thinking_enabled: Option<i64> = row.get("model_thinking_enabled")?;
+        let api_mode: Option<String> = row.get("api_mode")?;
+        let max_tokens: Option<i64> = row.get("max_tokens")?;
+
+        // 工具字段按 target_app 归属，避免 Hermes/OpenClaw 互相污染
+        let (hermes_api_mode, openclaw_api_mode, openclaw_max_tokens) = match target_app {
+            Some(TargetApp::Hermes) => (api_mode, None, None),
+            Some(TargetApp::OpenClaw) => (None, api_mode, max_tokens),
+            _ => (api_mode.clone(), api_mode, max_tokens),
+        };
 
         Ok(ApiProfile {
             id: Some(row.get("id")?),
@@ -298,6 +328,13 @@ impl Database {
                 experimental_bearer_token: row.get("experimental_bearer_token")?,
             },
             opencode: OpenCodeProfileFields { models },
+            hermes: HermesProfileFields {
+                api_mode: hermes_api_mode,
+            },
+            openclaw: OpenClawProfileFields {
+                api_mode: openclaw_api_mode,
+                max_tokens: openclaw_max_tokens,
+            },
         })
     }
 
@@ -354,12 +391,27 @@ impl Database {
             .as_ref()
             .map(serde_json::to_string)
             .transpose()?;
+        let (api_mode, max_tokens) = match profile.target_app {
+            Some(TargetApp::OpenClaw) => (
+                profile.openclaw.api_mode.as_ref(),
+                profile.openclaw.max_tokens,
+            ),
+            Some(TargetApp::Hermes) => (profile.hermes.api_mode.as_ref(), None),
+            _ => (
+                profile
+                    .hermes
+                    .api_mode
+                    .as_ref()
+                    .or(profile.openclaw.api_mode.as_ref()),
+                profile.openclaw.max_tokens,
+            ),
+        };
 
         match profile.id {
             Some(id) => {
                 self.conn.execute(
                     "UPDATE api_profiles SET name = ?1, provider = ?2, api_url = ?3, api_key = ?4,
-                     model_mapping = ?5, model = ?6, reasoning_effort = ?7, context_1m = ?8, target_app = ?9, models = ?10, wire_api = ?11, requires_openai_auth = ?12, model_thinking_enabled = ?13, service_tier = ?14, experimental_bearer_token = ?15, updated_at = ?16 WHERE id = ?17",
+                     model_mapping = ?5, model = ?6, reasoning_effort = ?7, context_1m = ?8, target_app = ?9, models = ?10, wire_api = ?11, requires_openai_auth = ?12, model_thinking_enabled = ?13, service_tier = ?14, experimental_bearer_token = ?15, api_mode = ?16, max_tokens = ?17, updated_at = ?18 WHERE id = ?19",
                     params![
                         &profile.name,
                         &profile.provider,
@@ -376,6 +428,8 @@ impl Database {
                         profile.codex.model_thinking_enabled.map(|b| b as i64),
                         &profile.codex.service_tier,
                         &profile.codex.experimental_bearer_token,
+                        api_mode,
+                        max_tokens,
                         now,
                         id
                     ],
@@ -385,7 +439,7 @@ impl Database {
                 // 无 id：按 name 定位，不改名
                 self.conn.execute(
                     "UPDATE api_profiles SET provider = ?1, api_url = ?2, api_key = ?3,
-                     model_mapping = ?4, model = ?5, reasoning_effort = ?6, context_1m = ?7, target_app = ?8, models = ?9, wire_api = ?10, requires_openai_auth = ?11, model_thinking_enabled = ?12, service_tier = ?13, experimental_bearer_token = ?14, updated_at = ?15 WHERE name = ?16",
+                     model_mapping = ?4, model = ?5, reasoning_effort = ?6, context_1m = ?7, target_app = ?8, models = ?9, wire_api = ?10, requires_openai_auth = ?11, model_thinking_enabled = ?12, service_tier = ?13, experimental_bearer_token = ?14, api_mode = ?15, max_tokens = ?16, updated_at = ?17 WHERE name = ?18",
                     params![
                         &profile.provider,
                         &profile.api_url,
@@ -401,6 +455,8 @@ impl Database {
                         profile.codex.model_thinking_enabled.map(|b| b as i64),
                         &profile.codex.service_tier,
                         &profile.codex.experimental_bearer_token,
+                        api_mode,
+                        max_tokens,
                         now,
                         &profile.name
                     ],
@@ -771,6 +827,31 @@ mod tests {
         assert!(db.delete_profile("一一", TargetApp::Codex)?);
         assert!(db.get_profile_by_name_and_target("一一", TargetApp::Codex).is_err());
         assert!(db.get_profile_by_name_and_target("一一", TargetApp::ClaudeCode).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn test_max_tokens_roundtrip() -> Result<()> {
+        let db = Database::open(":memory:")?;
+        let id = db.add_profile(&ApiProfile {
+            name: "mt".into(),
+            provider: "cpa".into(),
+            api_url: "https://x".into(),
+            api_key: "sk".into(),
+            target_app: Some(TargetApp::OpenClaw),
+            context_1m: Some(true),
+            openclaw: OpenClawProfileFields {
+                api_mode: Some("anthropic_messages".into()),
+                max_tokens: Some(65536),
+            },
+            ..Default::default()
+        })?;
+        let got = db.get_profile_by_id(id)?.unwrap();
+        assert_eq!(got.openclaw.max_tokens, Some(65536));
+        assert_eq!(got.context_1m, Some(true));
+        assert_eq!(got.openclaw.api_mode.as_deref(), Some("anthropic_messages"));
+        // Hermes group must stay empty for OpenClaw profiles
+        assert!(got.hermes.api_mode.is_none());
         Ok(())
     }
 

@@ -32,6 +32,15 @@ export const PROVIDER_PRESETS: Record<TargetApp, ProviderPreset[]> = {
     { id: 'openai', label: 'OpenAI', provider: 'openai', api_url: 'https://api.openai.com/v1', category: 'official' },
     { id: 'custom', label: '自定义', provider: 'custom', api_url: '', category: 'custom' },
   ],
+  hermes: [
+    { id: 'custom', label: 'Custom endpoint', provider: 'custom', api_url: 'https://api.example.com/v1', model: 'gpt-5.5', category: 'custom' },
+    { id: 'freemodel', label: 'FreeModel 示例', provider: 'freemodel', api_url: 'https://api.freemodel.dev/v1', model: 'gpt-5.5', category: 'third_party' },
+    { id: 'local', label: '本地中转', provider: 'cpa', api_url: 'http://127.0.0.1:8317/v1', model: 'claude-opus-4-8', category: 'third_party' },
+  ],
+  openclaw: [
+    { id: 'cpa', label: '本地中转 CPA', provider: 'cpa', api_url: 'http://127.0.0.1:8317/v1', model: 'claude-opus-4-8', category: 'third_party' },
+    { id: 'custom', label: 'Custom provider', provider: 'custom', api_url: 'https://api.example.com/v1', model: 'gpt-5.5', category: 'custom' },
+  ],
 };
 
 /** 推理强度选项（Codex） */

@@ -1,6 +1,6 @@
 use switch_api::adapters::get_adapter;
 use switch_api::db::Database;
-use switch_api::models::{ApiProfile, ClaudeProfileFields, CodexProfileFields, OpenCodeProfileFields, TargetApp};
+use switch_api::models::{ApiProfile, HermesProfileFields, OpenClawProfileFields, TargetApp};
 use switch_api::utils;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -28,7 +28,7 @@ pub struct Cli {
 pub enum Commands {
     /// 初始化：从现有配置导入
     Init {
-        /// 目标应用 (claude-code, codex, gemini, opencode)
+        /// 目标应用 (claude-code, codex, gemini, opencode, hermes, openclaw)
         target_app: String,
     },
 
@@ -38,7 +38,7 @@ pub enum Commands {
 
     /// 切换 API Profile
     Switch {
-        /// 目标应用 (claude-code, codex, gemini, opencode)
+        /// 目标应用 (claude-code, codex, gemini, opencode, hermes, openclaw)
         target_app: String,
         /// Profile 名称
         profile_name: String,
@@ -56,7 +56,7 @@ pub enum Commands {
 
     /// 同步共享配置（从配置文件回填到数据库）
     Sync {
-        /// 目标应用 (claude-code, codex, gemini, opencode)
+        /// 目标应用 (claude-code, codex, gemini, opencode, hermes, openclaw)
         target_app: String,
     },
 
@@ -104,7 +104,13 @@ pub enum ProfileCommands {
         /// 启用 1M 上下文窗口
         #[arg(long)]
         context_1m: bool,
-        /// 目标应用 (claude-code, codex, gemini, opencode)
+        /// 协议模式（Hermes/OpenClaw：chat_completions / anthropic_messages / codex_responses）
+        #[arg(long)]
+        api_mode: Option<String>,
+        /// OpenClaw models[].maxTokens
+        #[arg(long)]
+        max_tokens: Option<i64>,
+        /// 目标应用 (claude-code, codex, gemini, opencode, hermes, openclaw)
         #[arg(long)]
         target_app: Option<String>,
     },
@@ -120,7 +126,7 @@ pub enum ProfileCommands {
     Delete {
         /// Profile 名称
         name: String,
-        /// 目标应用 (claude-code, codex, gemini, opencode)
+        /// 目标应用 (claude-code, codex, gemini, opencode, hermes, openclaw)
         #[arg(long)]
         target_app: Option<String>,
         /// 强制删除不提示
@@ -132,7 +138,7 @@ pub enum ProfileCommands {
     Show {
         /// Profile 名称
         name: String,
-        /// 目标应用 (claude-code, codex, gemini, opencode)
+        /// 目标应用 (claude-code, codex, gemini, opencode, hermes, openclaw)
         #[arg(long)]
         target_app: Option<String>,
     },
@@ -141,7 +147,7 @@ pub enum ProfileCommands {
     Update {
         /// Profile 名称
         name: String,
-        /// 目标应用 (claude-code, codex, gemini, opencode)
+        /// 目标应用 (claude-code, codex, gemini, opencode, hermes, openclaw)
         #[arg(long)]
         target_app: Option<String>,
         /// 新的 API URL
@@ -165,6 +171,12 @@ pub enum ProfileCommands {
         /// 启用 1M 上下文窗口
         #[arg(long, num_args = 0..=1, default_missing_value = "true")]
         context_1m: Option<bool>,
+        /// 协议模式（Hermes/OpenClaw）
+        #[arg(long)]
+        api_mode: Option<String>,
+        /// OpenClaw models[].maxTokens
+        #[arg(long)]
+        max_tokens: Option<i64>,
     },
 }
 
@@ -186,6 +198,8 @@ pub fn execute(cli: Cli) -> Result<()> {
                 model,
                 reasoning_effort,
                 context_1m,
+                api_mode,
+                max_tokens,
                 target_app,
             } => {
                 cmd_profile_add(
@@ -198,6 +212,8 @@ pub fn execute(cli: Cli) -> Result<()> {
                     model,
                     reasoning_effort,
                     context_1m,
+                    api_mode,
+                    max_tokens,
                     target_app,
                 )?;
             }
@@ -220,6 +236,8 @@ pub fn execute(cli: Cli) -> Result<()> {
                 model,
                 reasoning_effort,
                 context_1m,
+                api_mode,
+                max_tokens,
             } => {
                 cmd_profile_update(
                     &db,
@@ -232,6 +250,8 @@ pub fn execute(cli: Cli) -> Result<()> {
                     model,
                     reasoning_effort,
                     context_1m,
+                    api_mode,
+                    max_tokens,
                 )?;
             }
         },
@@ -294,6 +314,8 @@ fn cmd_profile_add(
     model: Option<String>,
     reasoning_effort: Option<String>,
     context_1m: bool,
+    api_mode: Option<String>,
+    max_tokens: Option<i64>,
     target_app: Option<String>,
 ) -> Result<()> {
     let model_mapping_map = if let Some(json) = model_mapping {
@@ -312,6 +334,24 @@ fn cmd_profile_add(
 
     if let Some(t) = target_app.as_deref() {
         profile.target_app = Some(parse_target_app(t)?);
+    }
+
+    let mode = api_mode.filter(|v| !v.trim().is_empty());
+    match profile.target_app {
+        Some(TargetApp::Hermes) => {
+            profile.hermes = HermesProfileFields { api_mode: mode };
+        }
+        Some(TargetApp::OpenClaw) => {
+            profile.openclaw = OpenClawProfileFields {
+                api_mode: mode,
+                max_tokens: max_tokens.filter(|&n| n > 0),
+            };
+        }
+        _ => {
+            // ignore tool-specific flags for other apps
+            let _ = mode;
+            let _ = max_tokens;
+        }
     }
 
     db.add_profile(&profile)?;
@@ -405,6 +445,22 @@ fn cmd_profile_show(db: &Database, name: String, target_app: Option<String>) -> 
     if let Some(context_1m) = profile.context_1m {
         println!("  1M Context: {}", if context_1m { "enabled" } else { "disabled" });
     }
+    match profile.target_app {
+        Some(TargetApp::Hermes) => {
+            if let Some(mode) = profile.hermes.api_mode {
+                println!("  API Mode (Hermes): {}", mode);
+            }
+        }
+        Some(TargetApp::OpenClaw) => {
+            if let Some(mode) = profile.openclaw.api_mode {
+                println!("  API Mode (OpenClaw): {}", mode);
+            }
+            if let Some(mt) = profile.openclaw.max_tokens {
+                println!("  Max Tokens (OpenClaw): {}", mt);
+            }
+        }
+        _ => {}
+    }
 
     if let Some(mapping) = profile.claude.model_mapping {
         println!("  Model Mapping:");
@@ -433,6 +489,8 @@ fn cmd_profile_update(
     model: Option<String>,
     reasoning_effort: Option<String>,
     context_1m: Option<bool>,
+    api_mode: Option<String>,
+    max_tokens: Option<i64>,
 ) -> Result<()> {
     let target = resolve_target_for_name(db, &name, target_app.as_deref())?;
     let mut profile = db.get_profile_by_name_and_target(&name, target)?;
@@ -480,6 +538,35 @@ fn cmd_profile_update(
     if let Some(new_context_1m) = context_1m {
         profile.context_1m = Some(new_context_1m);
         updated = true;
+    }
+
+    if let Some(mode) = api_mode {
+        let mode = mode.trim().to_string();
+        match target {
+            TargetApp::Hermes => {
+                profile.hermes.api_mode = if mode.is_empty() { None } else { Some(mode) };
+                updated = true;
+            }
+            TargetApp::OpenClaw => {
+                profile.openclaw.api_mode = if mode.is_empty() { None } else { Some(mode) };
+                updated = true;
+            }
+            _ => {
+                utils::warning("--api-mode 仅对 hermes / openclaw 生效，已忽略");
+            }
+        }
+    }
+
+    if let Some(mt) = max_tokens {
+        match target {
+            TargetApp::OpenClaw => {
+                profile.openclaw.max_tokens = if mt > 0 { Some(mt) } else { None };
+                updated = true;
+            }
+            _ => {
+                utils::warning("--max-tokens 仅对 openclaw 生效，已忽略");
+            }
+        }
     }
 
     if !updated {

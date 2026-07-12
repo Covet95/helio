@@ -100,6 +100,8 @@ pub(crate) fn default_provider(target: TargetApp) -> String {
         TargetApp::Codex => "openai",
         TargetApp::Gemini => "google",
         TargetApp::OpenCode => "anthropic",
+        TargetApp::Hermes => "custom",
+        TargetApp::OpenClaw => "custom",
     }
     .to_string()
 }

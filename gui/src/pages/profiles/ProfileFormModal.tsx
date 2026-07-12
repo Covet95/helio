@@ -74,7 +74,7 @@ export function ProfileModal({
   };
 
   const presets = PROVIDER_PRESETS[tool];
-  const showModelParams = tool === 'codex' || tool === 'claude-code' || tool === 'opencode';
+  const showModelParams = tool === 'codex' || tool === 'claude-code' || tool === 'opencode' || tool === 'hermes' || tool === 'openclaw';
 
   const applyPreset = (p: typeof presets[number]) => {
     setForm((f) => ({
@@ -326,6 +326,134 @@ export function ProfileModal({
                 </div>
               )}
 
+              {/* ── Hermes-only model params ── */}
+              {tool === 'hermes' && (
+                <div className="space-y-3 rounded-lg border border-line/80 bg-card/40 p-3">
+                  <div className="text-[12px] font-semibold text-ink-dim">Hermes 模型参数</div>
+                  <div>
+                    <span className="mb-1.5 block text-[12px] font-medium text-ink-dim">协议模式 (api_mode)</span>
+                    <div className="flex gap-1.5">
+                      {[
+                        { value: 'chat_completions', label: 'Chat' },
+                        { value: 'anthropic_messages', label: 'Anthropic' },
+                        { value: 'codex_responses', label: 'Responses' },
+                      ].map((w) => (
+                        <button
+                          key={w.value}
+                          type="button"
+                          onClick={() => setForm({ ...form, api_mode: w.value })}
+                          className={`flex-1 rounded-md border px-2 py-1.5 text-[12px] font-medium transition-all ${
+                            (form.api_mode || 'chat_completions') === w.value
+                              ? 'border-accent bg-accent/8 text-accent'
+                              : 'border-line text-ink-dim hover:border-line-strong'
+                          }`}
+                        >
+                          {w.label}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="mt-1 text-[11px] text-ink-faint">
+                      写入 <code className="font-mono">model.api_mode</code> 与{' '}
+                      <code className="font-mono">custom_providers[].api_mode</code>
+                      。Provider 填 custom 名（如 freemodel / cpa）→{' '}
+                      <code className="font-mono">model.provider=custom:&lt;name&gt;</code>
+                    </div>
+                  </div>
+                  <label className="flex cursor-pointer items-center justify-between">
+                    <div>
+                      <div className="text-[13px] font-medium text-ink">1M 上下文 (context_length)</div>
+                      <div className="text-[11px] text-ink-faint">
+                        开启后写入 <code className="font-mono">model.context_length=1000000</code>
+                        ，并镜像到当前 <code className="font-mono">custom_providers[]</code> 条目
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setForm({ ...form, context_1m: !form.context_1m })}
+                      className={`relative h-6 w-11 rounded-full transition-colors ${form.context_1m ? 'bg-accent' : 'bg-line-strong'}`}
+                    >
+                      <span
+                        className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow-soft transition-transform ${
+                          form.context_1m ? 'translate-x-[22px]' : 'translate-x-0.5'
+                        }`}
+                      />
+                    </button>
+                  </label>
+                </div>
+              )}
+
+              {/* ── OpenClaw-only model params ── */}
+              {tool === 'openclaw' && (
+                <div className="space-y-3 rounded-lg border border-line/80 bg-card/40 p-3">
+                  <div className="text-[12px] font-semibold text-ink-dim">OpenClaw 模型参数</div>
+                  <div>
+                    <span className="mb-1.5 block text-[12px] font-medium text-ink-dim">协议模式 (api)</span>
+                    <div className="flex gap-1.5">
+                      {[
+                        { value: 'chat_completions', label: 'Chat' },
+                        { value: 'anthropic_messages', label: 'Anthropic' },
+                        { value: 'codex_responses', label: 'Responses' },
+                      ].map((w) => (
+                        <button
+                          key={w.value}
+                          type="button"
+                          onClick={() => setForm({ ...form, api_mode: w.value })}
+                          className={`flex-1 rounded-md border px-2 py-1.5 text-[12px] font-medium transition-all ${
+                            (form.api_mode || 'chat_completions') === w.value
+                              ? 'border-accent bg-accent/8 text-accent'
+                              : 'border-line text-ink-dim hover:border-line-strong'
+                          }`}
+                        >
+                          {w.label}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="mt-1 text-[11px] text-ink-faint">
+                      写入 <code className="font-mono">models.providers.&lt;id&gt;.api</code>
+                      。Provider 填 provider id（如 cpa）；primary ={' '}
+                      <code className="font-mono">provider/model</code>
+                    </div>
+                  </div>
+                  <label className="flex cursor-pointer items-center justify-between">
+                    <div>
+                      <div className="text-[13px] font-medium text-ink">1M 上下文 (contextWindow)</div>
+                      <div className="text-[11px] text-ink-faint">
+                        开启后写入 <code className="font-mono">models[].contextWindow=1000000</code>
+                        与 <code className="font-mono">agents.defaults.contextTokens</code>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setForm({ ...form, context_1m: !form.context_1m })}
+                      className={`relative h-6 w-11 rounded-full transition-colors ${form.context_1m ? 'bg-accent' : 'bg-line-strong'}`}
+                    >
+                      <span
+                        className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow-soft transition-transform ${
+                          form.context_1m ? 'translate-x-[22px]' : 'translate-x-0.5'
+                        }`}
+                      />
+                    </button>
+                  </label>
+                  <Field
+                    label="Max Tokens (maxTokens)"
+                    value={form.max_tokens != null ? String(form.max_tokens) : ''}
+                    mono
+                    onChange={(e) => {
+                      const v = e.target.value.trim();
+                      if (!v) {
+                        setForm({ ...form, max_tokens: undefined });
+                        return;
+                      }
+                      const n = Number(v);
+                      setForm({
+                        ...form,
+                        max_tokens: Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined,
+                      });
+                    }}
+                    placeholder="默认 128000 → models.providers.<id>.models[].maxTokens"
+                  />
+                </div>
+              )}
 
               {tool === 'codex' && (
                 <label className="flex cursor-pointer items-center justify-between">
@@ -371,6 +499,7 @@ export function ProfileModal({
                        placeholder="留空 / fast" />
               )}
 
+              {/* Claude Code / Codex only — not shared with Hermes/OpenClaw */}
               {(tool === 'claude-code' || tool === 'codex') && (
                 <label className="flex cursor-pointer items-center justify-between">
                   <div>
