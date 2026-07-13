@@ -68,7 +68,6 @@ struct AnthropicMessagesResponse {
     #[serde(default)]
     content: Option<Vec<serde_json::Value>>,
     #[serde(default)]
-    #[allow(dead_code)]
     r#type: Option<String>,
 }
 

@@ -2,7 +2,7 @@
 
 pub use switch_api::probe::{
     probe_reachability, probe_with_params, FailoverResult, KeyProbeResult, ModelTestResult,
-    ReachabilityConfig, ReachabilityResult, ReachabilityStatus,
+    ReachabilityConfig,
 };
 
 use serde::{Deserialize, Serialize};

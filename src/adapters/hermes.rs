@@ -276,12 +276,7 @@ impl HermesAdapter {
         Ok(())
     }
 
-    /// Backward-compatible single-key sync used by older call sites/tests.
-    #[allow(dead_code)]
-    fn sync_auth_pool(&self, provider: &str, api_key: &str, base_url: &str) -> Result<()> {
-        self.sync_auth_pool_keys(provider, base_url, &[(api_key.to_string(), true)])
     }
-}
 
 impl ConfigAdapter for HermesAdapter {
     fn config_path(&self) -> PathBuf {
@@ -599,7 +594,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let adapter = HermesAdapter::with_dir(dir.path().to_path_buf());
         adapter
-            .sync_auth_pool("cpa", "sk-only", "http://127.0.0.1:8317/v1")
+            .sync_auth_pool_keys(
+                "cpa",
+                "http://127.0.0.1:8317/v1",
+                &[("sk-only".into(), true)],
+            )
             .unwrap();
         let auth = dir.path().join("auth.json");
         assert!(auth.exists());
