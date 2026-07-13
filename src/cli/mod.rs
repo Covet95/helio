@@ -1,6 +1,8 @@
 use switch_api::adapters::get_adapter;
 use switch_api::db::Database;
-use switch_api::models::{ApiProfile, HermesProfileFields, OpenClawProfileFields, TargetApp};
+use switch_api::models::{
+    ApiKeyEntry, ApiProfile, HermesProfileFields, OpenClawProfileFields, TargetApp,
+};
 use switch_api::utils;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -45,6 +47,9 @@ pub enum Commands {
         /// 跳过备份
         #[arg(long)]
         no_backup: bool,
+        /// 写入前按 key 顺序探活，失败则 failover 到下一把；全失败则不写
+        #[arg(long)]
+        probe: bool,
     },
 
     /// 查看当前状态
@@ -178,6 +183,57 @@ pub enum ProfileCommands {
         #[arg(long)]
         max_tokens: Option<i64>,
     },
+
+    /// 管理同一 Profile 下的多把 API Key（池 + 手动活跃）
+    #[command(subcommand)]
+    Key(KeyCommands),
+}
+
+#[derive(Subcommand)]
+pub enum KeyCommands {
+    /// 添加一把 key
+    Add {
+        /// Profile 名称
+        name: String,
+        #[arg(long)]
+        target_app: Option<String>,
+        /// API Key 明文
+        #[arg(long)]
+        key: String,
+        /// 备注标签
+        #[arg(long, default_value = "")]
+        label: String,
+        /// 添加后设为活跃
+        #[arg(long)]
+        activate: bool,
+    },
+    /// 列出 keys（脱敏）
+    List {
+        name: String,
+        #[arg(long)]
+        target_app: Option<String>,
+    },
+    /// 将指定 id 或 label 设为活跃（switch 只写活跃 key）
+    Use {
+        name: String,
+        /// key id 或 label
+        key_ref: String,
+        #[arg(long)]
+        target_app: Option<String>,
+    },
+    /// 删除一把 key（按 id 或 label）
+    Remove {
+        name: String,
+        key_ref: String,
+        #[arg(long)]
+        target_app: Option<String>,
+    },
+    /// 按顺序探活 key，成功则设为活跃（若该 profile 已是 active 会提示 re-switch）
+    Failover {
+        name: String,
+        #[arg(long)]
+        target_app: Option<String>,
+    },
 }
 
 pub fn execute(cli: Cli) -> Result<()> {
@@ -254,14 +310,40 @@ pub fn execute(cli: Cli) -> Result<()> {
                     max_tokens,
                 )?;
             }
+            ProfileCommands::Key(key_cmd) => match key_cmd {
+                KeyCommands::Add {
+                    name,
+                    target_app,
+                    key,
+                    label,
+                    activate,
+                } => cmd_profile_key_add(&db, name, target_app, key, label, activate)?,
+                KeyCommands::List { name, target_app } => {
+                    cmd_profile_key_list(&db, name, target_app)?
+                }
+                KeyCommands::Use {
+                    name,
+                    key_ref,
+                    target_app,
+                } => cmd_profile_key_use(&db, name, target_app, key_ref)?,
+                KeyCommands::Remove {
+                    name,
+                    key_ref,
+                    target_app,
+                } => cmd_profile_key_remove(&db, name, target_app, key_ref)?,
+                KeyCommands::Failover { name, target_app } => {
+                    cmd_profile_key_failover(&db, name, target_app)?
+                }
+            },
         },
         Commands::Switch {
             target_app,
             profile_name,
             no_backup,
+            probe,
         } => {
             let target = parse_target_app(&target_app)?;
-            cmd_switch(&db, target, profile_name, !no_backup)?;
+            cmd_switch(&db, target, profile_name, !no_backup, probe)?;
         }
         Commands::Status { verbose } => {
             cmd_status(&db, verbose)?;
@@ -504,6 +586,12 @@ fn cmd_profile_update(
 
     if let Some(new_key) = key {
         profile.api_key = new_key;
+        profile.normalize_keys();
+        if let Some(keys) = profile.api_keys.as_mut() {
+            if let Some(active) = keys.iter_mut().find(|e| e.is_active) {
+                active.key = profile.api_key.clone();
+            }
+        }
         updated = true;
     }
 
@@ -580,11 +668,22 @@ fn cmd_profile_update(
     Ok(())
 }
 
-fn cmd_switch(db: &Database, target_app: TargetApp, profile_name: String, backup: bool) -> Result<()> {
+fn cmd_switch(db: &Database, target_app: TargetApp, profile_name: String, backup: bool, probe: bool) -> Result<()> {
     utils::info(&format!("切换 {} 到 Profile: {}...", target_app, profile_name));
 
     // 1. 获取 API Profile
-    let api_profile = db.get_profile_by_name_and_target(&profile_name, target_app)?;
+    let mut api_profile = db.get_profile_by_name_and_target(&profile_name, target_app)?;
+    api_profile.normalize_keys();
+    if probe {
+        utils::info("写入前探活（--probe）…");
+        let rt = tokio::runtime::Runtime::new().context("创建 tokio runtime 失败")?;
+        let r = rt.block_on(cli_failover(&mut api_profile, target_app))?;
+        if !r {
+            anyhow::bail!("探活 failover 失败，未写入配置");
+        }
+        db.update_profile(&api_profile)?;
+    }
+
 
     // 2. 获取适配器
     let adapter = get_adapter(target_app);
@@ -708,6 +807,275 @@ fn cmd_import(input: PathBuf, db_path: &PathBuf, force: bool) -> Result<()> {
     std::fs::copy(&input, db_path)?;
     utils::success(&format!("已导入数据库从: {}", input.display()));
 
+    Ok(())
+}
+
+// ========== Profile multi-key ==========
+
+fn cmd_profile_key_add(
+    db: &Database,
+    name: String,
+    target_app: Option<String>,
+    key: String,
+    label: String,
+    activate: bool,
+) -> Result<()> {
+    let target = resolve_target_for_name(db, &name, target_app.as_deref())?;
+    let mut profile = db.get_profile_by_name_and_target(&name, target)?;
+    profile.normalize_keys();
+    let key = key.trim().to_string();
+    if key.is_empty() {
+        anyhow::bail!("key 不能为空");
+    }
+    let mut keys = profile.api_keys.take().unwrap_or_default();
+    if activate {
+        for e in keys.iter_mut() {
+            e.is_active = false;
+        }
+    }
+    let entry = ApiKeyEntry {
+        id: ApiProfile::new_key_id(),
+        label: if label.trim().is_empty() {
+            format!("key-{}", keys.len() + 1)
+        } else {
+            label.trim().to_string()
+        },
+        key: key.clone(),
+        is_active: activate || keys.is_empty(),
+        last_probe_ok: None,
+        last_probed_at: None,
+        created_at: Some(chrono::Utc::now().timestamp()),
+    };
+    let id = entry.id.clone();
+    keys.push(entry);
+    profile.api_keys = Some(keys);
+    profile.normalize_keys();
+    if activate {
+        let _ = profile.set_active_key_id(&id);
+    }
+    db.update_profile(&profile)?;
+    utils::success(&format!(
+        "已添加 key {}（{}）{}",
+        id,
+        profile
+            .api_keys
+            .as_ref()
+            .and_then(|ks| ks.iter().find(|e| e.id == id))
+            .map(|e| e.label.as_str())
+            .unwrap_or(""),
+        if profile.active_key() == key {
+            " [活跃]"
+        } else {
+            ""
+        }
+    ));
+    Ok(())
+}
+
+fn cmd_profile_key_list(db: &Database, name: String, target_app: Option<String>) -> Result<()> {
+    let target = resolve_target_for_name(db, &name, target_app.as_deref())?;
+    let mut profile = db.get_profile_by_name_and_target(&name, target)?;
+    profile.normalize_keys();
+    let keys = profile.api_keys.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
+    if keys.is_empty() {
+        println!("(无 key)");
+        return Ok(());
+    }
+    println!(
+        "\n{} {} 的 keys:\n",
+        "Profile".bold(),
+        name.cyan()
+    );
+    for e in keys {
+        let mark = if e.is_active { "●" } else { "○" };
+        let masked = if e.key.len() > 15 {
+            format!("{}...{}", &e.key[..10], &e.key[e.key.len() - 5..])
+        } else {
+            "***".into()
+        };
+        println!(
+            "  {} {}  {}  {}",
+            mark,
+            e.id.dimmed(),
+            if e.label.is_empty() {
+                "(no label)".into()
+            } else {
+                e.label.clone()
+            },
+            masked
+        );
+    }
+    Ok(())
+}
+
+fn cmd_profile_key_use(
+    db: &Database,
+    name: String,
+    target_app: Option<String>,
+    key_ref: String,
+) -> Result<()> {
+    let target = resolve_target_for_name(db, &name, target_app.as_deref())?;
+    let mut profile = db.get_profile_by_name_and_target(&name, target)?;
+    if !profile.set_active_key_ref(&key_ref) {
+        anyhow::bail!("未找到 key: {}", key_ref);
+    }
+    db.update_profile(&profile)?;
+    utils::success(&format!(
+        "已将活跃 key 设为 {}（switch 将写入此 key）",
+        key_ref
+    ));
+    Ok(())
+}
+
+fn cmd_profile_key_remove(
+    db: &Database,
+    name: String,
+    target_app: Option<String>,
+    key_ref: String,
+) -> Result<()> {
+    let target = resolve_target_for_name(db, &name, target_app.as_deref())?;
+    let mut profile = db.get_profile_by_name_and_target(&name, target)?;
+    profile.normalize_keys();
+    let needle = key_ref.trim();
+    let Some(keys) = profile.api_keys.as_mut() else {
+        anyhow::bail!("没有可删除的 key");
+    };
+    let before = keys.len();
+    keys.retain(|e| e.id != needle && !e.label.eq_ignore_ascii_case(needle));
+    if keys.len() == before {
+        anyhow::bail!("未找到 key: {}", key_ref);
+    }
+    if keys.is_empty() {
+        anyhow::bail!("不能删除最后一把 key；请先添加备用 key 或改用 profile update --key");
+    }
+    profile.api_keys = Some(keys.clone());
+    profile.normalize_keys();
+    db.update_profile(&profile)?;
+    utils::success(&format!("已删除 key {}", key_ref));
+    Ok(())
+}
+
+
+// ========== CLI probe failover ==========
+
+fn profile_protocol_fields(profile: &ApiProfile) -> (Option<String>, Option<String>, Option<String>) {
+    let wire = profile.codex.wire_api.clone();
+    let mode = match profile.target_app {
+        Some(TargetApp::Hermes) => profile.hermes.api_mode.clone(),
+        Some(TargetApp::OpenClaw) => profile.openclaw.api_mode.clone(),
+        _ => profile
+            .hermes
+            .api_mode
+            .clone()
+            .or_else(|| profile.openclaw.api_mode.clone()),
+    };
+    let exp = profile.codex.experimental_bearer_token.clone();
+    (wire, mode, exp)
+}
+
+fn model_for_probe(profile: &ApiProfile) -> String {
+    profile
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            profile
+                .opencode
+                .models
+                .as_ref()
+                .and_then(|m| m.iter().map(|s| s.trim()).find(|s| !s.is_empty()))
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_default()
+}
+
+async fn cli_failover(profile: &mut ApiProfile, target: TargetApp) -> Result<bool> {
+    use switch_api::probe::probe_with_params;
+    profile.normalize_keys();
+    let model = model_for_probe(profile);
+    if model.is_empty() {
+        anyhow::bail!("先为该 Profile 填写默认模型再探活/failover");
+    }
+    let (wire, mode, exp) = profile_protocol_fields(profile);
+    let mut keys = profile.api_keys.clone().unwrap_or_default();
+    if keys.is_empty() {
+        anyhow::bail!("没有可探活的 Key");
+    }
+    keys.sort_by_key(|e| if e.is_active { 0 } else { 1 });
+    let now = chrono::Utc::now().timestamp();
+    let app = target.as_str();
+    for entry in keys.iter() {
+        print!("  试 {} … ", if entry.label.is_empty() { entry.id.as_str() } else { entry.label.as_str() });
+        match probe_with_params(
+            app,
+            &profile.api_url,
+            &entry.key,
+            &model,
+            wire.as_deref(),
+            mode.as_deref(),
+            exp.as_deref(),
+            Some(entry.label.clone()),
+        )
+        .await
+        {
+            Ok(ok) => {
+                println!("OK ({})", ok.protocol);
+                if let Some(list) = profile.api_keys.as_mut() {
+                    for e in list.iter_mut() {
+                        if e.id == entry.id {
+                            e.last_probe_ok = Some(true);
+                            e.last_probed_at = Some(now);
+                        }
+                    }
+                }
+                let _ = profile.set_active_key_id(&entry.id);
+                return Ok(true);
+            }
+            Err(err) => {
+                println!("FAIL");
+                utils::warning(&err);
+                if let Some(list) = profile.api_keys.as_mut() {
+                    for e in list.iter_mut() {
+                        if e.id == entry.id {
+                            e.last_probe_ok = Some(false);
+                            e.last_probed_at = Some(now);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn cmd_profile_key_failover(db: &Database, name: String, target_app: Option<String>) -> Result<()> {
+    let target = resolve_target_for_name(db, &name, target_app.as_deref())?;
+    let mut profile = db.get_profile_by_name_and_target(&name, target)?;
+    let rt = tokio::runtime::Runtime::new().context("创建 tokio runtime 失败")?;
+    let ok = rt.block_on(cli_failover(&mut profile, target))?;
+    db.update_profile(&profile)?;
+    if ok {
+        utils::success(&format!(
+            "failover 成功，活跃 key = {}",
+            profile
+                .api_keys
+                .as_ref()
+                .and_then(|ks| ks.iter().find(|e| e.is_active))
+                .map(|e| e.label.as_str())
+                .unwrap_or("(active)")
+        ));
+        // if already active profile, re-switch
+        if let Ok(Some(ap)) = db.get_active_profile(target) {
+            if profile.id == Some(ap.profile_id) {
+                utils::info("该 profile 已是当前活动配置，正在 re-switch 写入…");
+                cmd_switch(db, target, name, true, false)?;
+            }
+        }
+    } else {
+        anyhow::bail!("所有 key 探活失败");
+    }
     Ok(())
 }
 

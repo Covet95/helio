@@ -52,6 +52,23 @@ pub struct OpenClawProfileFields {
     pub max_tokens: Option<i64>,
 }
 
+/// 同一 profile 下的一把 API Key（池 + 手动活跃）
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApiKeyEntry {
+    pub id: String,
+    #[serde(default)]
+    pub label: String,
+    pub key: String,
+    #[serde(default)]
+    pub is_active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_probe_ok: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_probed_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<i64>,
+}
+
 /// API Profile - 只存储 API 相关信息
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApiProfile {
@@ -59,7 +76,11 @@ pub struct ApiProfile {
     pub name: String,
     pub provider: String,
     pub api_url: String,
+    /// 活跃 key 冗余列：始终等于 api_keys 中 is_active 的那把（adapters 只读此字段）
     pub api_key: String,
+    /// 多 key 池；空/缺省时仅用 api_key
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_keys: Option<Vec<ApiKeyEntry>>,
     /// 默认模型（跨工具）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -82,6 +103,126 @@ pub struct ApiProfile {
     pub hermes: HermesProfileFields,
     #[serde(flatten)]
     pub openclaw: OpenClawProfileFields,
+}
+
+impl ApiProfile {
+    /// 生成简单唯一 id（无需外部依赖）
+    pub fn new_key_id() -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("k{nanos}")
+    }
+
+    /// 将 legacy 单 api_key 与 api_keys 归一：非空池恰好一把 active，api_key 镜像 active。
+    pub fn normalize_keys(&mut self) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        let mut keys = self.api_keys.take().unwrap_or_default();
+        // 丢掉空 secret
+        keys.retain(|e| !e.key.trim().is_empty());
+
+        if keys.is_empty() {
+            let k = self.api_key.trim();
+            if !k.is_empty() {
+                keys.push(ApiKeyEntry {
+                    id: Self::new_key_id(),
+                    label: "default".into(),
+                    key: k.to_string(),
+                    is_active: true,
+                    last_probe_ok: None,
+                    last_probed_at: None,
+                    created_at: Some(now),
+                });
+            }
+        } else {
+            // 若 api_key 有值但不在池中，当作额外一把（不强制 active）
+            let k = self.api_key.trim();
+            if !k.is_empty() && !keys.iter().any(|e| e.key == k) {
+                keys.push(ApiKeyEntry {
+                    id: Self::new_key_id(),
+                    label: "legacy".into(),
+                    key: k.to_string(),
+                    is_active: false,
+                    last_probe_ok: None,
+                    last_probed_at: None,
+                    created_at: Some(now),
+                });
+            }
+            let active_count = keys.iter().filter(|e| e.is_active).count();
+            if active_count == 0 {
+                keys[0].is_active = true;
+            } else if active_count > 1 {
+                let mut seen = false;
+                for e in keys.iter_mut() {
+                    if e.is_active {
+                        if seen {
+                            e.is_active = false;
+                        } else {
+                            seen = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(active) = keys.iter().find(|e| e.is_active) {
+            self.api_key = active.key.clone();
+        } else if keys.is_empty() {
+            // keep api_key as-is (可能为空，保存时由表单校验)
+        }
+
+        self.api_keys = if keys.is_empty() { None } else { Some(keys) };
+    }
+
+    pub fn active_key(&self) -> &str {
+        if let Some(keys) = self.api_keys.as_ref() {
+            if let Some(a) = keys.iter().find(|e| e.is_active) {
+                return a.key.as_str();
+            }
+        }
+        self.api_key.as_str()
+    }
+
+    /// 将指定 id 设为唯一活跃 key，并同步 api_key。找不到则 false。
+    pub fn set_active_key_id(&mut self, key_id: &str) -> bool {
+        self.normalize_keys();
+        let Some(keys) = self.api_keys.as_mut() else {
+            return false;
+        };
+        if !keys.iter().any(|e| e.id == key_id) {
+            return false;
+        }
+        for e in keys.iter_mut() {
+            e.is_active = e.id == key_id;
+        }
+        if let Some(a) = keys.iter().find(|e| e.is_active) {
+            self.api_key = a.key.clone();
+        }
+        true
+    }
+
+    /// 按 label（大小写不敏感）或 id 设活跃
+    pub fn set_active_key_ref(&mut self, id_or_label: &str) -> bool {
+        self.normalize_keys();
+        let needle = id_or_label.trim();
+        let Some(keys) = self.api_keys.as_ref() else {
+            return false;
+        };
+        let id = keys
+            .iter()
+            .find(|e| e.id == needle || e.label.eq_ignore_ascii_case(needle))
+            .map(|e| e.id.clone());
+        match id {
+            Some(id) => self.set_active_key_id(&id),
+            None => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,6 +308,7 @@ impl ApiProfile {
             provider,
             api_url,
             api_key,
+            api_keys: None,
             model: None,
             context_1m: None,
             target_app: None,
@@ -193,6 +335,80 @@ impl ApiProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_legacy_single_key() {
+        let mut p = ApiProfile {
+            api_key: "sk-main".into(),
+            api_keys: None,
+            ..Default::default()
+        };
+        p.normalize_keys();
+        let keys = p.api_keys.as_ref().unwrap();
+        assert_eq!(keys.len(), 1);
+        assert!(keys[0].is_active);
+        assert_eq!(keys[0].key, "sk-main");
+        assert_eq!(p.api_key, "sk-main");
+        assert_eq!(p.active_key(), "sk-main");
+    }
+
+    #[test]
+    fn normalize_two_keys_exactly_one_active() {
+        let mut p = ApiProfile {
+            api_key: "sk-a".into(),
+            api_keys: Some(vec![
+                ApiKeyEntry {
+                    id: "1".into(),
+                    label: "a".into(),
+                    key: "sk-a".into(),
+                    is_active: false,
+                    ..Default::default()
+                },
+                ApiKeyEntry {
+                    id: "2".into(),
+                    label: "b".into(),
+                    key: "sk-b".into(),
+                    is_active: true,
+                    ..Default::default()
+                },
+            ]),
+            ..Default::default()
+        };
+        p.normalize_keys();
+        assert_eq!(p.api_key, "sk-b");
+        assert_eq!(p.active_key(), "sk-b");
+        assert_eq!(
+            p.api_keys.as_ref().unwrap().iter().filter(|e| e.is_active).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn set_active_key_id_switches_api_key() {
+        let mut p = ApiProfile {
+            api_keys: Some(vec![
+                ApiKeyEntry {
+                    id: "1".into(),
+                    label: "a".into(),
+                    key: "sk-a".into(),
+                    is_active: true,
+                    ..Default::default()
+                },
+                ApiKeyEntry {
+                    id: "2".into(),
+                    label: "b".into(),
+                    key: "sk-b".into(),
+                    is_active: false,
+                    ..Default::default()
+                },
+            ]),
+            api_key: "sk-a".into(),
+            ..Default::default()
+        };
+        assert!(p.set_active_key_id("2"));
+        assert_eq!(p.api_key, "sk-b");
+        assert!(!p.set_active_key_id("missing"));
+    }
 
     #[test]
     fn test_from_str_roundtrip() {

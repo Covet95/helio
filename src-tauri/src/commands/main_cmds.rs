@@ -29,10 +29,21 @@ pub struct StatusInfo {
     pub database: DatabaseInfo,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 pub struct TargetStatus {
     pub profile: Option<ApiProfile>,
+    /// 有活跃 profile 即为 true（配置态）；批量探活成功时也会为 true
     pub connected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_ok: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_probed_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_protocol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -351,17 +362,35 @@ pub async fn delete_profile(name: String, target_app: String, state: State<'_, A
 pub async fn switch_profile(
     target_app: String,
     profile_name: String,
+    probe: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let target = TargetApp::from_str(&target_app)
         .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
+    let do_probe = probe.unwrap_or(false);
+
+    if do_probe {
+        let result =
+            run_failover(&state, target, &profile_name, false).await?;
+        if !result.success {
+            return Err(format!(
+                "探活 failover 失败，未写入配置: {}",
+                result
+                    .tried
+                    .iter()
+                    .filter_map(|t| t.error.as_ref())
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+        }
+    }
 
     let db = state.db.lock().map_err(|e| e.to_string())?;
-
-    // 获取 API Profile
-    let api_profile = db
+    let mut api_profile = db
         .get_profile_by_name_and_target(&profile_name, target)
         .map_err(|e| e.to_string())?;
+    api_profile.normalize_keys();
 
     apply_profile_config(&db, target, &api_profile)?;
 
@@ -1038,9 +1067,11 @@ pub async fn get_status(state: State<'_, AppState>) -> Result<StatusInfo, String
     let claude_code_profile = db
         .get_active_profile_full(TargetApp::ClaudeCode)
         .map_err(|e| e.to_string())?;
+    // connected = 已配置活跃 profile（不发外网探活）
     let claude_code = Some(TargetStatus {
+        connected: claude_code_profile.is_some(),
         profile: claude_code_profile,
-        connected: true,
+        ..Default::default()
     });
 
     // Codex status
@@ -1048,8 +1079,9 @@ pub async fn get_status(state: State<'_, AppState>) -> Result<StatusInfo, String
         .get_active_profile_full(TargetApp::Codex)
         .map_err(|e| e.to_string())?;
     let codex = Some(TargetStatus {
+        connected: codex_profile.is_some(),
         profile: codex_profile,
-        connected: false,
+        ..Default::default()
     });
 
     // Gemini status
@@ -1057,8 +1089,9 @@ pub async fn get_status(state: State<'_, AppState>) -> Result<StatusInfo, String
         .get_active_profile_full(TargetApp::Gemini)
         .map_err(|e| e.to_string())?;
     let gemini = Some(TargetStatus {
+        connected: gemini_profile.is_some(),
         profile: gemini_profile,
-        connected: false,
+        ..Default::default()
     });
 
     // OpenCode status
@@ -1066,8 +1099,9 @@ pub async fn get_status(state: State<'_, AppState>) -> Result<StatusInfo, String
         .get_active_profile_full(TargetApp::OpenCode)
         .map_err(|e| e.to_string())?;
     let opencode = Some(TargetStatus {
+        connected: opencode_profile.is_some(),
         profile: opencode_profile,
-        connected: false,
+        ..Default::default()
     });
 
     // Hermes status
@@ -1075,8 +1109,9 @@ pub async fn get_status(state: State<'_, AppState>) -> Result<StatusInfo, String
         .get_active_profile_full(TargetApp::Hermes)
         .map_err(|e| e.to_string())?;
     let hermes = Some(TargetStatus {
+        connected: hermes_profile.is_some(),
         profile: hermes_profile,
-        connected: false,
+        ..Default::default()
     });
 
     // OpenClaw status
@@ -1084,8 +1119,9 @@ pub async fn get_status(state: State<'_, AppState>) -> Result<StatusInfo, String
         .get_active_profile_full(TargetApp::OpenClaw)
         .map_err(|e| e.to_string())?;
     let openclaw = Some(TargetStatus {
+        connected: openclaw_profile.is_some(),
         profile: openclaw_profile,
-        connected: false,
+        ..Default::default()
     });
 
     // Database info
@@ -1109,6 +1145,299 @@ pub async fn get_status(state: State<'_, AppState>) -> Result<StatusInfo, String
             path: db_path.to_string_lossy().to_string(),
         },
     })
+}
+
+fn profile_protocol_fields(profile: &ApiProfile) -> (Option<String>, Option<String>, Option<String>) {
+    let wire = profile.codex.wire_api.clone();
+    let mode = match profile.target_app {
+        Some(TargetApp::Hermes) => profile.hermes.api_mode.clone(),
+        Some(TargetApp::OpenClaw) => profile.openclaw.api_mode.clone(),
+        _ => profile
+            .hermes
+            .api_mode
+            .clone()
+            .or_else(|| profile.openclaw.api_mode.clone()),
+    };
+    let exp = profile.codex.experimental_bearer_token.clone();
+    (wire, mode, exp)
+}
+
+fn model_for_probe(profile: &ApiProfile) -> String {
+    profile
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            profile
+                .opencode
+                .models
+                .as_ref()
+                .and_then(|m| m.iter().map(|s| s.trim()).find(|s| !s.is_empty()))
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_default()
+}
+
+/// Helio 侧 failover：按 active 优先顺序探活，成功则设活跃并可选 re-switch。
+async fn run_failover(
+    state: &State<'_, AppState>,
+    target: TargetApp,
+    profile_name: &str,
+    re_switch: bool,
+) -> Result<crate::model_fetch::FailoverResult, String> {
+    use crate::model_fetch::{probe_with_params, FailoverResult, KeyProbeResult};
+
+    let (mut profile, was_active) = {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        let mut p = db
+            .get_profile_by_name_and_target(profile_name, target)
+            .map_err(|e| e.to_string())?;
+        p.normalize_keys();
+        let active_id = db
+            .get_active_profile(target)
+            .map_err(|e| e.to_string())?
+            .map(|a| a.profile_id);
+        let was = p.id.zip(active_id).map(|(a, b)| a == b).unwrap_or(false);
+        (p, was)
+    };
+
+    let model = model_for_probe(&profile);
+    if model.is_empty() {
+        return Err("先为该 Profile 填写默认模型再 failover".into());
+    }
+    let (wire, mode, exp) = profile_protocol_fields(&profile);
+    let app_str = target.as_str().to_string();
+
+    let mut keys = profile.api_keys.clone().unwrap_or_default();
+    if keys.is_empty() && !profile.api_key.trim().is_empty() {
+        profile.normalize_keys();
+        keys = profile.api_keys.clone().unwrap_or_default();
+    }
+    if keys.is_empty() {
+        return Err("没有可 failover 的 Key".into());
+    }
+
+    keys.sort_by_key(|e| if e.is_active { 0 } else { 1 });
+
+    let mut tried: Vec<KeyProbeResult> = Vec::new();
+    let mut winner: Option<(String, String)> = None;
+    let now = chrono::Utc::now().timestamp();
+
+    for entry in keys.iter() {
+        let res = probe_with_params(
+            &app_str,
+            &profile.api_url,
+            &entry.key,
+            &model,
+            wire.as_deref(),
+            mode.as_deref(),
+            exp.as_deref(),
+            Some(entry.label.clone()),
+        )
+        .await;
+        match res {
+            Ok(ok) => {
+                tried.push(KeyProbeResult {
+                    key_id: entry.id.clone(),
+                    label: entry.label.clone(),
+                    ok: true,
+                    error: None,
+                    endpoint: Some(ok.endpoint),
+                    protocol: Some(ok.protocol),
+                });
+                if let Some(list) = profile.api_keys.as_mut() {
+                    for e in list.iter_mut() {
+                        if e.id == entry.id {
+                            e.last_probe_ok = Some(true);
+                            e.last_probed_at = Some(now);
+                        }
+                    }
+                }
+                winner = Some((entry.id.clone(), entry.label.clone()));
+                break;
+            }
+            Err(err) => {
+                tried.push(KeyProbeResult {
+                    key_id: entry.id.clone(),
+                    label: entry.label.clone(),
+                    ok: false,
+                    error: Some(err),
+                    endpoint: None,
+                    protocol: None,
+                });
+                if let Some(list) = profile.api_keys.as_mut() {
+                    for e in list.iter_mut() {
+                        if e.id == entry.id {
+                            e.last_probe_ok = Some(false);
+                            e.last_probed_at = Some(now);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let success = winner.is_some();
+    if let Some((id, _)) = &winner {
+        let _ = profile.set_active_key_id(id);
+    }
+
+    let mut re_switched = false;
+    {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        db.update_profile(&profile).map_err(|e| e.to_string())?;
+        let should_switch = re_switch || (was_active && success);
+        if should_switch && success {
+            apply_profile_config(&db, target, &profile)?;
+            if let Some(pid) = profile.id {
+                db.set_active_profile(target, pid).map_err(|e| e.to_string())?;
+            }
+            re_switched = true;
+        }
+    }
+
+    Ok(FailoverResult {
+        success,
+        active_key_id: winner.as_ref().map(|(id, _)| id.clone()),
+        active_label: winner.map(|(_, l)| l),
+        tried,
+        re_switched,
+    })
+}
+
+#[tauri::command]
+pub async fn failover_profile_keys(
+    target_app: String,
+    profile_name: String,
+    re_switch: Option<bool>,
+    state: State<'_, AppState>,
+) -> Result<crate::model_fetch::FailoverResult, String> {
+    let target = TargetApp::from_str(&target_app)
+        .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
+    // re_switch=Some(true) 强制 re-switch；None/false 时由 run_failover 在「已是 active profile」时自动 re-switch
+    let force = re_switch == Some(true);
+    run_failover(&state, target, &profile_name, force).await
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolProbeResult {
+    pub target_app: String,
+    pub configured: bool,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u64>,
+    pub probed_at: i64,
+}
+
+
+/// 状态页「检测可用性」：对每个已配置工具用活跃 key 探活一次。
+#[tauri::command]
+pub async fn probe_active_profiles(
+    state: State<'_, AppState>,
+) -> Result<Vec<ToolProbeResult>, String> {
+    use crate::model_fetch::probe_with_params;
+
+    let snapshots: Vec<(TargetApp, Option<ApiProfile>)> = {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        let tools = [
+            TargetApp::ClaudeCode,
+            TargetApp::Codex,
+            TargetApp::Gemini,
+            TargetApp::OpenCode,
+            TargetApp::Hermes,
+            TargetApp::OpenClaw,
+        ];
+        let mut out = Vec::new();
+        for t in tools {
+            let p = db.get_active_profile_full(t).map_err(|e| e.to_string())?;
+            out.push((t, p));
+        }
+        out
+    };
+
+    let now = chrono::Utc::now().timestamp();
+    let mut results = Vec::new();
+    for (target, profile) in snapshots {
+        let app = target.as_str().to_string();
+        let Some(profile) = profile else {
+            results.push(ToolProbeResult {
+                target_app: app,
+                configured: false,
+                ok: false,
+                profile_name: None,
+                error: None,
+                protocol: None,
+                endpoint: None,
+                latency_ms: None,
+                probed_at: now,
+            });
+            continue;
+        };
+        let model = model_for_probe(&profile);
+        if model.is_empty() {
+            results.push(ToolProbeResult {
+                target_app: app,
+                configured: true,
+                ok: false,
+                profile_name: Some(profile.name),
+                error: Some("未设置模型，跳过探活".into()),
+                protocol: None,
+                endpoint: None,
+                latency_ms: None,
+                probed_at: now,
+            });
+            continue;
+        }
+        let (wire, mode, exp) = profile_protocol_fields(&profile);
+        let start = std::time::Instant::now();
+        let res = probe_with_params(
+            &app,
+            &profile.api_url,
+            profile.active_key(),
+            &model,
+            wire.as_deref(),
+            mode.as_deref(),
+            exp.as_deref(),
+            None,
+        )
+        .await;
+        let latency = start.elapsed().as_millis() as u64;
+        match res {
+            Ok(ok) => results.push(ToolProbeResult {
+                target_app: app,
+                configured: true,
+                ok: true,
+                profile_name: Some(profile.name),
+                error: None,
+                protocol: Some(ok.protocol),
+                endpoint: Some(ok.endpoint),
+                latency_ms: Some(latency),
+                probed_at: now,
+            }),
+            Err(e) => results.push(ToolProbeResult {
+                target_app: app,
+                configured: true,
+                ok: false,
+                profile_name: Some(profile.name),
+                error: Some(e),
+                protocol: None,
+                endpoint: None,
+                latency_ms: Some(latency),
+                probed_at: now,
+            }),
+        }
+    }
+    Ok(results)
 }
 
 /// 扫描给定目录列表里的 skill 子目录名，按出现顺序去重。

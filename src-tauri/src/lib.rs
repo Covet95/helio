@@ -43,6 +43,8 @@ pub fn run() {
             commands::main_cmds::update_profile,
             commands::main_cmds::delete_profile,
             commands::main_cmds::switch_profile,
+            commands::main_cmds::failover_profile_keys,
+            commands::main_cmds::probe_active_profiles,
             commands::main_cmds::copy_text,
             commands::main_cmds::get_shared_config,
             commands::main_cmds::save_shared_config,

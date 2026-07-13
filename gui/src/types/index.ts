@@ -3,7 +3,10 @@ export interface ApiProfile {
   name: string;
   provider: string;
   api_url: string;
+  /** 活跃 key（与 adapters switch 对齐；等于 api_keys 中 is_active 的那把） */
   api_key: string;
+  /** 多 key 池；空/缺省时仅用 api_key */
+  api_keys?: ApiKeyEntry[];
   model_mapping?: Record<string, string>;
   /** 默认模型 */
   model?: string;
@@ -44,6 +47,20 @@ export interface FetchedModel {
 export interface ModelTestResult {
   model: string;
   endpoint: string;
+  /** chat_completions | responses | anthropic_messages | gemini */
+  protocol?: string;
+  key_label?: string;
+}
+
+/** 同一 profile 下的一把 API Key */
+export interface ApiKeyEntry {
+  id: string;
+  label: string;
+  key: string;
+  is_active: boolean;
+  last_probe_ok?: boolean | null;
+  last_probed_at?: number | null;
+  created_at?: number;
 }
 
 export type TargetApp = 'claude-code' | 'codex' | 'gemini' | 'opencode' | 'hermes' | 'openclaw';
@@ -77,6 +94,23 @@ export interface TargetStatus {
   profile?: ApiProfile;
   connected: boolean;
   latency?: number;
+  probe_ok?: boolean | null;
+  probe_error?: string | null;
+  last_probed_at?: number | null;
+  probe_protocol?: string | null;
+  latency_ms?: number | null;
+}
+
+export interface ToolProbeResult {
+  target_app: string;
+  configured: boolean;
+  ok: boolean;
+  profile_name?: string;
+  error?: string;
+  protocol?: string;
+  endpoint?: string;
+  latency_ms?: number;
+  probed_at: number;
 }
 
 export interface DatabaseInfo {

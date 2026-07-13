@@ -1,5 +1,5 @@
 use super::ConfigAdapter;
-use crate::models::{ApiProfile, CodexProfileFields};
+use crate::models::ApiProfile;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
@@ -452,6 +452,7 @@ impl ConfigAdapter for CodexAdapter {
 
 #[cfg(test)]
 mod tests {
+    use crate::models::CodexProfileFields;
     use super::*;
 
     fn sample_profile() -> ApiProfile {

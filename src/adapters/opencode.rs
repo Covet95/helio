@@ -1,5 +1,5 @@
 use super::ConfigAdapter;
-use crate::models::{ApiProfile, OpenCodeProfileFields};
+use crate::models::ApiProfile;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
@@ -383,6 +383,7 @@ impl ConfigAdapter for OpenCodeAdapter {
 
 #[cfg(test)]
 mod tests {
+    use crate::models::OpenCodeProfileFields;
     use super::*;
 
     fn sample_profile() -> ApiProfile {

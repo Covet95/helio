@@ -1,11 +1,48 @@
 import { useState } from 'react';
-import type { ApiProfile, FetchedModel, TargetApp } from '../../types';
+import type { ApiKeyEntry, ApiProfile, FetchedModel, TargetApp } from '../../types';
 import { SUPPORTED_TOOLS } from '../../types';
 import { Button } from '../../components/common/Button';
 import { Modal, Field } from '../../components/common/Modal';
 import { PROVIDER_PRESETS, REASONING_LEVELS } from '../../lib/presets';
-import { cn } from '../../lib/utils';
+import { cn, maskApiKey } from '../../lib/utils';
 import { emptyProfileForTool } from './helpers';
+
+function newKeyId(): string {
+  return `k${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function ensureKeyPool(p: ApiProfile): ApiKeyEntry[] {
+  if (p.api_keys && p.api_keys.length > 0) {
+    return p.api_keys.map((e) => ({ ...e }));
+  }
+  if (p.api_key?.trim()) {
+    return [
+      {
+        id: newKeyId(),
+        label: 'default',
+        key: p.api_key,
+        is_active: true,
+      },
+    ];
+  }
+  return [
+    {
+      id: newKeyId(),
+      label: 'default',
+      key: '',
+      is_active: true,
+    },
+  ];
+}
+
+function withActiveKey(p: ApiProfile, keys: ApiKeyEntry[]): ApiProfile {
+  const active = keys.find((k) => k.is_active) || keys[0];
+  return {
+    ...p,
+    api_keys: keys,
+    api_key: active?.key ?? p.api_key,
+  };
+}
 
 export function ProfileModal({
   profile, initialTool, onClose, onSave,
@@ -18,18 +55,31 @@ export function ProfileModal({
   const initialProfile = profile;
   const initialModalTool = initialProfile?.target_app ?? initialTool;
   const [tool, setTool] = useState<TargetApp>(initialModalTool);
-  const [form, setForm] = useState<ApiProfile>(
-    initialProfile || emptyProfileForTool(initialModalTool),
-  );
+  const [form, setForm] = useState<ApiProfile>(() => {
+    const base = initialProfile || emptyProfileForTool(initialModalTool);
+    return withActiveKey(base, ensureKeyPool(base));
+  });
   const [models, setModels] = useState<FetchedModel[]>([]);
   const [loadingModels, setLoadingModels] = useState(false);
   const [checkingApi, setCheckingApi] = useState(false);
   const [apiHealth, setApiHealth] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
   const [modelErr, setModelErr] = useState('');
   const [formErr, setFormErr] = useState('');
+  const [multiKeyMode, setMultiKeyMode] = useState(
+    () => (initialProfile?.api_keys?.length ?? 0) > 1,
+  );
+
+  const keys = form.api_keys && form.api_keys.length > 0 ? form.api_keys : ensureKeyPool(form);
+  const activeKey =
+    keys.find((k) => k.is_active)?.key?.trim() || form.api_key.trim();
+
+  const setKeys = (next: ApiKeyEntry[]) => {
+    setForm((f) => withActiveKey(f, next));
+    setApiHealth(null);
+  };
 
   const loadModels = async () => {
-    if (!form.api_url.trim() || !form.api_key.trim()) {
+    if (!form.api_url.trim() || !activeKey) {
       setModelErr('先填 API URL 和 API Key');
       return;
     }
@@ -37,7 +87,7 @@ export function ProfileModal({
     setModelErr('');
     try {
       const { tauriApi } = await import('../../lib/tauri');
-      const list = await tauriApi.fetchModels(form.api_url, form.api_key);
+      const list = await tauriApi.fetchModels(form.api_url, activeKey);
       setModels(list);
       if (list.length === 0) setModelErr('该端点没有返回模型');
     } catch (e) {
@@ -48,26 +98,104 @@ export function ProfileModal({
     }
   };
 
+  const runProbe = async (apiKey: string, keyLabel?: string) => {
+    const { tauriApi } = await import('../../lib/tauri');
+    const model = form.model?.trim() || form.models?.[0]?.trim() || '';
+    if (!form.api_url.trim() || !apiKey.trim()) {
+      throw new Error('先填 API URL 和 API Key');
+    }
+    if (!model) {
+      throw new Error('先选择或填写模型');
+    }
+    return tauriApi.testModel({
+      targetApp: tool,
+      apiUrl: form.api_url,
+      apiKey,
+      model,
+      wireApi: form.wire_api,
+      apiMode: form.api_mode,
+      experimentalBearerToken: form.experimental_bearer_token,
+      keyLabel,
+    });
+  };
+
   const testConnection = async () => {
     setCheckingApi(true);
     setApiHealth(null);
     setModelErr('');
     try {
-      const { tauriApi } = await import('../../lib/tauri');
-      const model = form.model?.trim() || form.models?.[0]?.trim() || '';
-      if (!form.api_url.trim() || !form.api_key.trim()) {
-        setApiHealth({ kind: 'error', text: '先填 API URL 和 API Key' });
-        return;
-      }
-      if (!model) {
-        setApiHealth({ kind: 'error', text: '先选择或填写模型' });
-        return;
-      }
-      const result = await tauriApi.testModel(form.api_url, form.api_key, model, form.wire_api);
-      const wireLabel = form.wire_api === 'responses' ? ' · Responses' : form.wire_api === 'chat' ? ' · Chat' : '';
-      setApiHealth({ kind: 'success', text: `模型 ${result.model} 可用${wireLabel}` });
+      const result = await runProbe(activeKey);
+      const proto = result.protocol ? ` · ${result.protocol}` : '';
+      setApiHealth({
+        kind: 'success',
+        text: `模型 ${result.model} 可用${proto}`,
+      });
     } catch (error) {
       setApiHealth({ kind: 'error', text: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setCheckingApi(false);
+    }
+  };
+
+  const testAllKeys = async () => {
+    setCheckingApi(true);
+    setApiHealth(null);
+    const pool = keys.filter((k) => k.key.trim());
+    if (pool.length === 0) {
+      setApiHealth({ kind: 'error', text: '没有可测试的 Key' });
+      setCheckingApi(false);
+      return;
+    }
+    const lines: string[] = [];
+    let anyFail = false;
+    let activeFailed = false;
+    const activeId = keys.find((k) => k.is_active)?.id;
+    for (const k of pool) {
+      try {
+        const r = await runProbe(k.key, k.label || k.id);
+        lines.push(`✓ ${k.label || k.id} · ${r.protocol || 'ok'}`);
+      } catch (e) {
+        anyFail = true;
+        if (k.id === activeId) activeFailed = true;
+        const msg = e instanceof Error ? e.message : String(e);
+        lines.push(`✗ ${k.label || k.id} · ${msg.slice(0, 80)}`);
+      }
+    }
+    setApiHealth({
+      kind: anyFail ? 'error' : 'success',
+      text: lines.join('；') + (activeFailed ? ' · 可点「Failover」激活可用 Key' : ''),
+    });
+    setCheckingApi(false);
+  };
+
+  const failoverKeys = async () => {
+    if (!form.name.trim()) {
+      setApiHealth({ kind: 'error', text: '请先保存档案名称后再 failover' });
+      return;
+    }
+    setCheckingApi(true);
+    setApiHealth(null);
+    try {
+      const { tauriApi } = await import('../../lib/tauri');
+      // 未保存的多 key 先保存由用户负责；这里对 DB 中档案 failover
+      const r = await tauriApi.failoverProfileKeys(tool, form.name);
+      if (r.success) {
+        setApiHealth({
+          kind: 'success',
+          text: `Failover 成功 → ${r.active_label || r.active_key_id || 'key'}${r.re_switched ? '（已 re-switch）' : ''}`,
+        });
+        // 刷新表单活跃标记（按 label 匹配）
+        if (r.active_key_id && form.api_keys) {
+          setKeys(form.api_keys.map((k) => ({ ...k, is_active: k.id === r.active_key_id || k.label === r.active_label })));
+        }
+      } else {
+        setApiHealth({
+          kind: 'error',
+          text: `全部 Key 失败：${r.tried.map((t) => t.error || 'fail').join('；')}`,
+        });
+      }
+    } catch (e) {
+      setApiHealth({ kind: 'error', text: e instanceof Error ? e.message : String(e) });
     } finally {
       setCheckingApi(false);
     }
@@ -85,15 +213,14 @@ export function ProfileModal({
     }));
   };
 
-  // 显式提交：footer 的保存按钮在 <form> 之外（Modal 把 footer 渲染成 form 的兄弟节点），
-  // 靠 button[form=id] 跨 DOM 关联在 WKWebView 里不可靠，改为直接调用，并自己做必填校验。
   const submit = () => {
-    if (!form.name.trim() || !form.provider.trim() || !form.api_url.trim() || !form.api_key.trim()) {
+    const normalized = withActiveKey(form, ensureKeyPool(form));
+    if (!normalized.name.trim() || !normalized.provider.trim() || !normalized.api_url.trim() || !normalized.api_key.trim()) {
       setFormErr('请填写名称、Provider、API URL、API Key');
       return;
     }
     setFormErr('');
-    onSave({ ...form, target_app: tool });
+    onSave({ ...normalized, target_app: tool });
   };
 
   return (
@@ -162,13 +289,136 @@ export function ProfileModal({
                  onChange={(e) => setForm({ ...form, provider: e.target.value })} placeholder="anthropic / openai / google" />
           <Field label="API URL" type="url" value={form.api_url} required mono
                  onChange={(e) => { setForm({ ...form, api_url: e.target.value }); setApiHealth(null); }} />
-          <Field label="API Key" type="password" value={form.api_key} required mono
-                 onChange={(e) => { setForm({ ...form, api_key: e.target.value }); setApiHealth(null); }} placeholder="sk-..." />
+
+          {!multiKeyMode ? (
+            <div className="space-y-1.5">
+              <Field
+                label="API Key"
+                type="password"
+                value={activeKey}
+                required
+                mono
+                onChange={(e) => {
+                  const v = e.target.value;
+                  const next = keys.map((k) =>
+                    k.is_active ? { ...k, key: v } : k,
+                  );
+                  if (!next.some((k) => k.is_active) && next[0]) {
+                    next[0] = { ...next[0], key: v, is_active: true };
+                  }
+                  setKeys(next.length ? next : [{ id: newKeyId(), label: 'default', key: v, is_active: true }]);
+                }}
+                placeholder="sk-..."
+              />
+              <button
+                type="button"
+                className="text-[11px] text-accent hover:underline"
+                onClick={() => setMultiKeyMode(true)}
+              >
+                同一 API 配置多把 Key…
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-2 rounded-lg border border-line bg-surface/60 p-3">
+              <div className="flex items-center justify-between">
+                <span className="text-[12px] font-medium text-ink-dim">
+                  API Keys <span className="font-normal text-ink-faint">（仅活跃 key 会在 switch 时写入）</span>
+                </span>
+                <button
+                  type="button"
+                  className="text-[11px] text-ink-faint hover:text-ink"
+                  onClick={() => setMultiKeyMode(false)}
+                >
+                  折叠为单 Key
+                </button>
+              </div>
+              <div className="space-y-2">
+                {keys.map((k) => (
+                  <div key={k.id} className="flex flex-wrap items-center gap-2 rounded-md border border-line bg-card px-2 py-1.5">
+                    <button
+                      type="button"
+                      title="设为活跃"
+                      onClick={() =>
+                        setKeys(keys.map((x) => ({ ...x, is_active: x.id === k.id })))
+                      }
+                      className={cn(
+                        'h-4 w-4 shrink-0 rounded-full border',
+                        k.is_active ? 'border-accent bg-accent' : 'border-line-strong',
+                      )}
+                    />
+                    <input
+                      value={k.label}
+                      onChange={(e) =>
+                        setKeys(keys.map((x) => (x.id === k.id ? { ...x, label: e.target.value } : x)))
+                      }
+                      placeholder="备注"
+                      className="h-7 w-20 shrink-0 rounded border border-line bg-surface px-1.5 text-[12px] text-ink outline-none focus:border-accent/50"
+                    />
+                    <input
+                      type="password"
+                      value={k.key}
+                      onChange={(e) =>
+                        setKeys(keys.map((x) => (x.id === k.id ? { ...x, key: e.target.value } : x)))
+                      }
+                      placeholder="sk-..."
+                      className="h-7 min-w-0 flex-1 rounded border border-line bg-surface px-1.5 font-mono text-[12px] text-ink outline-none focus:border-accent/50"
+                    />
+                    <span className="hidden font-mono text-[10px] text-ink-faint sm:inline">
+                      {k.key ? maskApiKey(k.key) : ''}
+                    </span>
+                    <button
+                      type="button"
+                      className="text-[11px] text-danger hover:underline disabled:opacity-40"
+                      disabled={keys.length <= 1}
+                      onClick={() => {
+                        if (keys.length <= 1) return;
+                        let next = keys.filter((x) => x.id !== k.id);
+                        if (!next.some((x) => x.is_active) && next[0]) {
+                          next = next.map((x, i) => ({ ...x, is_active: i === 0 }));
+                        }
+                        setKeys(next);
+                      }}
+                    >
+                      删
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                onClick={() =>
+                  setKeys([
+                    ...keys,
+                    {
+                      id: newKeyId(),
+                      label: `key-${keys.length + 1}`,
+                      key: '',
+                      is_active: false,
+                    },
+                  ])
+                }
+              >
+                + 添加 Key
+              </Button>
+            </div>
+          )}
 
           <div className="flex flex-wrap items-center gap-2">
             <Button type="button" variant="secondary" size="sm" onClick={testConnection} disabled={checkingApi}>
-              {checkingApi ? '测试中…' : '测试模型'}
+              {checkingApi ? '测试中…' : multiKeyMode ? '测试活跃模型' : '测试模型'}
             </Button>
+            {multiKeyMode && (
+              <Button type="button" variant="ghost" size="sm" onClick={testAllKeys} disabled={checkingApi}>
+                测试全部 Key
+              </Button>
+            )}
+            {multiKeyMode && (
+              <Button type="button" variant="ghost" size="sm" onClick={failoverKeys} disabled={checkingApi}>
+                Failover
+              </Button>
+            )}
             {apiHealth && (
               <span className={cn(
                 'text-[12px]',
@@ -322,7 +572,9 @@ export function ProfileModal({
                       </button>
                     ))}
                   </div>
-                  <div className="mt-1 text-[11px] text-ink-faint">wire_api：第三方中转若不支持 Responses 选 Chat</div>
+                  <div className="mt-1 text-[11px] text-ink-faint">
+                        wire_api：默认（空）与接入一致为 Responses；第三方中转不支持时再选 Chat
+                      </div>
                 </div>
               )}
 

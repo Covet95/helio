@@ -33,8 +33,41 @@ export const tauriApi = {
   deleteProfile: (targetApp: TargetApp, name: string) =>
     command<boolean>('delete_profile', { name, targetApp }),
 
-  switchProfile: (targetApp: TargetApp, profileName: string) =>
-    command<void>('switch_profile', { targetApp, profileName }),
+  switchProfile: (targetApp: TargetApp, profileName: string, probe?: boolean) =>
+    command<void>('switch_profile', { targetApp, profileName, probe: !!probe }),
+
+  failoverProfileKeys: (targetApp: TargetApp | string, profileName: string, reSwitch?: boolean) =>
+    command<{
+      success: boolean;
+      active_key_id?: string;
+      active_label?: string;
+      tried: Array<{
+        key_id: string;
+        label: string;
+        ok: boolean;
+        error?: string;
+        endpoint?: string;
+        protocol?: string;
+      }>;
+      re_switched: boolean;
+    }>('failover_profile_keys', {
+      targetApp,
+      profileName,
+      reSwitch,
+    }),
+
+  probeActiveProfiles: () =>
+    command<Array<{
+      target_app: string;
+      configured: boolean;
+      ok: boolean;
+      profile_name?: string;
+      error?: string;
+      protocol?: string;
+      endpoint?: string;
+      latency_ms?: number;
+      probed_at: number;
+    }>>('probe_active_profiles'),
 
   copyText: (text: string) =>
     command<void>('copy_text', { text }),
@@ -43,8 +76,26 @@ export const tauriApi = {
   fetchModels: (apiUrl: string, apiKey: string) =>
     command<FetchedModel[]>('fetch_models', { apiUrl, apiKey }),
 
-  testModel: (apiUrl: string, apiKey: string, model: string, wireApi?: string) =>
-    command<ModelTestResult>('test_model', { apiUrl, apiKey, model, wireApi }),
+  testModel: (args: {
+    targetApp: TargetApp | string;
+    apiUrl: string;
+    apiKey: string;
+    model: string;
+    wireApi?: string;
+    apiMode?: string;
+    experimentalBearerToken?: string;
+    keyLabel?: string;
+  }) =>
+    command<ModelTestResult>('test_model', {
+      targetApp: args.targetApp,
+      apiUrl: args.apiUrl,
+      apiKey: args.apiKey,
+      model: args.model,
+      wireApi: args.wireApi,
+      apiMode: args.apiMode,
+      experimentalBearerToken: args.experimentalBearerToken,
+      keyLabel: args.keyLabel,
+    }),
 
   // 配置管理
 

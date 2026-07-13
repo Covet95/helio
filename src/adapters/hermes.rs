@@ -204,51 +204,67 @@ impl HermesAdapter {
         Ok(())
     }
 
-    /// Update credential_pool entries that already hold access_token so they don't shadow new keys.
-    fn sync_auth_pool(&self, provider: &str, api_key: &str, base_url: &str) -> Result<()> {
+    /// Mirror Helio keys into credential_pool[custom:<name>] as access_token entries.
+    /// Active key is written first so Hermes order-based fallback prefers it.
+    /// Creates auth.json / credential_pool when missing.
+    fn sync_auth_pool_keys(
+        &self,
+        provider: &str,
+        base_url: &str,
+        keys: &[(String, bool)], // (secret, is_active)
+    ) -> Result<()> {
         let path = self.auth_path();
-        if !path.exists() {
-            return Ok(());
+        let mut data: serde_json::Value = if path.exists() {
+            let content = fs::read_to_string(&path).context("Failed to read Hermes auth.json")?;
+            serde_json::from_str(&content).context("Failed to parse Hermes auth.json")?
+        } else {
+            serde_json::json!({})
+        };
+        if !data.is_object() {
+            data = serde_json::json!({});
         }
-        let content = fs::read_to_string(&path).context("Failed to read Hermes auth.json")?;
-        let mut data: serde_json::Value =
-            serde_json::from_str(&content).context("Failed to parse Hermes auth.json")?;
 
         let pool_key = Self::custom_provider_slug(provider);
-        let Some(pool) = data.get_mut("credential_pool") else {
-            return Ok(());
-        };
-        let Some(arr) = pool.get_mut(&pool_key).and_then(|v| v.as_array_mut()) else {
-            return Ok(());
-        };
+        let root = data.as_object_mut().unwrap();
+        if !root.contains_key("credential_pool") {
+            root.insert("credential_pool".into(), serde_json::json!({}));
+        }
+        let pool = root
+            .get_mut("credential_pool")
+            .and_then(|v| v.as_object_mut())
+            .unwrap();
 
-        let mut changed = false;
-        for entry in arr.iter_mut() {
-            let Some(obj) = entry.as_object_mut() else {
-                continue;
-            };
-            let has_token = obj
-                .get("access_token")
-                .and_then(|v| v.as_str())
-                .map(|s| !s.is_empty())
-                .unwrap_or(false);
-            if has_token {
-                obj.insert(
-                    "access_token".into(),
-                    serde_json::Value::String(api_key.to_string()),
-                );
-                obj.insert(
-                    "base_url".into(),
-                    serde_json::Value::String(base_url.to_string()),
-                );
-                changed = true;
+        // active first, then others; skip empty secrets; de-dupe by secret
+        let mut ordered: Vec<&str> = Vec::new();
+        for (secret, is_active) in keys {
+            if *is_active && !secret.trim().is_empty() {
+                ordered.push(secret.as_str());
             }
         }
-
-        if !changed {
+        for (secret, is_active) in keys {
+            if !*is_active && !secret.trim().is_empty() && !ordered.contains(&secret.as_str()) {
+                ordered.push(secret.as_str());
+            }
+        }
+        if ordered.is_empty() {
             return Ok(());
         }
 
+        let arr: Vec<serde_json::Value> = ordered
+            .into_iter()
+            .map(|secret| {
+                serde_json::json!({
+                    "access_token": secret,
+                    "base_url": base_url,
+                    "auth_type": "api_key",
+                })
+            })
+            .collect();
+        pool.insert(pool_key, serde_json::Value::Array(arr));
+
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).context("Failed to create Hermes config dir")?;
+        }
         let out =
             serde_json::to_string_pretty(&data).context("Failed to serialize Hermes auth.json")?;
         let temp = path.with_extension("json.tmp");
@@ -258,6 +274,12 @@ impl HermesAdapter {
         }
         fs::rename(&temp, &path).context("Failed to rename temp Hermes auth.json")?;
         Ok(())
+    }
+
+    /// Backward-compatible single-key sync used by older call sites/tests.
+    #[allow(dead_code)]
+    fn sync_auth_pool(&self, provider: &str, api_key: &str, base_url: &str) -> Result<()> {
+        self.sync_auth_pool_keys(provider, base_url, &[(api_key.to_string(), true)])
     }
 }
 
@@ -341,11 +363,18 @@ impl ConfigAdapter for HermesAdapter {
     }
 
     fn apply_api_credentials(&self, api_profile: &ApiProfile) -> Result<()> {
-        self.sync_auth_pool(
-            &api_profile.provider,
-            &api_profile.api_key,
-            &api_profile.api_url,
-        )
+        let mut keys: Vec<(String, bool)> = Vec::new();
+        if let Some(list) = api_profile.api_keys.as_ref() {
+            for e in list {
+                if !e.key.trim().is_empty() {
+                    keys.push((e.key.clone(), e.is_active));
+                }
+            }
+        }
+        if keys.is_empty() && !api_profile.api_key.trim().is_empty() {
+            keys.push((api_profile.api_key.clone(), true));
+        }
+        self.sync_auth_pool_keys(&api_profile.provider, &api_profile.api_url, &keys)
     }
 }
 
@@ -512,7 +541,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_auth_pool_updates_access_token() {
+    fn sync_auth_pool_mirrors_keys_and_preserves_other_providers() {
         let dir = tempfile::tempdir().unwrap();
         let adapter = HermesAdapter::with_dir(dir.path().to_path_buf());
         let auth = dir.path().join("auth.json");
@@ -526,10 +555,7 @@ mod tests {
                     "id": "abc",
                     "access_token": "old-token",
                     "base_url": "https://old.example/v1",
-                    "auth_type": "api_key",
-                    "priority": 0,
-                    "source": "manual",
-                    "label": "gpt"
+                    "auth_type": "api_key"
                   }
                 ],
                 "custom:freemodel": [
@@ -537,10 +563,7 @@ mod tests {
                     "id": "def",
                     "secret_fingerprint": "deadbeef",
                     "base_url": "https://api.freemodel.dev/v1",
-                    "auth_type": "api_key",
-                    "priority": 0,
-                    "source": "manual",
-                    "label": "freemodel"
+                    "auth_type": "api_key"
                   }
                 ]
               }
@@ -549,21 +572,42 @@ mod tests {
         .unwrap();
 
         adapter
-            .sync_auth_pool("gpt", "new-token", "https://new.example/v1")
+            .sync_auth_pool_keys(
+                "gpt",
+                "https://new.example/v1",
+                &[
+                    ("active-token".into(), true),
+                    ("backup-token".into(), false),
+                ],
+            )
             .unwrap();
         let data: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&auth).unwrap()).unwrap();
-        assert_eq!(
-            data["credential_pool"]["custom:gpt"][0]["access_token"],
-            "new-token"
-        );
-        assert_eq!(
-            data["credential_pool"]["custom:gpt"][0]["base_url"],
-            "https://new.example/v1"
-        );
-        // fingerprint-only entry untouched
+        let gpt = data["credential_pool"]["custom:gpt"].as_array().unwrap();
+        assert_eq!(gpt.len(), 2);
+        assert_eq!(gpt[0]["access_token"], "active-token");
+        assert_eq!(gpt[0]["base_url"], "https://new.example/v1");
+        assert_eq!(gpt[1]["access_token"], "backup-token");
+        // other provider untouched
         assert!(data["credential_pool"]["custom:freemodel"][0]
             .get("access_token")
             .is_none());
+    }
+
+    #[test]
+    fn sync_auth_pool_creates_file_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = HermesAdapter::with_dir(dir.path().to_path_buf());
+        adapter
+            .sync_auth_pool("cpa", "sk-only", "http://127.0.0.1:8317/v1")
+            .unwrap();
+        let auth = dir.path().join("auth.json");
+        assert!(auth.exists());
+        let data: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&auth).unwrap()).unwrap();
+        assert_eq!(
+            data["credential_pool"]["custom:cpa"][0]["access_token"],
+            "sk-only"
+        );
     }
 }

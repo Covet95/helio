@@ -4,4 +4,5 @@
 pub mod adapters;
 pub mod db;
 pub mod models;
+pub mod probe;
 pub mod utils;

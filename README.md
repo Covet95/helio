@@ -42,6 +42,37 @@ switch-api status
 switch-api export --output backup.db
 ```
 
+### 模型探活（GUI「测试模型」）
+
+探活按 **目标工具 + 协议字段** 发最小请求，与 switch 后的接入语义对齐：
+
+| 工具 | 探活协议 |
+|------|----------|
+| Claude Code | Anthropic Messages（`x-api-key`，**不**剥 `/anthropic` 后缀改打 OpenAI） |
+| Codex | `wire_api`；**空 = Responses**（与接入默认一致）；`experimental_bearer_token` 参与鉴权 |
+| Gemini | 官方 host → generateContent；自定义 URL → OpenAI chat |
+| OpenCode | OpenAI-compatible chat |
+| Hermes / OpenClaw | `api_mode`：chat / anthropic_messages / responses |
+
+「加载模型列表」仍偏 OpenAI `/models`，列表失败不代表对话不可用。
+
+### 同一 API 多 Key
+
+一个 profile 可挂多把 key，**手动选活跃 key**；`switch` 只写入活跃那一把（目标 CLI 仍是单 key）。
+
+```bash
+switch-api profile key add official --key sk-backup --label 备用 --activate
+switch-api profile key list official
+switch-api profile key use official 备用
+switch-api profile key remove official 备用
+switch-api profile key failover official          # 按序探活，成功则设活跃；已是 active 则 re-switch
+switch-api switch claude-code official --probe   # 写入前探活/failover，全失败不写
+```
+
+GUI：档案表单可「测试全部 Key」与 **Failover**；状态页 **检测可用性** 对已配置工具手动批量探活（默认不自动打外网）。
+
+Hermes switch 时会把 profile 多 key **镜像**到 `~/.hermes/auth.json` 的 `credential_pool[custom:<name>]`（活跃 key 在前）。
+
 ## 支持的工具
 
 | 工具 | 配置文件 | 格式 | API 凭据位置 |
@@ -58,7 +89,7 @@ switch-api export --output backup.db
 - **Gemini CLI**：API key 存在 `~/.gemini/.env`（不在 settings.json）。切换时只重写 `.env` 中的 `GEMINI_API_KEY` 和 `GOOGLE_GEMINI_BASE_URL`，保留其他环境变量；settings.json（mcpServers、model、security）不动。需先设 `security.auth.selectedType` 为 `gemini-api-key`。
 - **OpenCode**：profile 的 `provider` 字段（小写）作为 provider id，写入 `provider.<id>.options`。切换某个 provider 不影响其他 provider，mcp/permission/tools/agent 全部保留。
 - **Codex**：API key 存在 `~/.codex/auth.json` 的 `OPENAI_API_KEY`（不在 config.toml）。切换时只重写 auth.json 的 key 与 `config.toml` 中对应 provider 的 `base_url`，保留 `wire_api` 等协议字段、MCP servers、projects 等共享配置。TOML 往返会规范化格式并丢失注释（可在 `config.backup.*.toml` 中找回）。
-- **Hermes**：MVP 支持 custom OpenAI-compatible endpoint。profile 的 `provider` 为 custom 名（如 `freemodel`），写入 `model.provider: custom:freemodel`、`model.default`，并 upsert `custom_providers` 中对应项的 `base_url`/`api_key`/`api_mode`；`context_1m` 写入 `model.context_length`（1M）并镜像到当前 custom provider 条目。mcp_servers、skills、agent、platforms 等保留。若 `auth.json` credential_pool 中该 custom 已有 `access_token`，会同步更新以免 pool 影子旧 key。YAML 写回会丢失注释（可在 `config.backup.*.yaml` 找回）。已开 session 需新会话或 `hermes gateway restart` 才读新配置。
+- **Hermes**：MVP 支持 custom OpenAI-compatible endpoint。profile 的 `provider` 为 custom 名（如 `freemodel`），写入 `model.provider: custom:freemodel`、`model.default`，并 upsert `custom_providers` 中对应项的 `base_url`/`api_key`/`api_mode`；`context_1m` 写入 `model.context_length`（1M）并镜像到当前 custom provider 条目。mcp_servers、skills、agent、platforms 等保留。switch 时把 Helio 多 key **整表镜像**到 `auth.json` 的 `credential_pool[custom:<name>]`（活跃 key 在前；无文件则创建）。YAML 写回会丢失注释（可在 `config.backup.*.yaml` 找回）。已开 session 需新会话或 `hermes gateway restart` 才读新配置。
 - **OpenClaw**：MVP 支持 `models.providers.<id>` custom provider。profile 的 `provider` 为 provider id（如 `cpa`），写入 `baseUrl`/`apiKey`/`api`，并设 `agents.defaults.model.primary = provider/model`；保留 fallbacks、mcp、channels、skills。若存在 `agents/main/agent/models.json` 会同步该 provider。`context_1m` 写入 `models[].contextWindow`（1M）及 `agents.defaults.contextTokens`；`max_tokens`（OpenClaw 专用）写入 `models[].maxTokens`（默认新建 128000）。已开 gateway 可能需重启才读新配置。
 
 ## 架构
@@ -80,6 +111,7 @@ Shared Config (permissions, hooks, MCP, skills)
 - [x] GUI（Tauri）
 - [x] Hermes 适配器（custom endpoint MVP）
 - [x] OpenClaw 适配器（custom provider MVP）
+- [x] 探活按工具协议对齐 + 同 API 多 Key 池
 - [ ] MCP 统一管理面板 / Proxy 模式 / Usage 统计
 
 ## 许可证
