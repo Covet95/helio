@@ -511,6 +511,182 @@ pub async fn probe_with_params(
     })
 }
 
+// ─── Reachability（对齐 CC Switch stream_check）────────────────────────────
+//
+// 仅探测 api_url / base_url 是否可达，**不发送真实大模型请求、不校验鉴权**：
+// - 收到任意 HTTP 响应（200/4xx/5xx）即判定「可达」；
+// - 仅 DNS / 连接被拒 / TLS / 超时等网络级错误判定「不可达」；
+// - 延迟 = 收到响应头的耗时（TTFB）。
+// 与 CC Switch `services/stream_check.rs` 同语义；熔断/鉴权仍由真实流量路径负责。
+
+/// 可达性健康档位（对齐 CC Switch HealthStatus）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReachabilityStatus {
+    Operational,
+    Degraded,
+    Failed,
+}
+
+/// 可达性探测结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReachabilityResult {
+    pub status: ReachabilityStatus,
+    pub success: bool,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_time_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
+    pub tested_at: i64,
+    pub retry_count: u32,
+    /// 实际探测的 URL
+    pub endpoint: String,
+}
+
+/// 可达性探测配置（对齐 CC Switch StreamCheckConfig 默认）
+#[derive(Debug, Clone)]
+pub struct ReachabilityConfig {
+    pub timeout_secs: u64,
+    pub max_retries: u32,
+    /// TTFB 超过此毫秒标 degraded（默认 6000，与 CC Switch 一致）
+    pub degraded_threshold_ms: u64,
+}
+
+impl Default for ReachabilityConfig {
+    fn default() -> Self {
+        Self {
+            timeout_secs: 8,
+            max_retries: 1,
+            degraded_threshold_ms: 6000,
+        }
+    }
+}
+
+fn should_retry_reachability(msg: &str) -> bool {
+    let lower = msg.to_lowercase();
+    lower.contains("timeout") || lower.contains("abort") || lower.contains("timed out")
+}
+
+fn map_reachability_error(e: reqwest::Error) -> String {
+    if e.is_timeout() {
+        "Request timeout".into()
+    } else if e.is_connect() {
+        format!("Connection failed: {e}")
+    } else {
+        e.to_string()
+    }
+}
+
+/// GET `api_url`：任意 HTTP 响应 = 可达；仅网络错误 = 失败。
+/// 超时类失败最多重试 `max_retries` 次。
+pub async fn probe_reachability(
+    api_url: &str,
+    config: &ReachabilityConfig,
+) -> ReachabilityResult {
+    let endpoint = api_url.trim().trim_end_matches('/').to_string();
+    let tested_at = chrono::Utc::now().timestamp();
+    if endpoint.is_empty() {
+        return ReachabilityResult {
+            status: ReachabilityStatus::Failed,
+            success: false,
+            message: "base_url 为空".into(),
+            response_time_ms: None,
+            http_status: None,
+            tested_at,
+            retry_count: 0,
+            endpoint,
+        };
+    }
+
+    let timeout = std::time::Duration::from_secs(config.timeout_secs);
+    let mut last: Option<ReachabilityResult> = None;
+
+    for attempt in 0..=config.max_retries {
+        let start = std::time::Instant::now();
+        let client = match http_client(&endpoint) {
+            Ok(c) => c,
+            Err(e) => {
+                return ReachabilityResult {
+                    status: ReachabilityStatus::Failed,
+                    success: false,
+                    message: e,
+                    response_time_ms: None,
+                    http_status: None,
+                    tested_at,
+                    retry_count: attempt,
+                    endpoint,
+                };
+            }
+        };
+
+        // 覆盖默认 15s client timeout，用可达性专用短超时
+        let mut builder = reqwest::Client::builder().timeout(timeout);
+        if is_local_url(&endpoint) {
+            builder = builder.no_proxy();
+        }
+        let client = builder.build().unwrap_or(client);
+
+        let result = client
+            .get(&endpoint)
+            .header("accept", "*/*")
+            .header("accept-encoding", "identity")
+            .send()
+            .await;
+
+        let response_time = start.elapsed().as_millis() as u64;
+        match result {
+            Ok(resp) => {
+                let status_code = resp.status().as_u16();
+                let status = if response_time <= config.degraded_threshold_ms {
+                    ReachabilityStatus::Operational
+                } else {
+                    ReachabilityStatus::Degraded
+                };
+                return ReachabilityResult {
+                    status,
+                    success: true,
+                    message: "Reachable".into(),
+                    response_time_ms: Some(response_time),
+                    http_status: Some(status_code),
+                    tested_at,
+                    retry_count: attempt,
+                    endpoint,
+                };
+            }
+            Err(e) => {
+                let msg = map_reachability_error(e);
+                let r = ReachabilityResult {
+                    status: ReachabilityStatus::Failed,
+                    success: false,
+                    message: msg.clone(),
+                    response_time_ms: Some(response_time),
+                    http_status: None,
+                    tested_at,
+                    retry_count: attempt,
+                    endpoint: endpoint.clone(),
+                };
+                if should_retry_reachability(&msg) && attempt < config.max_retries {
+                    last = Some(r);
+                    continue;
+                }
+                return r;
+            }
+        }
+    }
+
+    last.unwrap_or(ReachabilityResult {
+        status: ReachabilityStatus::Failed,
+        success: false,
+        message: "Check failed".into(),
+        response_time_ms: None,
+        http_status: None,
+        tested_at,
+        retry_count: config.max_retries,
+        endpoint,
+    })
+}
+
 /// 单把 key 的探活结果（failover / 批量）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyProbeResult {
@@ -744,5 +920,36 @@ mod tests {
             chat_completions_url_compat("https://open.bigmodel.cn/api/anthropic"),
             "https://open.bigmodel.cn/api/paas/v4/chat/completions"
         );
+    }
+
+    // ── reachability (CC Switch stream_check semantics) ──
+
+    #[test]
+    fn reachability_default_config_matches_cc_switch() {
+        let c = ReachabilityConfig::default();
+        assert_eq!(c.timeout_secs, 8);
+        assert_eq!(c.max_retries, 1);
+        assert_eq!(c.degraded_threshold_ms, 6000);
+    }
+
+    #[test]
+    fn reachability_should_retry_only_timeouts() {
+        assert!(should_retry_reachability("Request timeout"));
+        assert!(should_retry_reachability("request timed out"));
+        assert!(should_retry_reachability("connection abort"));
+        assert!(!should_retry_reachability("Connection failed: dns error"));
+        assert!(!should_retry_reachability("Reachable"));
+    }
+
+    #[test]
+    fn reachability_empty_url_fails() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let r = rt.block_on(probe_reachability("  ", &ReachabilityConfig::default()));
+        assert!(!r.success);
+        assert_eq!(r.status, ReachabilityStatus::Failed);
+        assert!(r.message.contains("空") || r.message.to_lowercase().contains("empty"));
     }
 }

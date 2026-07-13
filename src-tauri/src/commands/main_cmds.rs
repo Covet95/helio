@@ -1325,27 +1325,35 @@ pub async fn failover_profile_keys(
 pub struct ToolProbeResult {
     pub target_app: String,
     pub configured: bool,
+    /// 与 CC Switch stream_check 一致：任意 HTTP 响应 = 可达
     pub ok: bool,
+    /// operational | degraded | failed（对齐 CC Switch HealthStatus）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// 保留字段；可达性探测不验协议，恒为 "reachability"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latency_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
     pub probed_at: i64,
 }
 
 
-/// 状态页「检测可用性」：对每个已配置工具用活跃 key 探活一次。
+/// 状态页「检测可用性」：对齐 CC Switch stream_check。
+/// 对每个已配置工具的 `api_url` 做 GET 可达性探测（不发模型请求、不验 key）。
 #[tauri::command]
 pub async fn probe_active_profiles(
     state: State<'_, AppState>,
 ) -> Result<Vec<ToolProbeResult>, String> {
-    use crate::model_fetch::probe_with_params;
+    use crate::model_fetch::{probe_reachability, ReachabilityConfig};
 
     let snapshots: Vec<(TargetApp, Option<ApiProfile>)> = {
         let db = state.db.lock().map_err(|e| e.to_string())?;
@@ -1365,7 +1373,7 @@ pub async fn probe_active_profiles(
         out
     };
 
-    let now = chrono::Utc::now().timestamp();
+    let cfg = ReachabilityConfig::default();
     let mut results = Vec::new();
     for (target, profile) in snapshots {
         let app = target.as_str().to_string();
@@ -1374,68 +1382,53 @@ pub async fn probe_active_profiles(
                 target_app: app,
                 configured: false,
                 ok: false,
+                status: None,
                 profile_name: None,
                 error: None,
                 protocol: None,
                 endpoint: None,
                 latency_ms: None,
-                probed_at: now,
+                http_status: None,
+                probed_at: chrono::Utc::now().timestamp(),
             });
             continue;
         };
-        let model = model_for_probe(&profile);
-        if model.is_empty() {
+        let url = profile.api_url.trim();
+        if url.is_empty() {
             results.push(ToolProbeResult {
                 target_app: app,
                 configured: true,
                 ok: false,
+                status: Some("failed".into()),
                 profile_name: Some(profile.name),
-                error: Some("未设置模型，跳过探活".into()),
-                protocol: None,
+                error: Some("API URL 为空".into()),
+                protocol: Some("reachability".into()),
                 endpoint: None,
                 latency_ms: None,
-                probed_at: now,
+                http_status: None,
+                probed_at: chrono::Utc::now().timestamp(),
             });
             continue;
         }
-        let (wire, mode, exp) = profile_protocol_fields(&profile);
-        let start = std::time::Instant::now();
-        let res = probe_with_params(
-            &app,
-            &profile.api_url,
-            profile.active_key(),
-            &model,
-            wire.as_deref(),
-            mode.as_deref(),
-            exp.as_deref(),
-            None,
-        )
-        .await;
-        let latency = start.elapsed().as_millis() as u64;
-        match res {
-            Ok(ok) => results.push(ToolProbeResult {
-                target_app: app,
-                configured: true,
-                ok: true,
-                profile_name: Some(profile.name),
-                error: None,
-                protocol: Some(ok.protocol),
-                endpoint: Some(ok.endpoint),
-                latency_ms: Some(latency),
-                probed_at: now,
-            }),
-            Err(e) => results.push(ToolProbeResult {
-                target_app: app,
-                configured: true,
-                ok: false,
-                profile_name: Some(profile.name),
-                error: Some(e),
-                protocol: None,
-                endpoint: None,
-                latency_ms: Some(latency),
-                probed_at: now,
-            }),
-        }
+        let r = probe_reachability(url, &cfg).await;
+        let status_str = match r.status {
+            switch_api::probe::ReachabilityStatus::Operational => "operational",
+            switch_api::probe::ReachabilityStatus::Degraded => "degraded",
+            switch_api::probe::ReachabilityStatus::Failed => "failed",
+        };
+        results.push(ToolProbeResult {
+            target_app: app,
+            configured: true,
+            ok: r.success,
+            status: Some(status_str.into()),
+            profile_name: Some(profile.name),
+            error: if r.success { None } else { Some(r.message) },
+            protocol: Some("reachability".into()),
+            endpoint: Some(r.endpoint),
+            latency_ms: r.response_time_ms,
+            http_status: r.http_status,
+            probed_at: r.tested_at,
+        });
     }
     Ok(results)
 }

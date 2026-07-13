@@ -46,7 +46,7 @@ export default function StatusPage() {
           <div className="flex items-center gap-2">
             <Button variant="secondary" onClick={runProbe} disabled={probing}>
               <Activity size={15} className={probing ? 'animate-pulse' : ''} />
-              {probing ? '检测中…' : '检测可用性'}
+              {probing ? '检测中…' : '检测连通性'}
             </Button>
             <Button variant="secondary" onClick={fetchStatus}>
               <RefreshCw size={15} className={loadingStatus ? 'animate-spin' : ''} />
@@ -110,16 +110,22 @@ function ToolCard({
   probe?: ToolProbeResult;
 }) {
   const configured = !!(status?.profile || status?.connected);
+  // 对齐 CC Switch：operational / degraded / failed
   let badge = configured ? '已配置' : '未设置';
   let badgeClass = configured ? 'text-ok' : 'text-ink-faint';
   let dotClass = configured ? 'bg-ok' : 'bg-ink-faint/40';
   if (probe) {
-    if (probe.ok) {
-      badge = probe.latency_ms != null ? `可用 ${probe.latency_ms}ms` : '可用';
+    const ms = probe.latency_ms != null ? ` ${probe.latency_ms}ms` : '';
+    if (probe.ok && probe.status === 'degraded') {
+      badge = `较慢${ms}`;
+      badgeClass = 'text-warn';
+      dotClass = 'bg-warn';
+    } else if (probe.ok) {
+      badge = `可达${ms}`;
       badgeClass = 'text-ok';
       dotClass = 'bg-ok';
     } else if (probe.configured) {
-      badge = '探活失败';
+      badge = '不可达';
       badgeClass = 'text-danger';
       dotClass = 'bg-danger';
     }
@@ -152,8 +158,10 @@ function ToolCard({
           <Row label="Profile" value={status.profile.name} strong />
           <Row label="Provider" value={status.profile.provider} />
           <Row label="URL" value={status.profile.api_url} mono />
-          {probe?.protocol && <Row label="协议" value={probe.protocol} mono />}
-          {probe?.error && <Row label="探活错误" value={probe.error} />}
+          {probe?.http_status != null && (
+            <Row label="HTTP" value={String(probe.http_status)} mono />
+          )}
+          {probe?.error && <Row label="错误" value={probe.error} />}
         </div>
       ) : (
         <div className="relative mt-4 text-[12px] text-ink-faint">未设置</div>

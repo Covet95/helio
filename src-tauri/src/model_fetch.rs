@@ -1,7 +1,8 @@
 //! Tauri 包装：模型列表 + 探活（核心逻辑在 switch_api::probe）
 
 pub use switch_api::probe::{
-    probe_with_params, FailoverResult, KeyProbeResult, ModelTestResult,
+    probe_reachability, probe_with_params, FailoverResult, KeyProbeResult, ModelTestResult,
+    ReachabilityConfig, ReachabilityResult, ReachabilityStatus,
 };
 
 use serde::{Deserialize, Serialize};

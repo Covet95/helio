@@ -69,7 +69,16 @@ switch-api profile key failover official          # 按序探活，成功则设�
 switch-api switch claude-code official --probe   # 写入前探活/failover，全失败不写
 ```
 
-GUI：档案表单可「测试全部 Key」与 **Failover**；状态页 **检测可用性** 对已配置工具手动批量探活（默认不自动打外网）。
+GUI：档案表单可「测试全部 Key」与 **Failover**（协议级探活，会发最小模型请求）。
+
+### 状态页「检测连通性」（对齐 CC Switch stream_check）
+
+对每个已配置工具的 `api_url` 做 **GET 可达性**探测（默认不自动打外网，需手动点按钮）：
+
+- 任意 HTTP 响应（含 401/403/404）= **可达**；仅 DNS/连接/TLS/超时 = **不可达**
+- 不校验 API Key、不发对话请求（可达 ≠ 配置正确）
+- 超时 8s、超时重试 1 次；TTFB > 6000ms 标为「较慢」
+- 与档案表单「测试模型」职责分离：前者「能不能到」，后者「能不能用」
 
 Hermes switch 时会把 profile 多 key **镜像**到 `~/.hermes/auth.json` 的 `credential_pool[custom:<name>]`（活跃 key 在前）。
 

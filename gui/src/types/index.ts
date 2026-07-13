@@ -101,15 +101,23 @@ export interface TargetStatus {
   latency_ms?: number | null;
 }
 
+/** 对齐 CC Switch HealthStatus：operational | degraded | failed */
+export type ReachabilityStatus = 'operational' | 'degraded' | 'failed';
+
 export interface ToolProbeResult {
   target_app: string;
   configured: boolean;
+  /** 任意 HTTP 响应 = 可达（与 CC Switch stream_check 一致） */
   ok: boolean;
+  /** operational | degraded | failed */
+  status?: ReachabilityStatus | string;
   profile_name?: string;
   error?: string;
+  /** 可达性探测恒为 "reachability" */
   protocol?: string;
   endpoint?: string;
   latency_ms?: number;
+  http_status?: number;
   probed_at: number;
 }
 

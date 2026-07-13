@@ -57,17 +57,7 @@ export const tauriApi = {
     }),
 
   probeActiveProfiles: () =>
-    command<Array<{
-      target_app: string;
-      configured: boolean;
-      ok: boolean;
-      profile_name?: string;
-      error?: string;
-      protocol?: string;
-      endpoint?: string;
-      latency_ms?: number;
-      probed_at: number;
-    }>>('probe_active_profiles'),
+    command<import('@/types').ToolProbeResult[]>('probe_active_profiles'),
 
   copyText: (text: string) =>
     command<void>('copy_text', { text }),
