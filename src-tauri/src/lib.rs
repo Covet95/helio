@@ -31,6 +31,7 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            // 关红叉 → 隐藏到状态栏，不退出（tray 应用常见行为）
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
@@ -69,6 +70,20 @@ pub fn run() {
             session_history::delete_sessions,
             session_history::cleanup_sessions,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        // build + run 回调：处理 macOS Dock 点击（applicationShouldHandleReopen）。
+        // 关窗 hide 后 has_visible_windows=false，必须主动 show，否则点 Dock 无反应。
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen {
+                has_visible_windows,
+                ..
+            } = event
+            {
+                if !has_visible_windows {
+                    tray::show_main_window(app);
+                }
+            }
+        });
 }
