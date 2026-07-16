@@ -485,6 +485,16 @@ fn cmd_profile_delete(db: &Database, name: String, target_app: Option<String>, f
             return Ok(());
         }
     }
+    // OpenCode：删档案 + 无共用时清本地 provider（统一入口，与 GUI 共用）
+    if target == TargetApp::OpenCode {
+        if crate::adapters::opencode::OpenCodeAdapter::delete_profile_and_cleanup_local(db, &name)?
+        {
+            utils::success(&format!("已删除 Profile: {} ({})", name, target));
+        } else {
+            utils::warning(&format!("未找到 Profile: {} ({})", name, target));
+        }
+        return Ok(());
+    }
     if db.delete_profile(&name, target)? {
         utils::success(&format!("已删除 Profile: {} ({})", name, target));
     } else {

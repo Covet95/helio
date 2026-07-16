@@ -355,6 +355,12 @@ pub async fn delete_profile(name: String, target_app: String, state: State<'_, A
     let target = TargetApp::from_str(&target_app)
         .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
+    if target == TargetApp::OpenCode {
+        return switch_api::adapters::opencode::OpenCodeAdapter::delete_profile_and_cleanup_local(
+            &db, &name,
+        )
+        .map_err(|e| format!("删除 OpenCode 档案失败: {e}"));
+    }
     db.delete_profile(&name, target).map_err(|e| e.to_string())
 }
 

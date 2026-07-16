@@ -75,11 +75,127 @@ impl OpenCodeAdapter {
 
     /// 从 profile.provider 推导 OpenCode provider id（小写）
     fn provider_id(api_profile: &ApiProfile) -> String {
-        if api_profile.provider.is_empty() {
+        Self::normalize_provider_id(&api_profile.provider)
+    }
+
+    /// provider 名 → OpenCode 配置里的 id（空 → "custom"，其余小写）
+    pub fn normalize_provider_id(provider: &str) -> String {
+        if provider.is_empty() {
             "custom".to_string()
         } else {
-            api_profile.provider.to_lowercase()
+            provider.to_lowercase()
         }
+    }
+
+    /// 从配置 JSON 中移除指定 provider；若顶层 model/small_model 指向它也一并清掉。
+    /// 不写盘，纯函数便于单测。
+    pub fn remove_provider_from_config(
+        config: &serde_json::Value,
+        provider_id: &str,
+    ) -> serde_json::Value {
+        let pid = Self::normalize_provider_id(provider_id);
+        let mut config = config.clone();
+
+        if let Some(providers) = config.get_mut("provider").and_then(|v| v.as_object_mut()) {
+            providers.remove(&pid);
+        }
+
+        // model / small_model 格式为 provider/model；指向被删 id 时清掉，避免脏引用
+        for key in ["model", "small_model"] {
+            let should_clear = config
+                .get(key)
+                .and_then(|v| v.as_str())
+                .and_then(|m| m.split_once('/'))
+                .map(|(p, _)| p.eq_ignore_ascii_case(&pid))
+                .unwrap_or(false);
+            if should_clear {
+                if let Some(obj) = config.as_object_mut() {
+                    obj.remove(key);
+                }
+            }
+        }
+
+        config
+    }
+
+    /// 剩余档案里是否还有 OpenCode 工具、且 provider id 相同的条目。
+    /// 删除档案后若仍有人用同一 provider，就不该动本地 opencode.json。
+    pub fn provider_still_used(remaining: &[ApiProfile], provider_id: &str) -> bool {
+        let pid = Self::normalize_provider_id(provider_id);
+        remaining.iter().any(|p| {
+            p.target_app == Some(crate::models::TargetApp::OpenCode)
+                && Self::normalize_provider_id(&p.provider) == pid
+        })
+    }
+
+    /// 读盘 → 移除 provider → 备份 → 写回。目标不存在视为成功。
+    pub fn remove_provider(&self, provider_id: &str) -> Result<()> {
+        let pid = Self::normalize_provider_id(provider_id);
+        let config = self.read_config()?;
+        let present = config
+            .get("provider")
+            .and_then(|p| p.as_object())
+            .map(|m| m.contains_key(&pid))
+            .unwrap_or(false);
+        if !present {
+            return Ok(());
+        }
+        if self.config_path().exists() {
+            let _ = self.backup_config();
+        }
+        let next = Self::remove_provider_from_config(&config, &pid);
+        self.write_config(&next)
+    }
+
+    /// Helio 删掉某 OpenCode 档案后：若库里已无同 provider 的档案，同步清本地 provider 块。
+    pub fn cleanup_local_provider_if_unused(
+        db: &crate::db::Database,
+        provider: &str,
+    ) -> Result<()> {
+        let remaining = db.list_profiles()?;
+        if Self::provider_still_used(&remaining, provider) {
+            return Ok(());
+        }
+        Self::new().remove_provider(provider)
+    }
+
+    /// 删除 OpenCode 档案的统一入口：先删 DB，再按需清本地 provider。
+    /// CLI / GUI 共用，避免删前取 provider 的逻辑分叉。
+    ///
+    /// 返回值：档案是否存在并已删除。
+    pub fn delete_profile_and_cleanup_local(
+        db: &crate::db::Database,
+        name: &str,
+    ) -> Result<bool> {
+        let provider = db
+            .get_profile_by_name_and_target(name, crate::models::TargetApp::OpenCode)
+            .ok()
+            .map(|p| p.provider);
+        let deleted = db.delete_profile(name, crate::models::TargetApp::OpenCode)?;
+        if deleted {
+            if let Some(provider) = provider {
+                Self::cleanup_local_provider_if_unused(db, &provider)?;
+            }
+        }
+        Ok(deleted)
+    }
+
+    /// 规范化 OpenCode openai-compatible 的 baseURL。
+    ///
+    /// OpenCode 默认 `npm = @ai-sdk/openai-compatible` 会把路径拼成
+    /// `{baseURL}/chat/completions`。若 base 只有域名（如 Hermes 常见的
+    /// `https://host`），就会打到站点 HTML 而不是 API。
+    /// 因此：去掉尾斜杠后，若尚未是版本根（`/v1` 或 `/paas/v4`）则补 `/v1`。
+    /// 已带 `/v1` 的保持原样，避免出现 `/v1/v1`。
+    fn normalize_openai_compatible_base_url(api_url: &str) -> String {
+        let base = api_url.trim().trim_end_matches('/');
+        if base.is_empty() {
+            return String::new();
+        }
+        if base.ends_with("/v1") || base.ends_with("/paas/v4") {
+            return base.to_string();
+        }
+        format!("{base}/v1")
     }
 
     /// 把单个 Claude MCP server 转成 OpenCode 格式。
@@ -236,7 +352,9 @@ impl ConfigAdapter for OpenCodeAdapter {
                     );
                     opt.insert(
                         "baseURL".to_string(),
-                        serde_json::Value::String(api_profile.api_url.clone()),
+                        serde_json::Value::String(Self::normalize_openai_compatible_base_url(
+                            &api_profile.api_url,
+                        )),
                     );
                 }
 
@@ -395,6 +513,86 @@ mod tests {
             api_key: "sk-test-key".to_string(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_normalize_openai_compatible_base_url() {
+        assert_eq!(
+            OpenCodeAdapter::normalize_openai_compatible_base_url("https://api.astrdark.cyou"),
+            "https://api.astrdark.cyou/v1"
+        );
+        assert_eq!(
+            OpenCodeAdapter::normalize_openai_compatible_base_url("https://api.astrdark.cyou/"),
+            "https://api.astrdark.cyou/v1"
+        );
+        assert_eq!(
+            OpenCodeAdapter::normalize_openai_compatible_base_url("https://api.astrdark.cyou/v1"),
+            "https://api.astrdark.cyou/v1"
+        );
+        assert_eq!(
+            OpenCodeAdapter::normalize_openai_compatible_base_url("https://api.astrdark.cyou/v1/"),
+            "https://api.astrdark.cyou/v1"
+        );
+        assert_eq!(
+            OpenCodeAdapter::normalize_openai_compatible_base_url("http://127.0.0.1:8317/v1"),
+            "http://127.0.0.1:8317/v1"
+        );
+        assert_eq!(
+            OpenCodeAdapter::normalize_openai_compatible_base_url("https://dashscope.aliyuncs.com/compatible-mode/v1"),
+            "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        );
+        assert_eq!(
+            OpenCodeAdapter::normalize_openai_compatible_base_url(
+                "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation/paas/v4"
+            ),
+            "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation/paas/v4"
+        );
+        assert_eq!(
+            OpenCodeAdapter::normalize_openai_compatible_base_url("  https://host.example  "),
+            "https://host.example/v1"
+        );
+        assert_eq!(
+            OpenCodeAdapter::normalize_openai_compatible_base_url(""),
+            ""
+        );
+        assert_eq!(
+            OpenCodeAdapter::normalize_openai_compatible_base_url("   "),
+            ""
+        );
+    }
+
+    #[test]
+    fn test_merge_appends_v1_when_api_url_has_no_version_root() {
+        // 与 Hermes 习惯对齐：用户只填域名时，OpenCode 写入须补 /v1，
+        // 否则 @ai-sdk/openai-compatible 会打到 /chat/completions 站点 HTML。
+        let adapter = OpenCodeAdapter::new();
+        let profile = ApiProfile {
+            api_url: "https://api.astrdark.cyou".to_string(),
+            provider: "openai".to_string(),
+            model: Some("grok-4.5".to_string()),
+            ..sample_profile()
+        };
+        let merged = adapter.merge_config(&profile, &serde_json::json!({}));
+        assert_eq!(
+            merged["provider"]["openai"]["options"]["baseURL"],
+            "https://api.astrdark.cyou/v1"
+        );
+        assert_eq!(merged["model"], "openai/grok-4.5");
+    }
+
+    #[test]
+    fn test_merge_does_not_double_append_v1() {
+        let adapter = OpenCodeAdapter::new();
+        let profile = ApiProfile {
+            api_url: "https://api.astrdark.cyou/v1".to_string(),
+            provider: "openai".to_string(),
+            ..sample_profile()
+        };
+        let merged = adapter.merge_config(&profile, &serde_json::json!({}));
+        assert_eq!(
+            merged["provider"]["openai"]["options"]["baseURL"],
+            "https://api.astrdark.cyou/v1"
+        );
     }
 
     #[test]
@@ -735,4 +933,89 @@ mod tests {
         assert_eq!(config["mcp"]["foo"]["command"], serde_json::json!(["a"]));
         assert_eq!(config["model"], "x/y");
     }
+
+    #[test]
+    fn test_remove_provider_from_config_removes_only_target() {
+        let config = serde_json::json!({
+            "provider": {
+                "cpa": { "options": { "apiKey": "k1", "baseURL": "http://127.0.0.1:8317/v1" } },
+                "openai": { "options": { "apiKey": "k2", "baseURL": "https://api.example/v1" } }
+            },
+            "model": "cpa/claude-opus-4-8",
+            "small_model": "cpa/haiku",
+            "mcp": { "bing-search": { "type": "local", "command": ["npx"] } }
+        });
+        let out = OpenCodeAdapter::remove_provider_from_config(&config, "cpa");
+        assert!(out["provider"].get("cpa").is_none());
+        assert!(out["provider"].get("openai").is_some());
+        // 顶层 model / small_model 指向被删 provider 时一并清掉
+        assert!(out.get("model").is_none());
+        assert!(out.get("small_model").is_none());
+        // 其它配置保留
+        assert_eq!(out["mcp"]["bing-search"]["type"], "local");
+    }
+
+    #[test]
+    fn test_remove_provider_keeps_model_for_other_provider() {
+        let config = serde_json::json!({
+            "provider": {
+                "cpa": { "options": {} },
+                "openai": { "options": {} }
+            },
+            "model": "openai/grok-4.5",
+            "small_model": "openai/mini"
+        });
+        let out = OpenCodeAdapter::remove_provider_from_config(&config, "cpa");
+        assert!(out["provider"].get("cpa").is_none());
+        assert_eq!(out["model"], "openai/grok-4.5");
+        assert_eq!(out["small_model"], "openai/mini");
+    }
+
+    #[test]
+    fn test_remove_provider_normalizes_case_and_missing_is_noop() {
+        let config = serde_json::json!({
+            "provider": { "openai": { "options": { "apiKey": "k" } } },
+            "model": "openai/x"
+        });
+        // 大小写归一
+        let out = OpenCodeAdapter::remove_provider_from_config(&config, "OpenAI");
+        assert!(out["provider"].get("openai").is_none());
+        assert!(out.get("model").is_none());
+
+        // 不存在的 provider：不改其它内容
+        let out2 = OpenCodeAdapter::remove_provider_from_config(&config, "cpa");
+        assert!(out2["provider"].get("openai").is_some());
+        assert_eq!(out2["model"], "openai/x");
+    }
+
+    #[test]
+    fn test_opencode_provider_still_used_by_remaining_profiles() {
+        // 同 provider 还有别的档案时，不应清本地
+        let remaining = vec![
+            ApiProfile {
+                name: "a".into(),
+                provider: "CPA".into(),
+                target_app: Some(crate::models::TargetApp::OpenCode),
+                ..sample_profile()
+            },
+            ApiProfile {
+                name: "b".into(),
+                provider: "openai".into(),
+                target_app: Some(crate::models::TargetApp::OpenCode),
+                ..sample_profile()
+            },
+        ];
+        assert!(OpenCodeAdapter::provider_still_used(&remaining, "cpa"));
+        assert!(OpenCodeAdapter::provider_still_used(&remaining, "CPA"));
+        assert!(!OpenCodeAdapter::provider_still_used(&remaining, "anthropic"));
+        // 其它工具的同名 provider 不算
+        let mixed = vec![ApiProfile {
+            name: "c".into(),
+            provider: "cpa".into(),
+            target_app: Some(crate::models::TargetApp::Hermes),
+            ..sample_profile()
+        }];
+        assert!(!OpenCodeAdapter::provider_still_used(&mixed, "cpa"));
+    }
+
 }
