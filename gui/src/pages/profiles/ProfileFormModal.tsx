@@ -4,7 +4,13 @@ import { SUPPORTED_TOOLS } from '../../types';
 import { Button } from '../../components/common/Button';
 import { Modal, Field } from '../../components/common/Modal';
 import { PROVIDER_PRESETS, REASONING_LEVELS } from '../../lib/presets';
-import { cn, maskApiKey } from '../../lib/utils';
+import { cn, maskApiKey, humanizeError } from '../../lib/utils';
+import {
+  contextModeFromBool,
+  contextModeToBool,
+  contextPreviewLine,
+  type ContextMode,
+} from '../../lib/contextWindow';
 import { emptyProfileForTool } from './helpers';
 
 function newKeyId(): string {
@@ -91,7 +97,7 @@ export function ProfileModal({
       setModels(list);
       if (list.length === 0) setModelErr('该端点没有返回模型');
     } catch (e) {
-      setModelErr(String(e));
+      setModelErr(humanizeError(e));
       setModels([]);
     } finally {
       setLoadingModels(false);
@@ -253,7 +259,17 @@ export function ProfileModal({
                   <button
                     key={t.id}
                     type="button"
-                    onClick={() => setTool(t.id)}
+                    onClick={() => {
+                      setTool(t.id);
+                      if (!initialProfile) {
+                        const base = emptyProfileForTool(t.id);
+                        setForm(withActiveKey(base, ensureKeyPool(base)));
+                        setModels([]);
+                        setModelErr('');
+                        setApiHealth(null);
+                        setMultiKeyMode(false);
+                      }
+                    }}
                     className={`whitespace-nowrap rounded-md px-3 py-1.5 text-[12.5px] font-medium border transition-all ${
                       tool === t.id ? 'border-accent text-accent bg-accent/8' : 'border-line text-ink-dim hover:border-line-strong'
                     }`}
@@ -611,26 +627,37 @@ export function ProfileModal({
                       <code className="font-mono">model.provider=custom:&lt;name&gt;</code>
                     </div>
                   </div>
-                  <label className="flex cursor-pointer items-center justify-between">
-                    <div>
-                      <div className="text-[13px] font-medium text-ink">1M 上下文 (context_length)</div>
-                      <div className="text-[11px] text-ink-faint">
-                        开启后写入 <code className="font-mono">model.context_length=1000000</code>
-                        ，并镜像到当前 <code className="font-mono">custom_providers[]</code> 条目
-                      </div>
+                  <div>
+                    <div className="mb-1.5 text-[13px] font-medium text-ink">上下文窗口 (context_length)</div>
+                    <div className="mb-2 flex gap-1.5">
+                      {([
+                        { mode: '1m' as ContextMode, label: '1M' },
+                        { mode: 'standard' as ContextMode, label: '标准' },
+                        { mode: 'unset' as ContextMode, label: '不修改' },
+                      ]).map((opt) => {
+                        const cur = contextModeFromBool(form.context_1m);
+                        return (
+                          <button
+                            key={opt.mode}
+                            type="button"
+                            onClick={() => setForm({ ...form, context_1m: contextModeToBool(opt.mode) })}
+                            className={`flex-1 rounded-md border px-2 py-1.5 text-[12px] font-medium transition-all ${
+                              cur === opt.mode
+                                ? 'border-accent bg-accent/8 text-accent'
+                                : 'border-line text-ink-dim hover:border-line-strong'
+                            }`}
+                          >
+                            {opt.label}
+                          </button>
+                        );
+                      })}
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => setForm({ ...form, context_1m: !form.context_1m })}
-                      className={`relative h-6 w-11 rounded-full transition-colors ${form.context_1m ? 'bg-accent' : 'bg-line-strong'}`}
-                    >
-                      <span
-                        className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow-soft transition-transform ${
-                          form.context_1m ? 'translate-x-[22px]' : 'translate-x-0.5'
-                        }`}
-                      />
-                    </button>
-                  </label>
+                    <div className="text-[11px] text-ink-faint">
+                      标准：Grok <code className="font-mono">500000</code> / 其它 <code className="font-mono">200000</code>
+                      ；1M → <code className="font-mono">1000000</code>
+                      。{contextPreviewLine(form.context_1m, form.model, 'hermes')}
+                    </div>
+                  </div>
                 </div>
               )}
 
@@ -666,26 +693,36 @@ export function ProfileModal({
                       <code className="font-mono">provider/model</code>
                     </div>
                   </div>
-                  <label className="flex cursor-pointer items-center justify-between">
-                    <div>
-                      <div className="text-[13px] font-medium text-ink">1M 上下文 (contextWindow)</div>
-                      <div className="text-[11px] text-ink-faint">
-                        开启后写入 <code className="font-mono">models[].contextWindow=1000000</code>
-                        与 <code className="font-mono">agents.defaults.contextTokens</code>
-                      </div>
+                  <div>
+                    <div className="mb-1.5 text-[13px] font-medium text-ink">上下文窗口 (contextWindow)</div>
+                    <div className="mb-2 flex gap-1.5">
+                      {([
+                        { mode: '1m' as ContextMode, label: '1M' },
+                        { mode: 'standard' as ContextMode, label: '标准' },
+                        { mode: 'unset' as ContextMode, label: '不修改' },
+                      ]).map((opt) => {
+                        const cur = contextModeFromBool(form.context_1m);
+                        return (
+                          <button
+                            key={opt.mode}
+                            type="button"
+                            onClick={() => setForm({ ...form, context_1m: contextModeToBool(opt.mode) })}
+                            className={`flex-1 rounded-md border px-2 py-1.5 text-[12px] font-medium transition-all ${
+                              cur === opt.mode
+                                ? 'border-accent bg-accent/8 text-accent'
+                                : 'border-line text-ink-dim hover:border-line-strong'
+                            }`}
+                          >
+                            {opt.label}
+                          </button>
+                        );
+                      })}
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => setForm({ ...form, context_1m: !form.context_1m })}
-                      className={`relative h-6 w-11 rounded-full transition-colors ${form.context_1m ? 'bg-accent' : 'bg-line-strong'}`}
-                    >
-                      <span
-                        className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow-soft transition-transform ${
-                          form.context_1m ? 'translate-x-[22px]' : 'translate-x-0.5'
-                        }`}
-                      />
-                    </button>
-                  </label>
+                    <div className="text-[11px] text-ink-faint">
+                      写入 models[].contextWindow 与 agents.defaults.contextTokens。
+                      {contextPreviewLine(form.context_1m, form.model, 'openclaw')}
+                    </div>
+                  </div>
                   <Field
                     label="Max Tokens (maxTokens)"
                     value={form.max_tokens != null ? String(form.max_tokens) : ''}
@@ -753,19 +790,33 @@ export function ProfileModal({
 
               {/* Claude Code / Codex only — not shared with Hermes/OpenClaw */}
               {(tool === 'claude-code' || tool === 'codex') && (
-                <label className="flex cursor-pointer items-center justify-between">
-                  <div>
-                    <div className="text-[13px] font-medium text-ink">1M 上下文窗口</div>
-                    <div className="text-[11px] text-ink-faint">model_context_window</div>
+                <div>
+                  <div className="mb-1.5 text-[13px] font-medium text-ink">1M 上下文窗口</div>
+                  <div className="mb-1 flex gap-1.5">
+                    {([
+                      { mode: '1m' as ContextMode, label: '开启 1M' },
+                      { mode: 'standard' as ContextMode, label: '关闭' },
+                      { mode: 'unset' as ContextMode, label: '不修改' },
+                    ]).map((opt) => {
+                      const cur = contextModeFromBool(form.context_1m);
+                      return (
+                        <button
+                          key={opt.mode}
+                          type="button"
+                          onClick={() => setForm({ ...form, context_1m: contextModeToBool(opt.mode) })}
+                          className={`flex-1 rounded-md border px-2 py-1.5 text-[12px] font-medium transition-all ${
+                            cur === opt.mode
+                              ? 'border-accent bg-accent/8 text-accent'
+                              : 'border-line text-ink-dim hover:border-line-strong'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      );
+                    })}
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => setForm({ ...form, context_1m: !form.context_1m })}
-                    className={`relative h-6 w-11 rounded-full transition-colors ${form.context_1m ? 'bg-accent' : 'bg-line-strong'}`}
-                  >
-                    <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow-soft transition-transform ${form.context_1m ? 'translate-x-[22px]' : 'translate-x-0.5'}`} />
-                  </button>
-                </label>
+                  <div className="text-[11px] text-ink-faint">model_context_window · {contextPreviewLine(form.context_1m, form.model, tool)}</div>
+                </div>
               )}
             </div>
           )}

@@ -63,11 +63,18 @@ impl HermesAdapter {
     }
 
     /// Hermes-only context_length resolution (does not share OpenClaw helpers).
-    pub fn resolve_context_length(profile: &ApiProfile, existing: Option<i64>) -> Option<i64> {
+    ///
+    /// - `context_1m=true`  → 1_000_000
+    /// - `context_1m=false` → Grok 500_000 / others 200_000
+    ///   (ignore any previous oversized value so turning 1M off always lands
+    ///   on the model-aware standard default)
+    /// - `None`             → do not clobber existing config
+    pub fn resolve_context_length(profile: &ApiProfile, _existing: Option<i64>) -> Option<i64> {
+        use crate::models::CONTEXT_LENGTH_1M;
         match profile.context_1m {
-            Some(true) => Some(1_000_000),
-            Some(false) => Some(existing.filter(|&v| v > 0).unwrap_or(200_000)),
-            None => None, // do not clobber
+            Some(true) => Some(CONTEXT_LENGTH_1M),
+            Some(false) => Some(profile.standard_context_length()),
+            None => None,
         }
     }
 
@@ -518,6 +525,60 @@ mod tests {
         };
         let merged = HermesAdapter::apply_profile_to_config(&shared, &profile);
         assert_eq!(merged["model"]["context_length"], 777777);
+    }
+
+    #[test]
+    fn context_1m_false_grok_writes_500k() {
+        let shared = serde_json::json!({
+            "model": { "context_length": 1_000_000 },
+            "custom_providers": [{
+                "name": "custom",
+                "base_url": "http://old",
+                "api_key": "old",
+                "context_length": 1_000_000
+            }]
+        });
+        let profile = ApiProfile {
+            name: "g".into(),
+            provider: "custom".into(),
+            api_url: "http://new".into(),
+            api_key: "k".into(),
+            model: Some("grok-4.5".into()),
+            context_1m: Some(false),
+            hermes: HermesProfileFields {
+                api_mode: Some("anthropic_messages".into()),
+            },
+            ..Default::default()
+        };
+        let merged = HermesAdapter::apply_profile_to_config(&shared, &profile);
+        assert_eq!(merged["model"]["context_length"], 500_000);
+        assert_eq!(merged["custom_providers"][0]["context_length"], 500_000);
+    }
+
+    #[test]
+    fn context_1m_false_non_grok_writes_200k() {
+        let profile = ApiProfile {
+            name: "c".into(),
+            provider: "cpa".into(),
+            api_url: "http://new".into(),
+            api_key: "k".into(),
+            model: Some("claude-opus-4-8".into()),
+            context_1m: Some(false),
+            ..Default::default()
+        };
+        assert_eq!(
+            HermesAdapter::resolve_context_length(&profile, Some(999_999)),
+            Some(200_000)
+        );
+    }
+
+    #[test]
+    fn model_is_grok_detection() {
+        assert!(ApiProfile::model_is_grok(Some("grok-4.5")));
+        assert!(ApiProfile::model_is_grok(Some("xai/grok-4")));
+        assert!(ApiProfile::model_is_grok(Some("Grok-3")));
+        assert!(!ApiProfile::model_is_grok(Some("claude-opus-4-8")));
+        assert!(!ApiProfile::model_is_grok(None));
     }
 
     #[test]

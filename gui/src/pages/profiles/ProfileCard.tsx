@@ -1,7 +1,12 @@
 import { useState } from 'react';
-import type { ApiProfile } from '../../types';
+import type { ApiProfile, TargetApp } from '../../types';
 import { Button } from '../../components/common/Button';
 import { cn, maskApiKey } from '../../lib/utils';
+import {
+  contextBadgeLabel,
+  profileKeyCount,
+  activeKeyLabel,
+} from '../../lib/contextWindow';
 import { Pencil, Trash2, Check, Eye, EyeOff, Link2 } from 'lucide-react';
 import { IconBtn, providerTint } from './helpers';
 
@@ -18,6 +23,10 @@ export function ProfileCard({
 }) {
   const tint = providerTint(profile.provider);
   const [keyRevealed, setKeyRevealed] = useState(false);
+  const tool = (profile.target_app || 'claude-code') as TargetApp;
+  const ctx = contextBadgeLabel(profile.context_1m, profile.model, { tool });
+  const keyN = profileKeyCount(profile);
+  const keyLabel = activeKeyLabel(profile);
 
   return (
     <div
@@ -35,11 +44,35 @@ export function ProfileCard({
         </div>
 
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <h3 className="truncate text-[14px] font-semibold text-ink">{profile.name}</h3>
             <span className="rounded border border-line bg-surface px-1.5 py-0.5 text-[10px] font-medium text-ink-dim">
               {profile.provider}
             </span>
+            {profile.model && (
+              <span className="max-w-[160px] truncate rounded border border-line bg-surface px-1.5 py-0.5 font-mono text-[10px] text-ink-dim" title={profile.model}>
+                {profile.model}
+              </span>
+            )}
+            <span
+              className={cn(
+                'rounded border px-1.5 py-0.5 text-[10px] font-medium',
+                ctx === '1M' ? 'border-accent/30 bg-accent/8 text-accent' : 'border-line bg-surface text-ink-dim',
+              )}
+              title="上下文窗口"
+            >
+              ctx {ctx}
+            </span>
+            {profile.api_mode && (tool === 'hermes' || tool === 'openclaw') && (
+              <span className="rounded border border-line bg-surface px-1.5 py-0.5 font-mono text-[10px] text-ink-faint">
+                {profile.api_mode}
+              </span>
+            )}
+            {keyN > 1 && (
+              <span className="rounded border border-line bg-surface px-1.5 py-0.5 text-[10px] text-ink-faint">
+                keys {keyN}{keyLabel ? `·${keyLabel}` : ''}
+              </span>
+            )}
             {(active || justSwitched) && (
               <span className="inline-flex items-center gap-1 text-[11px] font-medium text-ok">
                 <Check size={12} />{active ? '当前使用' : '已切换'}
@@ -78,4 +111,3 @@ export function ProfileCard({
     </div>
   );
 }
-

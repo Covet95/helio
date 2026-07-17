@@ -46,7 +46,14 @@ export default function ExportPage() {
       const { tauriApi } = await import('../lib/tauri');
       await tauriApi.importDatabase(filePath as string);
       setFeedback({ text: '数据库导入成功，正在刷新…', kind: 'success' });
-      setTimeout(() => window.location.reload(), 1500);
+      // soft reload app data (avoid full document reload in Tauri)
+      try {
+        const { useStore } = await import('../store');
+        await useStore.getState().fetchProfiles();
+        await useStore.getState().fetchStatus();
+      } catch {
+        window.location.reload();
+      }
     } catch (err) {
       setFeedback({ text: '导入失败: ' + err, kind: 'error' });
     } finally {

@@ -66,13 +66,14 @@ impl OpenClawAdapter {
 
     /// Resolve contextWindow for a model entry.
     /// - context_1m=true  → 1_000_000
-    /// - context_1m=false → keep existing if any, else 200_000
+    /// - context_1m=false → Grok 500_000 / others 200_000 (model-aware standard)
     /// - None             → keep existing if any, else 1_000_000 (safe default for custom)
     pub fn resolve_context_window(profile: &ApiProfile, existing: Option<i64>) -> i64 {
+        use crate::models::CONTEXT_LENGTH_1M;
         match profile.context_1m {
-            Some(true) => 1_000_000,
-            Some(false) => existing.filter(|&v| v > 0).unwrap_or(200_000),
-            None => existing.filter(|&v| v > 0).unwrap_or(1_000_000),
+            Some(true) => CONTEXT_LENGTH_1M,
+            Some(false) => profile.standard_context_length(),
+            None => existing.filter(|&v| v > 0).unwrap_or(CONTEXT_LENGTH_1M),
         }
     }
 
@@ -664,13 +665,29 @@ mod tests {
         };
         assert_eq!(OpenClawAdapter::resolve_context_window(&p, Some(1)), 1_000_000);
         assert_eq!(OpenClawAdapter::resolve_max_tokens(&p, Some(8)), 32000);
+        // Non-Grok + 1M off → standard 200k (ignores previous existing value)
         let p2 = ApiProfile {
+            model: Some("claude-opus-4-8".into()),
             context_1m: Some(false),
             openclaw: OpenClawProfileFields::default(),
             ..Default::default()
         };
-        assert_eq!(OpenClawAdapter::resolve_context_window(&p2, Some(128000)), 128000);
+        assert_eq!(
+            OpenClawAdapter::resolve_context_window(&p2, Some(128000)),
+            200_000
+        );
         assert_eq!(OpenClawAdapter::resolve_max_tokens(&p2, None), 128_000);
+        // Grok + 1M off → 500k
+        let p3 = ApiProfile {
+            model: Some("grok-4.5".into()),
+            context_1m: Some(false),
+            openclaw: OpenClawProfileFields::default(),
+            ..Default::default()
+        };
+        assert_eq!(
+            OpenClawAdapter::resolve_context_window(&p3, Some(1_000_000)),
+            500_000
+        );
     }
 
     #[test]

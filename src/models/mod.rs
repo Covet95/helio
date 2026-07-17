@@ -85,6 +85,10 @@ pub struct ApiProfile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// 是否启用 1M 上下文窗口（各适配器自行解释，不互相调用）
+    ///
+    /// - `Some(true)` → 1_000_000
+    /// - `Some(false)` → 标准上下文：Grok 默认 500_000，其它 200_000
+    /// - `None` → 多数适配器不覆写已有配置
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_1m: Option<bool>,
     /// 归属工具
@@ -105,7 +109,42 @@ pub struct ApiProfile {
     pub openclaw: OpenClawProfileFields,
 }
 
+/// 1M context window tokens.
+pub const CONTEXT_LENGTH_1M: i64 = 1_000_000;
+/// Grok-family standard context (when 1M toggle is off).
+pub const CONTEXT_LENGTH_GROK: i64 = 500_000;
+/// Non-Grok standard context (when 1M toggle is off).
+pub const CONTEXT_LENGTH_STANDARD: i64 = 200_000;
+
 impl ApiProfile {
+    /// Whether this profile's model id looks like a Grok model.
+    ///
+    /// Uses the profile `model` field only (not provider name), so custom
+    /// OpenAI-compatible proxies serving Grok still match.
+    pub fn is_grok_model(&self) -> bool {
+        Self::model_is_grok(self.model.as_deref())
+    }
+
+    pub fn model_is_grok(model: Option<&str>) -> bool {
+        model
+            .map(|m| {
+                let lower = m.trim().to_ascii_lowercase();
+                // xai/grok-*, openai/grok-*, grok-4.5, grok4, etc.
+                lower.contains("grok")
+            })
+            .unwrap_or(false)
+    }
+
+    /// Standard (non-1M) context length for this profile.
+    /// Grok defaults to 500k; everything else defaults to 200k.
+    pub fn standard_context_length(&self) -> i64 {
+        if self.is_grok_model() {
+            CONTEXT_LENGTH_GROK
+        } else {
+            CONTEXT_LENGTH_STANDARD
+        }
+    }
+
     /// 生成简单唯一 id（无需外部依赖）
     pub fn new_key_id() -> String {
         use std::time::{SystemTime, UNIX_EPOCH};

@@ -4,23 +4,28 @@ import { Button } from '../components/common/Button';
 import { Spinner } from '../components/common/Spinner';
 import { PageHeader } from '../components/common/PageHeader';
 import { RefreshCw, HardDrive, Layers, FolderOpen, Activity } from 'lucide-react';
-import { formatBytes } from '../lib/utils';
+import { formatBytes, humanizeError } from '../lib/utils';
+import { contextBadgeLabel, statusKeyFor } from '../lib/contextWindow';
 import { SUPPORTED_TOOLS } from '../types';
-import type { StatusInfo, TargetStatus, ToolInfo, ToolProbeResult } from '../types';
+import type { StatusInfo, TargetApp, TargetStatus, ToolInfo, ToolProbeResult } from '../types';
 
 function statusForTool(status: StatusInfo | null, id: string): TargetStatus | undefined {
   if (!status) return undefined;
-  const key = id.replace('-', '_') as keyof StatusInfo;
-  return status[key] as TargetStatus | undefined;
+  const key = statusKeyFor(id) as keyof StatusInfo;
+  const v = status[key];
+  if (!v || typeof v !== 'object' || !('connected' in (v as object) || 'profile' in (v as object))) {
+    return undefined;
+  }
+  return v as TargetStatus;
 }
 
 export default function StatusPage() {
-  const { status, loadingStatus, fetchStatus } = useStore();
+  const { status, loadingStatus, fetchStatus, lastError, clearError } = useStore();
   const [probing, setProbing] = useState(false);
   const [probeMap, setProbeMap] = useState<Record<string, ToolProbeResult>>({});
   const [probeErr, setProbeErr] = useState('');
 
-  useEffect(() => { fetchStatus(); }, []);
+  useEffect(() => { fetchStatus(); }, [fetchStatus]);
 
   const runProbe = async () => {
     setProbing(true);
@@ -32,7 +37,7 @@ export default function StatusPage() {
       for (const r of list) map[r.target_app] = r as ToolProbeResult;
       setProbeMap(map);
     } catch (e) {
-      setProbeErr(e instanceof Error ? e.message : String(e));
+      setProbeErr(humanizeError(e));
     } finally {
       setProbing(false);
     }
@@ -57,9 +62,14 @@ export default function StatusPage() {
       />
 
       <div className="max-w-5xl px-4 py-4 sm:px-7 sm:py-5">
-        {probeErr && (
+        {(probeErr || lastError) && (
           <div className="mb-3 rounded-md border border-danger/30 bg-danger/8 px-3 py-2 text-[12.5px] text-danger">
-            {probeErr}
+            <div className="flex items-start justify-between gap-2">
+              <span>{probeErr || lastError}</span>
+              {lastError && !probeErr && (
+                <button type="button" className="underline text-[11px]" onClick={clearError}>关闭</button>
+              )}
+            </div>
           </div>
         )}
         {loadingStatus && !status ? (
@@ -110,7 +120,6 @@ function ToolCard({
   probe?: ToolProbeResult;
 }) {
   const configured = !!(status?.profile || status?.connected);
-  // 对齐 CC Switch：operational / degraded / failed
   let badge = configured ? '已配置' : '未设置';
   let badgeClass = configured ? 'text-ok' : 'text-ink-faint';
   let dotClass = configured ? 'bg-ok' : 'bg-ink-faint/40';
@@ -130,6 +139,8 @@ function ToolCard({
       dotClass = 'bg-danger';
     }
   }
+  const p = status?.profile;
+  const ctx = p ? contextBadgeLabel(p.context_1m, p.model, { tool: tool.id as TargetApp }) : null;
   return (
     <div
       className="group relative border-b border-line bg-card px-3.5 py-3 transition-colors duration-150 last:border-b-0 hover:bg-elevated/45"
@@ -153,11 +164,14 @@ function ToolCard({
         </div>
       </div>
 
-      {status?.profile ? (
+      {p ? (
         <div className="relative mt-3 grid grid-cols-1 gap-1.5 sm:grid-cols-2 lg:grid-cols-3">
-          <Row label="Profile" value={status.profile.name} strong />
-          <Row label="Provider" value={status.profile.provider} />
-          <Row label="URL" value={status.profile.api_url} mono />
+          <Row label="Profile" value={p.name} strong />
+          <Row label="Provider" value={p.provider} />
+          <Row label="Model" value={p.model || '—'} mono />
+          <Row label="Context" value={ctx ? `ctx ${ctx}` : '—'} />
+          {p.api_mode && <Row label="api_mode" value={p.api_mode} mono />}
+          <Row label="URL" value={p.api_url} mono />
           {probe?.http_status != null && (
             <Row label="HTTP" value={String(probe.http_status)} mono />
           )}

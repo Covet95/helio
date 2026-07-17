@@ -7,27 +7,31 @@ import { ConfirmDialog } from '../components/common/Modal';
 import { Plus, Search } from 'lucide-react';
 import type { ApiProfile, TargetApp } from '../types';
 import { toolById } from '../types';
-import { cn } from '../lib/utils';
+import { cn, humanizeError } from '../lib/utils';
+import { contextBadgeLabel } from '../lib/contextWindow';
 import { profileApiCredentialsText } from '../lib/profileCopy';
 import { copyText } from '../lib/clipboard';
 import { ProfileCard } from './profiles/ProfileCard';
 import { ProfileModal } from './profiles/ProfileFormModal';
 import {
   EmptyState,
-    activeProfileFor,
+  activeProfileFor,
   humanizeCopyError,
   AppSelector,
 } from './profiles/helpers';
 
 export default function ProfilesPage() {
-  const { profiles, status, loadingProfiles, fetchProfiles, fetchStatus, addProfile, updateProfile, deleteProfile, switchProfile } = useStore();
+  const {
+    profiles, status, loadingProfiles, lastError, clearError,
+    fetchProfiles, fetchStatus, addProfile, updateProfile, deleteProfile, switchProfile,
+  } = useStore();
   const [targetApp, setTargetApp] = useState<TargetApp>('claude-code');
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState<ApiProfile | null>(null);
   const [switched, setSwitched] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [query, setQuery] = useState('');
-  const [feedback, setFeedback] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
+  const [feedback, setFeedback] = useState<{ kind: 'success' | 'error' | 'info'; text: string } | null>(null);
   const [dedupConfirm, setDedupConfirm] = useState(false);
 
   useEffect(() => {
@@ -39,7 +43,6 @@ export default function ProfilesPage() {
   const activeProfile = activeProfileFor(status, targetApp);
   const normalizedQuery = query.trim().toLowerCase();
   const toolProfiles = useMemo(() => {
-    // 只看当前工具绑定的档案（每条档案必须明确归属某工具，无"通用"）
     return profiles.filter((p) => p.target_app === targetApp);
   }, [profiles, targetApp]);
   const filteredProfiles = useMemo(() => {
@@ -48,14 +51,15 @@ export default function ProfilesPage() {
       list = list.filter((p) => (
         p.name.toLowerCase().includes(normalizedQuery) ||
         p.provider.toLowerCase().includes(normalizedQuery) ||
-        p.api_url.toLowerCase().includes(normalizedQuery)
+        p.api_url.toLowerCase().includes(normalizedQuery) ||
+        (p.model || '').toLowerCase().includes(normalizedQuery)
       ));
     }
     return list;
   }, [toolProfiles, normalizedQuery]);
 
-  // 重复检测：只在当前工具可见范围内，按 target_app + api_url + api_key 分组
-  const dupExtras = useMemo(() => {
+  // 去重：优先保留当前启用，其次 updated_at 最新
+  const dupPlan = useMemo(() => {
     const groups = new Map<string, ApiProfile[]>();
     for (const p of toolProfiles) {
       const key = `${p.target_app ?? 'shared'}::${(p.api_url || '').replace(/\/+$/, '')}::${p.api_key || ''}`;
@@ -63,22 +67,34 @@ export default function ProfilesPage() {
       if (arr) arr.push(p);
       else groups.set(key, [p]);
     }
-    const extras: ApiProfile[] = [];
+    const keep: ApiProfile[] = [];
+    const remove: ApiProfile[] = [];
+    const activeName = activeProfile?.name;
     for (const arr of groups.values()) {
-      if (arr.length > 1) extras.push(...arr.slice(1));
+      if (arr.length <= 1) continue;
+      const sorted = [...arr].sort((a, b) => {
+        if (activeName && a.name === activeName) return -1;
+        if (activeName && b.name === activeName) return 1;
+        return (b.updated_at ?? 0) - (a.updated_at ?? 0);
+      });
+      keep.push(sorted[0]);
+      remove.push(...sorted.slice(1));
     }
-    return extras;
-  }, [toolProfiles]);
+    return { keep, remove };
+  }, [toolProfiles, activeProfile?.name]);
 
   const runDedup = async () => {
     setFeedback(null);
     try {
-      for (const p of dupExtras) {
+      for (const p of dupPlan.remove) {
         await deleteProfile(p.target_app ?? targetApp, p.name);
       }
-      setFeedback({ kind: 'success', text: `已清理 ${dupExtras.length} 个重复档案` });
+      setFeedback({
+        kind: 'success',
+        text: `已清理 ${dupPlan.remove.length} 个重复档案（保留：${dupPlan.keep.map((p) => p.name).join('、') || '—'}）`,
+      });
     } catch (e) {
-      setFeedback({ kind: 'error', text: `去重失败：${e}` });
+      setFeedback({ kind: 'error', text: `去重失败：${humanizeError(e)}` });
     } finally {
       setDedupConfirm(false);
     }
@@ -89,10 +105,10 @@ export default function ProfilesPage() {
     try {
       await switchProfile(targetApp, name);
       setSwitched(`${name}→${targetApp}`);
-      setFeedback({ kind: 'success', text: `已启用 ${name}` });
+      setFeedback({ kind: 'success', text: `已启用 ${name}（已写入本地 ${selectedTool.displayName} 配置）` });
       setTimeout(() => setSwitched(null), 1600);
     } catch (error) {
-      setFeedback({ kind: 'error', text: `启用失败：${error}` });
+      setFeedback({ kind: 'error', text: `启用失败：${humanizeError(error)}` });
     }
   };
 
@@ -106,15 +122,19 @@ export default function ProfilesPage() {
     }
   };
 
+  const activeCtx = activeProfile
+    ? contextBadgeLabel(activeProfile.context_1m, activeProfile.model, { tool: targetApp })
+    : null;
+
   return (
     <div className="min-h-full">
       <PageHeader
         title="配置档案"
         actions={
           <div className="flex items-center gap-2">
-            {dupExtras.length > 0 && (
+            {dupPlan.remove.length > 0 && (
               <Button variant="secondary" onClick={() => setDedupConfirm(true)}>
-                去重 ({dupExtras.length})
+                去重 ({dupPlan.remove.length})
               </Button>
             )}
             <Button onClick={() => { setEditing(null); setShowModal(true); }}>
@@ -134,7 +154,7 @@ export default function ProfilesPage() {
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               className="h-9 w-full rounded-md border border-line bg-card pl-8 pr-3 text-[13px] text-ink outline-none transition-colors placeholder:text-ink-faint focus:border-accent/50"
-              placeholder="搜索"
+              placeholder="搜索 name / model / url"
             />
           </div>
         </div>
@@ -148,7 +168,9 @@ export default function ProfilesPage() {
             <div className="min-w-0">
               <div className="text-[13px] font-semibold text-ink">{selectedTool.displayName}</div>
               <div className="truncate font-mono text-[11px] text-ink-faint">
-                {activeProfile ? `${activeProfile.name} · ${activeProfile.api_url}` : '未设置'}
+                {activeProfile
+                  ? `${activeProfile.name} · ${activeProfile.model || '—'} · ctx ${activeCtx} · ${activeProfile.api_url}`
+                  : '未设置'}
               </div>
             </div>
           </div>
@@ -160,12 +182,19 @@ export default function ProfilesPage() {
           </span>
         </div>
 
-        {feedback && (
+        {(feedback || lastError) && (
           <div className={cn(
             'mb-3 rounded-md border px-3 py-2 text-[13px]',
-            feedback.kind === 'success' ? 'border-ok/30 bg-ok/8 text-ok' : 'border-danger/30 bg-danger/8 text-danger',
+            (feedback?.kind === 'success') ? 'border-ok/30 bg-ok/8 text-ok'
+              : (feedback?.kind === 'info') ? 'border-line bg-surface text-ink-dim'
+              : 'border-danger/30 bg-danger/8 text-danger',
           )}>
-            {feedback.text}
+            <div className="flex items-start justify-between gap-2">
+              <span>{feedback?.text || lastError}</span>
+              {lastError && !feedback && (
+                <button type="button" className="shrink-0 text-[11px] underline" onClick={clearError}>关闭</button>
+              )}
+            </div>
           </div>
         )}
 
@@ -173,13 +202,15 @@ export default function ProfilesPage() {
           <div className="grid place-items-center py-32"><Spinner size="lg" /></div>
         ) : profiles.length === 0 ? (
           <EmptyState />
+        ) : toolProfiles.length === 0 ? (
+          <EmptyState toolLabel={selectedTool.displayName} />
         ) : filteredProfiles.length === 0 ? (
           <div className="rounded-lg border border-dashed border-line bg-surface/50 px-4 py-10 text-center text-[13px] text-ink-faint">没有匹配的档案</div>
         ) : (
           <div className="max-w-5xl overflow-hidden rounded-lg border border-line bg-card">
             {filteredProfiles.map((p) => (
               <ProfileCard
-                key={p.id ?? p.name}
+                key={p.id ?? `${p.target_app}:${p.name}`}
                 profile={p}
                 active={activeProfile?.name === p.name}
                 justSwitched={switched?.startsWith(`${p.name}→`) ?? false}
@@ -200,19 +231,33 @@ export default function ProfilesPage() {
           onClose={() => setShowModal(false)}
           onSave={async (p) => {
             try {
-              if (editing) await updateProfile(p); else await addProfile(p);
+              const wasActive = !!(editing && activeProfile && editing.name === activeProfile.name);
+              if (editing) await updateProfile(p);
+              else await addProfile(p);
+              if (editing && wasActive) {
+                setFeedback({
+                  kind: 'success',
+                  text: `已保存「${p.name}」并 re-apply 到本地 ${selectedTool.displayName}`,
+                });
+              } else if (editing) {
+                setFeedback({
+                  kind: 'info',
+                  text: `已保存「${p.name}」到 Helio；未启用，不会改本地 ${selectedTool.displayName}（点启用才写入）`,
+                });
+              } else {
+                setFeedback({
+                  kind: 'info',
+                  text: `已创建「${p.name}」；点「启用」才会写入本地 ${selectedTool.displayName} 配置`,
+                });
+              }
             } catch (e) {
-              const msg = String(e);
-              const friendly = /UNIQUE constraint failed/i.test(msg)
+              const msg = humanizeError(e);
+              const friendly = /UNIQUE constraint failed/i.test(String(e))
                 ? `已存在同名档案「${p.name}」，请换个名字`
                 : `保存失败：${msg}`;
               setFeedback({ kind: 'error', text: friendly });
-              return; // 失败时保持弹窗打开，让用户改
+              return;
             }
-            setFeedback({
-              kind: 'success',
-              text: editing ? `已保存「${p.name}」` : `已创建「${p.name}」`,
-            });
             setShowModal(false);
           }}
         />
@@ -228,8 +273,9 @@ export default function ProfilesPage() {
           onConfirm={async () => {
             try {
               await deleteProfile(targetApp, deleting);
+              setFeedback({ kind: 'success', text: `已删除「${deleting}」` });
             } catch (e) {
-              alert('删除失败：' + e);
+              setFeedback({ kind: 'error', text: `删除失败：${humanizeError(e)}` });
             }
             setDeleting(null);
           }}
@@ -239,8 +285,8 @@ export default function ProfilesPage() {
       {dedupConfirm && (
         <ConfirmDialog
           title="清理重复档案"
-          message={`将删除 ${dupExtras.length} 个当前工具内的重复档案（同一工具下 API URL + Key 相同、名字不同）：${dupExtras.map((p) => p.name).join('、')}。每组保留首个，不可撤销。`}
-          confirmText={`删除 ${dupExtras.length} 个`}
+          message={`将删除 ${dupPlan.remove.length} 个重复档案：${dupPlan.remove.map((p) => p.name).join('、')}。保留：${dupPlan.keep.map((p) => p.name).join('、') || '—'}（优先保留当前启用）。不可撤销。`}
+          confirmText={`删除 ${dupPlan.remove.length} 个`}
           danger
           onCancel={() => setDedupConfirm(false)}
           onConfirm={runDedup}
@@ -249,4 +295,3 @@ export default function ProfilesPage() {
     </div>
   );
 }
-

@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import { Layers, SlidersHorizontal, Activity, ArrowLeftRight, FileDown, History } from 'lucide-react';
 
@@ -11,6 +12,22 @@ const NAV = [
 ];
 
 export default function Sidebar() {
+  const [version, setVersion] = useState('0.1.1');
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { getVersion } = await import('@tauri-apps/api/app');
+        const v = await getVersion();
+        if (!cancelled && v) setVersion(v);
+      } catch {
+        // browser / non-tauri: keep package default
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   return (
     <aside className="flex h-full w-[212px] shrink-0 flex-col border-r border-line bg-surface">
       <div className="drag-region px-4 pb-4 pt-5">
@@ -70,7 +87,9 @@ export default function Sidebar() {
         ))}
       </nav>
 
-      <div className="border-t border-line/70 px-4 py-3 font-mono text-[10.5px] text-ink-faint">v0.1.0</div>
+      <div className="border-t border-line/70 px-4 py-3 font-mono text-[10.5px] text-ink-faint">
+        v{version}
+      </div>
     </aside>
   );
 }
