@@ -1,3 +1,9 @@
+/** Codex /model catalog 条目（精简） */
+export interface CodexCatalogModel {
+  slug: string;
+  display_name?: string;
+}
+
 export interface ApiProfile {
   id?: number;
   name: string;
@@ -12,6 +18,8 @@ export interface ApiProfile {
   model?: string;
   /** OpenCode 专用：provider 下挂载的模型列表（多选） */
   models?: string[];
+  /** Codex：写入 model_catalog.json 的模型目录（/model 列表） */
+  catalog_models?: CodexCatalogModel[];
   /** 推理强度 minimal/low/medium/high/xhigh */
   reasoning_effort?: string;
   /** 1M 上下文 */

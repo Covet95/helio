@@ -37,6 +37,7 @@ impl Database {
                 model_thinking_enabled INTEGER,
                 service_tier TEXT,
                 experimental_bearer_token TEXT,
+                catalog_models TEXT,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
                 UNIQUE(name, target_app)
@@ -78,6 +79,7 @@ impl Database {
         self.migrate_drop_model_effort_level()?;
         // 在可能重建表的迁移之后再加，避免被 drop 掉
         self.try_add_column("ALTER TABLE api_profiles ADD COLUMN api_keys_json TEXT")?;
+        self.try_add_column("ALTER TABLE api_profiles ADD COLUMN catalog_models TEXT")?;
 
         Ok(())
     }
@@ -230,6 +232,12 @@ impl Database {
             .as_ref()
             .map(serde_json::to_string)
             .transpose()?;
+        let catalog_models_json = profile
+            .codex
+            .catalog_models
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
         let api_keys_json = Self::serialize_api_keys_json(&profile)?;
         let (api_mode, max_tokens) = match profile.target_app {
             Some(TargetApp::OpenClaw) => (
@@ -248,8 +256,8 @@ impl Database {
         };
 
         self.conn.execute(
-            "INSERT INTO api_profiles (name, provider, api_url, api_key, model_mapping, model, reasoning_effort, context_1m, target_app, models, wire_api, requires_openai_auth, model_thinking_enabled, service_tier, experimental_bearer_token, api_mode, max_tokens, api_keys_json, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+            "INSERT INTO api_profiles (name, provider, api_url, api_key, model_mapping, model, reasoning_effort, context_1m, target_app, models, wire_api, requires_openai_auth, model_thinking_enabled, service_tier, experimental_bearer_token, api_mode, max_tokens, api_keys_json, catalog_models, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
             params![
                 &profile.name,
                 &profile.provider,
@@ -269,6 +277,7 @@ impl Database {
                 api_mode,
                 max_tokens,
                 api_keys_json,
+                catalog_models_json,
                 now,
                 now
             ],
@@ -282,7 +291,7 @@ impl Database {
         "id, name, provider, api_url, api_key, model_mapping, model, ",
         "reasoning_effort, context_1m, created_at, updated_at, target_app, models, ",
         "wire_api, requires_openai_auth, model_thinking_enabled, service_tier, ",
-        "experimental_bearer_token, api_mode, max_tokens, api_keys_json"
+        "experimental_bearer_token, api_mode, max_tokens, api_keys_json, catalog_models"
     );
 
     fn row_to_profile(row: &rusqlite::Row) -> rusqlite::Result<ApiProfile> {
@@ -307,6 +316,13 @@ impl Database {
         let max_tokens: Option<i64> = row.get("max_tokens")?;
         let api_keys_str: Option<String> = row.get("api_keys_json")?;
         let api_keys = api_keys_str
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        let catalog_models_str: Option<String> = row.get("catalog_models")?;
+        let catalog_models = catalog_models_str
             .as_deref()
             .filter(|s| !s.trim().is_empty())
             .map(serde_json::from_str)
@@ -340,6 +356,7 @@ impl Database {
                 model_thinking_enabled: model_thinking_enabled.map(|v| v != 0),
                 service_tier: row.get("service_tier")?,
                 experimental_bearer_token: row.get("experimental_bearer_token")?,
+                catalog_models,
             },
             opencode: OpenCodeProfileFields { models },
             hermes: HermesProfileFields {
@@ -417,6 +434,12 @@ impl Database {
             .as_ref()
             .map(serde_json::to_string)
             .transpose()?;
+        let catalog_models_json = profile
+            .codex
+            .catalog_models
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
         let api_keys_json = Self::serialize_api_keys_json(&profile)?;
         let (api_mode, max_tokens) = match profile.target_app {
             Some(TargetApp::OpenClaw) => (
@@ -438,7 +461,7 @@ impl Database {
             Some(id) => {
                 self.conn.execute(
                     "UPDATE api_profiles SET name = ?1, provider = ?2, api_url = ?3, api_key = ?4,
-                     model_mapping = ?5, model = ?6, reasoning_effort = ?7, context_1m = ?8, target_app = ?9, models = ?10, wire_api = ?11, requires_openai_auth = ?12, model_thinking_enabled = ?13, service_tier = ?14, experimental_bearer_token = ?15, api_mode = ?16, max_tokens = ?17, api_keys_json = ?18, updated_at = ?19 WHERE id = ?20",
+                     model_mapping = ?5, model = ?6, reasoning_effort = ?7, context_1m = ?8, target_app = ?9, models = ?10, wire_api = ?11, requires_openai_auth = ?12, model_thinking_enabled = ?13, service_tier = ?14, experimental_bearer_token = ?15, api_mode = ?16, max_tokens = ?17, api_keys_json = ?18, catalog_models = ?19, updated_at = ?20 WHERE id = ?21",
                     params![
                         &profile.name,
                         &profile.provider,
@@ -458,6 +481,7 @@ impl Database {
                         api_mode,
                         max_tokens,
                         api_keys_json,
+                        catalog_models_json,
                         now,
                         id
                     ],
@@ -467,7 +491,7 @@ impl Database {
                 // 无 id：按 name 定位，不改名
                 self.conn.execute(
                     "UPDATE api_profiles SET provider = ?1, api_url = ?2, api_key = ?3,
-                     model_mapping = ?4, model = ?5, reasoning_effort = ?6, context_1m = ?7, target_app = ?8, models = ?9, wire_api = ?10, requires_openai_auth = ?11, model_thinking_enabled = ?12, service_tier = ?13, experimental_bearer_token = ?14, api_mode = ?15, max_tokens = ?16, api_keys_json = ?17, updated_at = ?18 WHERE name = ?19",
+                     model_mapping = ?4, model = ?5, reasoning_effort = ?6, context_1m = ?7, target_app = ?8, models = ?9, wire_api = ?10, requires_openai_auth = ?11, model_thinking_enabled = ?12, service_tier = ?13, experimental_bearer_token = ?14, api_mode = ?15, max_tokens = ?16, api_keys_json = ?17, catalog_models = ?18, updated_at = ?19 WHERE name = ?20",
                     params![
                         &profile.provider,
                         &profile.api_url,
@@ -486,6 +510,7 @@ impl Database {
                         api_mode,
                         max_tokens,
                         api_keys_json,
+                        catalog_models_json,
                         now,
                         &profile.name
                     ],
@@ -670,6 +695,10 @@ mod tests {
                 wire_api: Some("responses".into()),
                 experimental_bearer_token: Some("sk-b".into()),
                 model_thinking_enabled: Some(true),
+                catalog_models: Some(vec![crate::models::CodexCatalogModel {
+                    slug: "gpt-5.6-sol".into(),
+                    display_name: Some("GPT-5.6 Sol".into()),
+                }]),
                 ..Default::default()
             },
             ..Default::default()
@@ -677,6 +706,10 @@ mod tests {
         let got = db.get_profile_by_id(id)?.unwrap();
         assert_eq!(got.codex.reasoning_effort.as_deref(), Some("xhigh"));
         assert_eq!(got.codex.experimental_bearer_token.as_deref(), Some("sk-b"));
+        let cm = got.codex.catalog_models.as_ref().unwrap();
+        assert_eq!(cm.len(), 1);
+        assert_eq!(cm[0].slug, "gpt-5.6-sol");
+        assert_eq!(cm[0].display_name.as_deref(), Some("GPT-5.6 Sol"));
         Ok(())
     }
 

@@ -8,6 +8,14 @@ pub struct ClaudeProfileFields {
     pub model_mapping: Option<HashMap<String, String>>,
 }
 
+/// Codex `/model` catalog 条目（精简；其余元数据由适配器模板填充）
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodexCatalogModel {
+    pub slug: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+}
+
 /// Codex 专用字段（JSON flatten → IPC 仍为顶层键）
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CodexProfileFields {
@@ -23,6 +31,9 @@ pub struct CodexProfileFields {
     pub model_thinking_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<String>,
+    /// 写入 `model_catalog.json` 的模型表；空/缺省 = 切换时不改本机 catalog
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_models: Option<Vec<CodexCatalogModel>>,
 }
 
 /// OpenCode 专用字段（JSON flatten → IPC 仍为顶层键）
@@ -519,6 +530,10 @@ mod tests {
                 reasoning_effort: Some("xhigh".into()),
                 wire_api: Some("responses".into()),
                 experimental_bearer_token: Some("sk-b".into()),
+                catalog_models: Some(vec![CodexCatalogModel {
+                    slug: "gpt-5.6-sol".into(),
+                    display_name: Some("GPT-5.6 Sol".into()),
+                }]),
                 ..Default::default()
             },
             opencode: OpenCodeProfileFields {
@@ -542,6 +557,8 @@ mod tests {
         assert_eq!(v["models"][0], "a");
         assert_eq!(v["api_mode"], "chat_completions");
         assert_eq!(v["max_tokens"], 128000);
+        assert_eq!(v["catalog_models"][0]["slug"], "gpt-5.6-sol");
+        assert_eq!(v["catalog_models"][0]["display_name"], "GPT-5.6 Sol");
         let back: ApiProfile = serde_json::from_value(v).unwrap();
         assert_eq!(
             back.claude
@@ -553,6 +570,10 @@ mod tests {
             Some("x")
         );
         assert_eq!(back.codex.reasoning_effort.as_deref(), Some("xhigh"));
+        assert_eq!(
+            back.codex.catalog_models.as_ref().unwrap()[0].slug,
+            "gpt-5.6-sol"
+        );
         assert_eq!(back.opencode.models.as_ref().unwrap()[0], "a");
         // Flatten: last writer of same key wins on serialize; deserialize fills both
         // groups from top-level keys. Prefer tool-owned fields when target_app set.

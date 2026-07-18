@@ -226,7 +226,19 @@ export function ProfileModal({
       return;
     }
     setFormErr('');
-    onSave({ ...normalized, target_app: tool });
+    let catalog_models = normalized.catalog_models;
+    if (tool === 'codex' && catalog_models) {
+      const cleaned = catalog_models
+        .map((e) => ({
+          slug: e.slug, // 原样保留，仅去掉完全空白项
+          display_name: e.display_name?.trim() ? e.display_name : undefined,
+        }))
+        .filter((e) => e.slug.trim().length > 0);
+      catalog_models = cleaned.length ? cleaned : undefined;
+    } else if (tool !== 'codex') {
+      catalog_models = undefined;
+    }
+    onSave({ ...normalized, target_app: tool, catalog_models });
   };
 
   return (
@@ -497,6 +509,139 @@ export function ProfileModal({
                         </label>
                       );
                     })}
+                  </div>
+                </div>
+              )}
+
+              {tool === 'codex' && (
+                <div className="space-y-2">
+                  <div className="text-[12px] font-medium text-ink-dim">
+                    模型目录 <span className="font-normal text-ink-faint">（生成 model_catalog.json，供 Codex /model 显示；slug 原样保存）</span>
+                  </div>
+                  <div className="space-y-1.5">
+                    {(form.catalog_models || []).map((entry, idx) => (
+                      <div key={idx} className="flex flex-wrap items-center gap-2">
+                        <input
+                          value={entry.slug}
+                          onChange={(e) => {
+                            const next = [...(form.catalog_models || [])];
+                            next[idx] = { ...next[idx], slug: e.target.value };
+                            setForm({ ...form, catalog_models: next });
+                          }}
+                          placeholder="slug（必填）"
+                          className="h-8 min-w-0 flex-1 rounded-md border border-line bg-card px-2 font-mono text-[12px] text-ink outline-none focus:border-accent/50"
+                        />
+                        <input
+                          value={entry.display_name || ''}
+                          onChange={(e) => {
+                            const next = [...(form.catalog_models || [])];
+                            next[idx] = {
+                              ...next[idx],
+                              display_name: e.target.value || undefined,
+                            };
+                            setForm({ ...form, catalog_models: next });
+                          }}
+                          placeholder="显示名"
+                          className="h-8 w-28 shrink-0 rounded-md border border-line bg-card px-2 text-[12px] text-ink outline-none focus:border-accent/50"
+                        />
+                        <button
+                          type="button"
+                          title="上移"
+                          disabled={idx === 0}
+                          onClick={() => {
+                            if (idx === 0) return;
+                            const next = [...(form.catalog_models || [])];
+                            [next[idx - 1], next[idx]] = [next[idx], next[idx - 1]];
+                            setForm({ ...form, catalog_models: next });
+                          }}
+                          className="h-8 w-8 shrink-0 rounded-md border border-line text-[11px] text-ink-dim disabled:opacity-40"
+                        >
+                          ↑
+                        </button>
+                        <button
+                          type="button"
+                          title="下移"
+                          disabled={idx >= (form.catalog_models || []).length - 1}
+                          onClick={() => {
+                            const list = form.catalog_models || [];
+                            if (idx >= list.length - 1) return;
+                            const next = [...list];
+                            [next[idx], next[idx + 1]] = [next[idx + 1], next[idx]];
+                            setForm({ ...form, catalog_models: next });
+                          }}
+                          className="h-8 w-8 shrink-0 rounded-md border border-line text-[11px] text-ink-dim disabled:opacity-40"
+                        >
+                          ↓
+                        </button>
+                        <button
+                          type="button"
+                          title="删除"
+                          onClick={() => {
+                            const next = (form.catalog_models || []).filter((_, i) => i !== idx);
+                            setForm({
+                              ...form,
+                              catalog_models: next.length ? next : undefined,
+                            });
+                          }}
+                          className="h-8 w-8 shrink-0 rounded-md border border-line text-[11px] text-danger"
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      onClick={() =>
+                        setForm({
+                          ...form,
+                          catalog_models: [...(form.catalog_models || []), { slug: '' }],
+                        })
+                      }
+                    >
+                      添加模型
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => {
+                        const m = form.model?.trim();
+                        if (!m) return;
+                        const cur = form.catalog_models || [];
+                        if (cur.some((e) => e.slug === m)) return;
+                        setForm({
+                          ...form,
+                          catalog_models: [{ slug: m }, ...cur],
+                        });
+                      }}
+                    >
+                      将默认模型加入目录
+                    </Button>
+                    {models.length > 0 && (
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => {
+                          const cur = form.catalog_models || [];
+                          const have = new Set(cur.map((e) => e.slug));
+                          const add = models
+                            .filter((m) => !have.has(m.id))
+                            .map((m) => ({ slug: m.id }));
+                          if (!add.length) return;
+                          setForm({ ...form, catalog_models: [...cur, ...add] });
+                        }}
+                      >
+                        从已加载列表全部加入
+                      </Button>
+                    )}
+                  </div>
+                  <div className="text-[11px] text-ink-faint">
+                    切换档案时整表覆盖 ~/.codex/model_catalog.json 并设置 model_catalog_json；未配置则不改本机 catalog。修改后需重启 Codex 才能刷新 /model。
                   </div>
                 </div>
               )}

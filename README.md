@@ -97,7 +97,7 @@ Hermes switch 时会把 profile 多 key **镜像**到 `~/.hermes/auth.json` 的 
 
 - **Gemini CLI**：API key 存在 `~/.gemini/.env`（不在 settings.json）。切换时只重写 `.env` 中的 `GEMINI_API_KEY` 和 `GOOGLE_GEMINI_BASE_URL`，保留其他环境变量；settings.json（mcpServers、model、security）不动。需先设 `security.auth.selectedType` 为 `gemini-api-key`。
 - **OpenCode**：profile 的 `provider` 字段（小写）作为 provider id，写入 `provider.<id>.options`。切换某个 provider 不影响其他 provider，mcp/permission/tools/agent 全部保留。
-- **Codex**：API key 存在 `~/.codex/auth.json` 的 `OPENAI_API_KEY`（不在 config.toml）。切换时只重写 auth.json 的 key 与 `config.toml` 中对应 provider 的 `base_url`，保留 `wire_api` 等协议字段、MCP servers、projects 等共享配置。TOML 往返会规范化格式并丢失注释（可在 `config.backup.*.toml` 中找回）。
+- **Codex**：API key 存在 `~/.codex/auth.json` 的 `OPENAI_API_KEY`（不在 config.toml）。切换时只重写 auth.json 的 key 与 `config.toml` 中对应 provider 的 `base_url`，保留 `wire_api` 等协议字段、MCP servers、projects 等共享配置。TOML 往返会规范化格式并丢失注释（可在 `config.backup.*.toml` 中找回）。若档案配置了 **模型目录**（`catalog_models`），切换时会整表覆盖 `~/.codex/model_catalog.json` 并设置 `model_catalog_json`，供 Codex `/model` 显示第三方模型名（slug 原样保存）；未配置则不改本机 catalog。修改 catalog 后需重启 Codex 才能刷新列表。
 - **Hermes**：MVP 支持 custom OpenAI-compatible endpoint。profile 的 `provider` 为 custom 名（如 `freemodel`），写入 `model.provider: custom:freemodel`、`model.default`，并 upsert `custom_providers` 中对应项的 `base_url`/`api_key`/`api_mode`；`context_1m` 决定 `model.context_length`（并镜像到当前 custom provider）：开启 = **1M**；关闭 = 模型感知默认（**Grok 500k**，其它 **200k**）。新建 Hermes profile 默认关闭 1M。mcp_servers、skills、agent、platforms 等保留。switch 时把 Helio 多 key **整表镜像**到 `auth.json` 的 `credential_pool[custom:<name>]`（活跃 key 在前；无文件则创建）。YAML 写回会丢失注释（可在 `config.backup.*.yaml` 找回）。已开 session 需新会话或 `hermes gateway restart` 才读新配置。
 - **OpenClaw**：MVP 支持 `models.providers.<id>` custom provider。profile 的 `provider` 为 provider id（如 `cpa`），写入 `baseUrl`/`apiKey`/`api`，并设 `agents.defaults.model.primary = provider/model`；保留 fallbacks、mcp、channels、skills。若存在 `agents/main/agent/models.json` 会同步该 provider。`context_1m` 写入 `models[].contextWindow` 与 `agents.defaults.contextTokens`（开 1M / 关则 Grok 500k、其它 200k）；`max_tokens`（OpenClaw 专用）写入 `models[].maxTokens`（默认新建 128000）。已开 gateway 可能需重启才读新配置。
 
@@ -121,6 +121,7 @@ Shared Config (permissions, hooks, MCP, skills)
 - [x] Hermes 适配器（custom endpoint MVP）
 - [x] OpenClaw 适配器（custom provider MVP）
 - [x] 探活按工具协议对齐 + 同 API 多 Key 池
+- [x] Codex 模型目录（model_catalog_json / `/model` 第三方模型名）
 - [ ] MCP 统一管理面板 / Proxy 模式 / Usage 统计
 
 ## 许可证

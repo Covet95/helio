@@ -1,8 +1,14 @@
 use super::ConfigAdapter;
-use crate::models::ApiProfile;
+use crate::models::{ApiProfile, CodexCatalogModel};
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
+
+/// 非 1M 时 catalog 条目默认上下文（与常见 Codex 内置条目对齐）
+const CATALOG_CONTEXT_STANDARD: i64 = 272_000;
+const CATALOG_CONTEXT_1M: i64 = 1_000_000;
+
+const FALLBACK_BASE_INSTRUCTIONS: &str = "You are Codex, a coding agent based on GPT-5. You and the user share one workspace, and your job is to collaborate with them until their goal is genuinely handled.";
 
 pub struct CodexAdapter {
     config_dir: PathBuf,
@@ -21,6 +27,10 @@ impl CodexAdapter {
 
     fn auth_file_path(&self) -> PathBuf {
         self.config_dir.join("auth.json")
+    }
+
+    fn model_catalog_path(&self) -> PathBuf {
+        self.config_dir.join("model_catalog.json")
     }
 
     /// 清理指定前缀的备份文件，保留最新的 `keep` 个。失败容错（不中断主流程）。
@@ -45,6 +55,166 @@ impl CodexAdapter {
         for entry in backups.iter().skip(keep) {
             let _ = fs::remove_file(entry.path());
         }
+    }
+
+    /// 有效 catalog 列表：过滤空 slug、按首次出现去重，默认 model 不在列表时 prepend。
+    fn effective_catalog_models(api_profile: &ApiProfile) -> Vec<CodexCatalogModel> {
+        let mut out: Vec<CodexCatalogModel> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        if let Some(list) = api_profile.codex.catalog_models.as_ref() {
+            for entry in list {
+                let slug = entry.slug.as_str();
+                // 不强制改写 slug 内容；仅跳过纯空白
+                if slug.trim().is_empty() {
+                    continue;
+                }
+                if !seen.insert(slug.to_string()) {
+                    continue;
+                }
+                let display_name = entry
+                    .display_name
+                    .as_ref()
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string());
+                out.push(CodexCatalogModel {
+                    slug: slug.to_string(),
+                    display_name,
+                });
+            }
+        }
+
+        if let Some(model) = api_profile
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if !seen.contains(model) {
+                out.insert(
+                    0,
+                    CodexCatalogModel {
+                        slug: model.to_string(),
+                        display_name: None,
+                    },
+                );
+            }
+        }
+
+        out
+    }
+
+    fn catalog_template_base_instructions(&self) -> String {
+        let path = self.model_catalog_path();
+        if path.exists() {
+            if let Ok(content) = fs::read_to_string(&path) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(s) = v
+                        .get("models")
+                        .and_then(|m| m.as_array())
+                        .and_then(|arr| arr.first())
+                        .and_then(|m| m.get("base_instructions"))
+                        .and_then(|b| b.as_str())
+                        .filter(|s| !s.is_empty())
+                    {
+                        return s.to_string();
+                    }
+                }
+            }
+        }
+        FALLBACK_BASE_INSTRUCTIONS.to_string()
+    }
+
+    fn build_catalog_json(
+        entries: &[CodexCatalogModel],
+        context_1m: Option<bool>,
+        base_instructions: &str,
+    ) -> serde_json::Value {
+        let ctx = if context_1m == Some(true) {
+            CATALOG_CONTEXT_1M
+        } else {
+            CATALOG_CONTEXT_STANDARD
+        };
+        let models: Vec<serde_json::Value> = entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                let display = e
+                    .display_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(e.slug.as_str());
+                serde_json::json!({
+                    "slug": e.slug,
+                    "display_name": display,
+                    "description": format!("Custom {} model via proxy provider.", e.slug),
+                    "default_reasoning_level": "medium",
+                    "supported_reasoning_levels": [
+                        { "effort": "low", "description": "Fast responses with lighter reasoning" },
+                        { "effort": "medium", "description": "Balances speed and reasoning depth for everyday tasks" },
+                        { "effort": "high", "description": "Greater reasoning depth for complex problems" },
+                        { "effort": "xhigh", "description": "Extra high reasoning depth for complex problems" }
+                    ],
+                    "shell_type": "shell_command",
+                    "visibility": "list",
+                    "supported_in_api": true,
+                    "priority": i,
+                    "additional_speed_tiers": ["fast"],
+                    "service_tiers": [{
+                        "id": "priority",
+                        "name": "Fast",
+                        "description": "1.5x speed, increased usage"
+                    }],
+                    "upgrade": null,
+                    "base_instructions": base_instructions,
+                    "supports_reasoning_summaries": true,
+                    "default_reasoning_summary": "none",
+                    "support_verbosity": true,
+                    "default_verbosity": "low",
+                    "apply_patch_tool_type": "freeform",
+                    "web_search_tool_type": "text_and_image",
+                    "truncation_policy": { "mode": "tokens", "limit": 10000 },
+                    "supports_parallel_tool_calls": true,
+                    "supports_image_detail_original": true,
+                    "context_window": ctx,
+                    "max_context_window": ctx,
+                    "effective_context_window_percent": 95,
+                    "experimental_supported_tools": [],
+                    "input_modalities": ["text", "image"],
+                    "supports_search_tool": true,
+                    "use_responses_lite": false
+                })
+            })
+            .collect();
+        serde_json::json!({ "models": models })
+    }
+
+    /// 有有效列表时整表覆盖 model_catalog.json。
+    fn write_model_catalog(&self, api_profile: &ApiProfile) -> Result<()> {
+        let entries = Self::effective_catalog_models(api_profile);
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        if let Some(parent) = self.model_catalog_path().parent() {
+            fs::create_dir_all(parent).context("Failed to create Codex config directory")?;
+        }
+
+        let base = self.catalog_template_base_instructions();
+        let catalog = Self::build_catalog_json(&entries, api_profile.context_1m, &base);
+        let content = serde_json::to_string_pretty(&catalog)
+            .context("Failed to serialize model_catalog.json")?;
+
+        let path = self.model_catalog_path();
+        let temp_path = path.with_extension("json.tmp");
+        fs::write(&temp_path, &content).context("Failed to write temp model_catalog.json")?;
+        if let Ok(file) = fs::File::open(&temp_path) {
+            let _ = file.sync_all();
+        }
+        fs::rename(&temp_path, &path).context("Failed to rename temp model_catalog.json")?;
+        Ok(())
     }
 
     /// Codex 内置（保留）的 provider id —— 不允许在 model_providers 中覆盖。
@@ -343,6 +513,15 @@ impl ConfigAdapter for CodexAdapter {
                     obj.remove("service_tier");
                 }
             }
+
+            // 有效 catalog 非空时设置指针；空则不强制清除已有 model_catalog_json
+            if !Self::effective_catalog_models(api_profile).is_empty() {
+                let catalog_path = self.model_catalog_path();
+                obj.insert(
+                    "model_catalog_json".to_string(),
+                    serde_json::Value::String(catalog_path.to_string_lossy().into_owned()),
+                );
+            }
         }
 
         config
@@ -396,21 +575,35 @@ impl ConfigAdapter for CodexAdapter {
             let _ = fs::copy(&auth_path, &auth_backup);
         }
 
+        // 备份 model_catalog.json（切换可能整表覆盖）
+        let catalog_path = self.model_catalog_path();
+        if catalog_path.exists() {
+            let catalog_backup = self
+                .config_dir
+                .join(format!("model_catalog.backup.{}.json", timestamp));
+            let _ = fs::copy(&catalog_path, &catalog_backup);
+        }
+
         self.cleanup_old_backups(10)?;
 
         Ok(backup_path)
     }
 
     fn cleanup_old_backups(&self, keep: usize) -> Result<()> {
-        // config.backup.* 与 auth.backup.* 各自独立计数，互不挤占。
+        // config.backup.* 与 auth.backup.* / catalog 各自独立计数，互不挤占。
         self.cleanup_backups_with_prefix("config.backup.", keep);
         self.cleanup_backups_with_prefix("auth.backup.", keep);
+        self.cleanup_backups_with_prefix("model_catalog.backup.", keep);
         Ok(())
     }
 
     /// Codex 特有：API key 存在独立的 ~/.codex/auth.json 的 OPENAI_API_KEY 字段，
     /// 而非 config.toml。保留 auth.json 中的其他字段，只更新 OPENAI_API_KEY。
+    /// 同时在有效 catalog 列表非空时写入 model_catalog.json。
     fn apply_api_credentials(&self, api_profile: &ApiProfile) -> Result<()> {
+        // catalog 先于 auth：失败则整次 switch 的 apply 失败，可重试
+        self.write_model_catalog(api_profile)?;
+
         let path = self.auth_file_path();
 
         // 读取现有 auth.json（保留其他字段），解析失败则从空对象开始。
@@ -770,6 +963,207 @@ command = "npx"
             merged["model_providers"]["custom"]["requires_openai_auth"],
             true
         );
+    }
+
+    #[test]
+    fn test_effective_catalog_auto_includes_default_model() {
+        let profile = ApiProfile {
+            model: Some("gpt-default".into()),
+            codex: CodexProfileFields {
+                catalog_models: Some(vec![CodexCatalogModel {
+                    slug: "gpt-extra".into(),
+                    display_name: Some("Extra".into()),
+                }]),
+                ..Default::default()
+            },
+            ..sample_profile()
+        };
+        let list = CodexAdapter::effective_catalog_models(&profile);
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].slug, "gpt-default");
+        assert_eq!(list[1].slug, "gpt-extra");
+        assert_eq!(list[1].display_name.as_deref(), Some("Extra"));
+    }
+
+    #[test]
+    fn test_effective_catalog_dedupes_and_skips_blank() {
+        let profile = ApiProfile {
+            model: Some("gpt-a".into()),
+            codex: CodexProfileFields {
+                catalog_models: Some(vec![
+                    CodexCatalogModel {
+                        slug: "  ".into(),
+                        display_name: None,
+                    },
+                    CodexCatalogModel {
+                        slug: "gpt-a".into(),
+                        display_name: Some("A".into()),
+                    },
+                    CodexCatalogModel {
+                        slug: "gpt-b".into(),
+                        display_name: None,
+                    },
+                    CodexCatalogModel {
+                        slug: "gpt-a".into(),
+                        display_name: Some("dup".into()),
+                    },
+                ]),
+                ..Default::default()
+            },
+            ..sample_profile()
+        };
+        let list = CodexAdapter::effective_catalog_models(&profile);
+        assert_eq!(
+            list.iter().map(|e| e.slug.as_str()).collect::<Vec<_>>(),
+            vec!["gpt-a", "gpt-b"]
+        );
+        assert_eq!(list[0].display_name.as_deref(), Some("A"));
+    }
+
+    #[test]
+    fn test_merge_sets_model_catalog_json_when_catalog_configured() {
+        let adapter = CodexAdapter {
+            config_dir: PathBuf::from("/tmp/helio-codex-fake"),
+        };
+        let profile = ApiProfile {
+            model: Some("gpt-x".into()),
+            codex: CodexProfileFields {
+                catalog_models: Some(vec![CodexCatalogModel {
+                    slug: "gpt-x".into(),
+                    display_name: None,
+                }]),
+                ..Default::default()
+            },
+            ..sample_profile()
+        };
+        let merged = adapter.merge_config(&profile, &serde_json::json!({}));
+        assert_eq!(
+            merged["model_catalog_json"],
+            "/tmp/helio-codex-fake/model_catalog.json"
+        );
+    }
+
+    #[test]
+    fn test_merge_empty_catalog_does_not_force_pointer() {
+        let adapter = CodexAdapter {
+            config_dir: PathBuf::from("/tmp/helio-codex-fake"),
+        };
+        let shared = serde_json::json!({
+            "model_catalog_json": "/existing/catalog.json"
+        });
+        let profile = sample_profile(); // no model, no catalog_models
+        let merged = adapter.merge_config(&profile, &shared);
+        assert_eq!(merged["model_catalog_json"], "/existing/catalog.json");
+    }
+
+    #[test]
+    fn test_write_model_catalog_overwrites_and_preserves_slug() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let config_dir = std::env::temp_dir().join(format!(
+            "switch-api-codex-catalog-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&config_dir).unwrap();
+        // 旧 catalog 含其它 slug，应被整表覆盖
+        fs::write(
+            config_dir.join("model_catalog.json"),
+            r#"{"models":[{"slug":"old-only","display_name":"Old","base_instructions":"KEEP_ME"}]}"#,
+        )
+        .unwrap();
+
+        let adapter = CodexAdapter {
+            config_dir: config_dir.clone(),
+        };
+        let profile = ApiProfile {
+            model: Some("GPT-5.6-Sol".into()),
+            context_1m: Some(true),
+            codex: CodexProfileFields {
+                catalog_models: Some(vec![
+                    CodexCatalogModel {
+                        slug: "GPT-5.6-Sol".into(),
+                        display_name: Some("Sol".into()),
+                    },
+                    CodexCatalogModel {
+                        slug: "extra-model".into(),
+                        display_name: None,
+                    },
+                ]),
+                ..Default::default()
+            },
+            ..sample_profile()
+        };
+        adapter.write_model_catalog(&profile).unwrap();
+
+        let written: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(config_dir.join("model_catalog.json")).unwrap(),
+        )
+        .unwrap();
+        let models = written["models"].as_array().unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0]["slug"], "GPT-5.6-Sol"); // 原样
+        assert_eq!(models[0]["display_name"], "Sol");
+        assert_eq!(models[0]["context_window"], 1_000_000);
+        assert_eq!(models[0]["base_instructions"], "KEEP_ME"); // 复用旧模板
+        assert_eq!(models[1]["slug"], "extra-model");
+        assert_eq!(models[1]["display_name"], "extra-model");
+        assert_eq!(models[1]["priority"], 1);
+        // old-only 消失
+        assert!(models.iter().all(|m| m["slug"] != "old-only"));
+
+        let _ = fs::remove_dir_all(&config_dir);
+    }
+
+    #[test]
+    fn test_write_model_catalog_noop_when_empty() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let config_dir = std::env::temp_dir().join(format!(
+            "switch-api-codex-catalog-empty-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&config_dir).unwrap();
+        let catalog = config_dir.join("model_catalog.json");
+        fs::write(&catalog, r#"{"models":[{"slug":"keep"}]}"#).unwrap();
+
+        let adapter = CodexAdapter {
+            config_dir: config_dir.clone(),
+        };
+        adapter.write_model_catalog(&sample_profile()).unwrap();
+        let content = fs::read_to_string(&catalog).unwrap();
+        assert!(content.contains("keep"));
+
+        let _ = fs::remove_dir_all(&config_dir);
+    }
+
+    #[test]
+    fn test_write_model_catalog_standard_context_when_not_1m() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let config_dir = std::env::temp_dir().join(format!(
+            "switch-api-codex-catalog-ctx-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&config_dir).unwrap();
+        let adapter = CodexAdapter {
+            config_dir: config_dir.clone(),
+        };
+        let profile = ApiProfile {
+            model: Some("m".into()),
+            context_1m: Some(false),
+            ..sample_profile()
+        };
+        adapter.write_model_catalog(&profile).unwrap();
+        let written: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(config_dir.join("model_catalog.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(written["models"][0]["context_window"], 272_000);
+
+        let _ = fs::remove_dir_all(&config_dir);
     }
 
     #[test]
