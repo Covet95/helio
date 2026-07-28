@@ -2,6 +2,11 @@
 export interface CodexCatalogModel {
   slug: string;
   display_name?: string;
+  context_window?: number;
+  supports_reasoning?: boolean;
+  supports_images?: boolean;
+  supports_tool_calls?: boolean;
+  supports_web_search?: boolean;
 }
 
 export interface ApiProfile {
@@ -26,11 +31,13 @@ export interface ApiProfile {
   context_1m?: boolean;
   /** OpenClaw: models[].maxTokens（仅 OpenClaw 使用，不与 Hermes 共用语义） */
   max_tokens?: number;
-  /** Codex provider 的 wire 协议（responses / chat） */
+  /** Codex legacy import compatibility; generated config always uses Responses. */
   wire_api?: string;
-  /** Codex provider 是否要求 OpenAI 鉴权 */
+  /** Codex provider-scoped API key environment variable. */
+  env_key?: string;
+  /** Codex legacy import compatibility. */
   requires_openai_auth?: boolean;
-  /** Codex provider 的实验性 Bearer Token（部分第三方中转在 requires_openai_auth 鉴权失败时需要） */
+  /** Codex legacy import compatibility. */
   experimental_bearer_token?: string;
   /** Codex 顶层 model_thinking_enabled 开关 */
   model_thinking_enabled?: boolean;
@@ -71,7 +78,7 @@ export interface ApiKeyEntry {
   created_at?: number;
 }
 
-export type TargetApp = 'claude-code' | 'codex' | 'gemini' | 'opencode' | 'hermes' | 'openclaw';
+export type TargetApp = 'claude-code' | 'codex' | 'pi' | 'opencode' | 'hermes' | 'openclaw';
 
 /// 已注册工具的元数据，用于动态生成 UI
 export interface ToolInfo {
@@ -88,7 +95,7 @@ export interface ToolInfo {
 export const SUPPORTED_TOOLS: ToolInfo[] = [
   { id: 'claude-code', displayName: 'Claude Code', short: 'CC', color: '#8A5A44', format: 'JSON' },
   { id: 'codex', displayName: 'Codex', short: 'CX', color: '#10B981', format: 'TOML' },
-  { id: 'gemini', displayName: 'Gemini CLI', short: 'GM', color: '#4F8DF6', format: '.env' },
+  { id: 'pi', displayName: 'Pi', short: 'PI', color: '#4F8DF6', format: 'JSON' },
   { id: 'opencode', displayName: 'OpenCode', short: 'OC', color: '#4B5563', format: 'JSON' },
   { id: 'hermes', displayName: 'Hermes', short: 'HM', color: '#7C3AED', format: 'YAML' },
   { id: 'openclaw', displayName: 'OpenClaw', short: 'OCW', color: '#0EA5E9', format: 'JSON' },
@@ -138,7 +145,7 @@ export interface DatabaseInfo {
 export interface StatusInfo {
   claude_code?: TargetStatus;
   codex?: TargetStatus;
-  gemini?: TargetStatus;
+  pi?: TargetStatus;
   opencode?: TargetStatus;
   hermes?: TargetStatus;
   openclaw?: TargetStatus;

@@ -2,6 +2,8 @@ use anyhow::Result;
 use colored::Colorize;
 use std::io::{self, Write};
 
+pub mod secure_fs;
+
 /// 打印成功消息
 pub fn success(msg: &str) {
     println!("{} {}", "✓".green().bold(), msg);

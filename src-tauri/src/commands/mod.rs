@@ -8,4 +8,3 @@ pub(crate) mod helpers;
 pub mod main_cmds;
 
 pub use main_cmds::AppState;
-pub(crate) use main_cmds::apply_profile_config;

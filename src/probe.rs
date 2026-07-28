@@ -13,6 +13,17 @@ pub struct ModelTestResult {
     pub key_label: Option<String>,
 }
 
+pub struct ProbeRequest<'a> {
+    pub target_app: &'a str,
+    pub api_url: &'a str,
+    pub api_key: &'a str,
+    pub model: &'a str,
+    pub wire_api: Option<&'a str>,
+    pub api_mode: Option<&'a str>,
+    pub experimental_bearer_token: Option<&'a str>,
+    pub key_label: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProbeProtocol {
     ChatCompletions,
@@ -220,10 +231,7 @@ fn normalize_hermes_openclaw_mode(api_mode: Option<&str>) -> &'static str {
 
 fn bearer_headers(token: &str) -> Vec<(String, String)> {
     vec![
-        (
-            "Authorization".into(),
-            format!("Bearer {}", token),
-        ),
+        ("Authorization".into(), format!("Bearer {}", token)),
         ("Content-Type".into(), "application/json".into()),
     ]
 }
@@ -302,48 +310,56 @@ fn resolve_probe_plan(
             success: SuccessCheck::AnthropicContent,
         }),
         "codex" => {
-            let wire = wire_api.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("responses");
-            let token = experimental_bearer_token
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .unwrap_or(key);
-            if wire == "chat" {
-                Ok(ProbePlan {
-                    protocol: ProbeProtocol::ChatCompletions,
-                    // Codex base 原样（不剥 Anthropic 后缀）
-                    endpoint: chat_completions_url_raw(api_url),
-                    headers: bearer_headers(token),
-                    body: chat_body(model),
-                    success: SuccessCheck::ChatChoices,
-                })
-            } else {
-                // 默认 responses（与 adapter 新 provider 默认一致）
-                Ok(ProbePlan {
-                    protocol: ProbeProtocol::Responses,
-                    endpoint: responses_url_raw(api_url),
-                    headers: bearer_headers(token),
-                    body: responses_body(model),
-                    success: SuccessCheck::ResponsesOutputOrStatus,
-                })
-            }
+            let _ = (wire_api, experimental_bearer_token);
+            Ok(ProbePlan {
+                protocol: ProbeProtocol::Responses,
+                endpoint: responses_url_raw(api_url),
+                headers: bearer_headers(key),
+                body: responses_body(model),
+                success: SuccessCheck::ResponsesOutputOrStatus,
+            })
         }
-        "gemini" => {
-            if is_gemini_official(api_url) {
+        "pi" => {
+            // Pi: protocol from api_mode/wire_api; official Google host → generateContent
+            let mode = api_mode.unwrap_or("").trim().to_lowercase();
+            let wire = wire_api.unwrap_or("").trim().to_lowercase();
+            if is_gemini_official(api_url)
+                && !mode.contains("anthropic")
+                && !mode.contains("response")
+                && wire != "responses"
+            {
                 let mut endpoint = gemini_generate_url(api_url, model);
-                // key 走 query，避免与部分代理 header 行为不一致
                 let sep = if endpoint.contains('?') { "&" } else { "?" };
-                endpoint = format!(
-                    "{}{}key={}",
-                    endpoint,
-                    sep,
-                    urlencoding_minimal(key)
-                );
+                endpoint = format!("{}{}key={}", endpoint, sep, urlencoding_minimal(key));
                 Ok(ProbePlan {
                     protocol: ProbeProtocol::GeminiGenerate,
                     endpoint,
                     headers: vec![("Content-Type".into(), "application/json".into())],
                     body: gemini_body(),
                     success: SuccessCheck::GeminiCandidates,
+                })
+            } else if mode.contains("anthropic")
+                || mode == "anthropic_messages"
+                || mode == "anthropic-messages"
+            {
+                Ok(ProbePlan {
+                    protocol: ProbeProtocol::AnthropicMessages,
+                    endpoint: anthropic_messages_url(api_url),
+                    headers: anthropic_headers(key),
+                    body: anthropic_body(model),
+                    success: SuccessCheck::AnthropicContent,
+                })
+            } else if mode.contains("response")
+                || mode == "codex_responses"
+                || mode == "openai-responses"
+                || wire == "responses"
+            {
+                Ok(ProbePlan {
+                    protocol: ProbeProtocol::Responses,
+                    endpoint: responses_url_raw(api_url),
+                    headers: bearer_headers(key),
+                    body: responses_body(model),
+                    success: SuccessCheck::ResponsesOutputOrStatus,
                 })
             } else {
                 Ok(ProbePlan {
@@ -482,31 +498,22 @@ async fn execute_probe_plan(api_url: &str, plan: &ProbePlan) -> Result<(), Strin
 }
 
 /// 按参数探活；成功返回 ModelTestResult，失败返回 Err 文案。
-pub async fn probe_with_params(
-    target_app: &str,
-    api_url: &str,
-    api_key: &str,
-    model: &str,
-    wire_api: Option<&str>,
-    api_mode: Option<&str>,
-    experimental_bearer_token: Option<&str>,
-    key_label: Option<String>,
-) -> Result<ModelTestResult, String> {
+pub async fn probe_with_params(request: ProbeRequest<'_>) -> Result<ModelTestResult, String> {
     let plan = resolve_probe_plan(
-        target_app,
-        api_url,
-        api_key,
-        model,
-        wire_api,
-        api_mode,
-        experimental_bearer_token,
+        request.target_app,
+        request.api_url,
+        request.api_key,
+        request.model,
+        request.wire_api,
+        request.api_mode,
+        request.experimental_bearer_token,
     )?;
-    execute_probe_plan(api_url, &plan).await?;
+    execute_probe_plan(request.api_url, &plan).await?;
     Ok(ModelTestResult {
-        model: model.trim().to_string(),
+        model: request.model.trim().to_string(),
         endpoint: plan.endpoint,
         protocol: plan.protocol.as_str().to_string(),
-        key_label,
+        key_label: request.key_label,
     })
 }
 
@@ -579,10 +586,7 @@ fn map_reachability_error(e: reqwest::Error) -> String {
 
 /// GET `api_url`：任意 HTTP 响应 = 可达；仅网络错误 = 失败。
 /// 超时类失败最多重试 `max_retries` 次。
-pub async fn probe_reachability(
-    api_url: &str,
-    config: &ReachabilityConfig,
-) -> ReachabilityResult {
+pub async fn probe_reachability(api_url: &str, config: &ReachabilityConfig) -> ReachabilityResult {
     let endpoint = api_url.trim().trim_end_matches('/').to_string();
     let tested_at = chrono::Utc::now().timestamp();
     if endpoint.is_empty() {
@@ -757,7 +761,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_chat_wire() {
+    fn codex_legacy_chat_wire_is_normalized_to_responses() {
         let plan = resolve_probe_plan(
             "codex",
             "https://proxy.example/v1",
@@ -768,12 +772,12 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(plan.protocol, ProbeProtocol::ChatCompletions);
-        assert!(plan.endpoint.ends_with("/chat/completions"));
+        assert_eq!(plan.protocol, ProbeProtocol::Responses);
+        assert!(plan.endpoint.ends_with("/responses"));
     }
 
     #[test]
-    fn codex_experimental_bearer_overrides_key() {
+    fn codex_legacy_bearer_is_ignored() {
         let plan = resolve_probe_plan(
             "codex",
             "https://api.openai.com/v1",
@@ -790,7 +794,7 @@ mod tests {
             .find(|(k, _)| k == "Authorization")
             .map(|(_, v)| v.as_str())
             .unwrap();
-        assert_eq!(auth, "Bearer sk-exp-token");
+        assert_eq!(auth, "Bearer sk-main");
     }
 
     #[test]
@@ -865,9 +869,9 @@ mod tests {
     }
 
     #[test]
-    fn gemini_official_generate() {
+    fn pi_official_google_generate() {
         let plan = resolve_probe_plan(
-            "gemini",
+            "pi",
             "https://generativelanguage.googleapis.com",
             "AIzaSyTest",
             "gemini-2.0-flash",
@@ -877,14 +881,31 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.protocol, ProbeProtocol::GeminiGenerate);
-        assert!(plan.endpoint.contains("/v1beta/models/gemini-2.0-flash:generateContent"));
+        assert!(plan
+            .endpoint
+            .contains("/v1beta/models/gemini-2.0-flash:generateContent"));
         assert!(plan.endpoint.contains("key=AIzaSyTest"));
     }
 
     #[test]
+    fn pi_custom_defaults_to_chat() {
+        let plan = resolve_probe_plan(
+            "pi",
+            "https://proxy.example/v1",
+            "sk",
+            "foo",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.protocol, ProbeProtocol::ChatCompletions);
+    }
+
+    #[test]
     fn missing_model_errors() {
-        let err = resolve_probe_plan("codex", "https://x", "sk", "  ", None, None, None)
-            .unwrap_err();
+        let err =
+            resolve_probe_plan("codex", "https://x", "sk", "  ", None, None, None).unwrap_err();
         assert!(err.contains("模型"));
     }
 

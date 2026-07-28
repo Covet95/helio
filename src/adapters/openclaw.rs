@@ -1,5 +1,6 @@
 use super::ConfigAdapter;
 use crate::models::ApiProfile;
+use crate::utils::secure_fs::{atomic_write_private, copy_private};
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -165,10 +166,7 @@ impl OpenClawAdapter {
             let models_obj = models.as_object_mut().unwrap();
             // keep mode if present; default replace for custom-only installs
             if !models_obj.contains_key("mode") {
-                models_obj.insert(
-                    "mode".into(),
-                    serde_json::Value::String("replace".into()),
-                );
+                models_obj.insert("mode".into(), serde_json::Value::String("replace".into()));
             }
             let providers = models_obj
                 .entry("providers".to_string())
@@ -252,10 +250,10 @@ impl OpenClawAdapter {
                 // was a string primary historically
                 *model = serde_json::json!({});
             }
-            model.as_object_mut().unwrap().insert(
-                "primary".into(),
-                serde_json::Value::String(primary.clone()),
-            );
+            model
+                .as_object_mut()
+                .unwrap()
+                .insert("primary".into(), serde_json::Value::String(primary.clone()));
 
             // ensure agents.defaults.models map has the key (empty object ok)
             let models_map = defaults_obj
@@ -272,14 +270,9 @@ impl OpenClawAdapter {
             // Only write when context_1m is Some, so we don't clobber user tuning
             // on bare API-key-only switches.
             if api_profile.context_1m.is_some() {
-                let existing_ct = defaults_obj
-                    .get("contextTokens")
-                    .and_then(|v| v.as_i64());
+                let existing_ct = defaults_obj.get("contextTokens").and_then(|v| v.as_i64());
                 let ct = Self::resolve_context_window(api_profile, existing_ct);
-                defaults_obj.insert(
-                    "contextTokens".into(),
-                    serde_json::Value::Number(ct.into()),
-                );
+                defaults_obj.insert("contextTokens".into(), serde_json::Value::Number(ct.into()));
             }
         }
 
@@ -287,17 +280,10 @@ impl OpenClawAdapter {
     }
 
     fn write_json_pretty(path: &Path, config: &serde_json::Value) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).context("Failed to create OpenClaw config directory")?;
-        }
-        let content = serde_json::to_string_pretty(config)
-            .context("Failed to serialize OpenClaw config")?;
-        let temp = path.with_extension("json.tmp");
-        fs::write(&temp, format!("{}\n", content)).context("Failed to write temp OpenClaw config")?;
-        if let Ok(file) = fs::File::open(&temp) {
-            let _ = file.sync_all();
-        }
-        fs::rename(&temp, path).context("Failed to rename temp OpenClaw config")?;
+        let content =
+            serde_json::to_string_pretty(config).context("Failed to serialize OpenClaw config")?;
+        atomic_write_private(path, format!("{}\n", content).as_bytes())
+            .context("Failed to write OpenClaw config")?;
         Ok(())
     }
 
@@ -396,6 +382,12 @@ impl OpenClawAdapter {
     }
 }
 
+impl Default for OpenClawAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ConfigAdapter for OpenClawAdapter {
     fn config_path(&self) -> PathBuf {
         self.config_file_path()
@@ -435,16 +427,15 @@ impl ConfigAdapter for OpenClawAdapter {
         let backup_path = self
             .config_dir
             .join(format!("openclaw.backup.{}.json", timestamp));
-        fs::copy(&path, &backup_path).context("Failed to backup openclaw.json")?;
+        copy_private(&path, &backup_path).context("Failed to backup openclaw.json")?;
 
         let agent_models = self.agent_models_path();
         if agent_models.exists() {
-            let bak = self.config_dir.join(format!(
-                "models.backup.{}.json",
-                timestamp
-            ));
+            let bak = self
+                .config_dir
+                .join(format!("models.backup.{}.json", timestamp));
             // store under config_dir root for simple cleanup
-            let _ = fs::copy(&agent_models, &bak);
+            let _ = copy_private(&agent_models, &bak);
         }
 
         self.cleanup_old_backups(10)?;
@@ -459,6 +450,10 @@ impl ConfigAdapter for OpenClawAdapter {
         self.cleanup_backup_prefix("openclaw.backup.", keep)?;
         self.cleanup_backup_prefix("models.backup.", keep)?;
         Ok(())
+    }
+
+    fn managed_paths(&self) -> Vec<PathBuf> {
+        vec![self.config_file_path(), self.agent_models_path()]
     }
 
     fn apply_api_credentials(&self, api_profile: &ApiProfile) -> Result<()> {
@@ -488,10 +483,7 @@ mod tests {
 
     #[test]
     fn map_api_defaults_to_openai_completions() {
-        assert_eq!(
-            OpenClawAdapter::map_api_field(None),
-            "openai-completions"
-        );
+        assert_eq!(OpenClawAdapter::map_api_field(None), "openai-completions");
         assert_eq!(
             OpenClawAdapter::map_api_field(Some("anthropic_messages")),
             "anthropic-messages"
@@ -663,7 +655,10 @@ mod tests {
             },
             ..Default::default()
         };
-        assert_eq!(OpenClawAdapter::resolve_context_window(&p, Some(1)), 1_000_000);
+        assert_eq!(
+            OpenClawAdapter::resolve_context_window(&p, Some(1)),
+            1_000_000
+        );
         assert_eq!(OpenClawAdapter::resolve_max_tokens(&p, Some(8)), 32000);
         // Non-Grok + 1M off → standard 200k (ignores previous existing value)
         let p2 = ApiProfile {
@@ -726,10 +721,7 @@ mod tests {
             "http://127.0.0.1:9999/v1"
         );
         assert_eq!(data["providers"]["cpa"]["apiKey"], "sk-new");
-        assert_eq!(
-            data["providers"]["cpa"]["models"][0]["maxTokens"],
-            64000
-        );
+        assert_eq!(data["providers"]["cpa"]["models"][0]["maxTokens"], 64000);
         assert_eq!(
             data["providers"]["cpa"]["models"][0]["contextWindow"],
             1_000_000

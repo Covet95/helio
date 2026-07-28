@@ -5,8 +5,9 @@ mod session_history;
 mod tray;
 
 use commands::AppState;
-use switch_api::db::Database;
 use std::sync::Mutex;
+use switch_api::db::Database;
+use switch_api::utils::secure_fs::ensure_private_dir;
 use tauri::WindowEvent;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -17,7 +18,7 @@ pub fn run() {
         .join("db.sqlite");
 
     if let Some(parent) = db_path.parent() {
-        std::fs::create_dir_all(parent).expect("Failed to create database directory");
+        ensure_private_dir(parent).expect("Failed to create database directory");
     }
 
     let db = Database::open(&db_path).expect("Failed to open database");

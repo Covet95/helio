@@ -1,5 +1,6 @@
 use super::ConfigAdapter;
 use crate::models::ApiProfile;
+use crate::utils::secure_fs::{atomic_write_private, copy_private};
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
@@ -163,10 +164,7 @@ impl OpenCodeAdapter {
     /// CLI / GUI 共用，避免删前取 provider 的逻辑分叉。
     ///
     /// 返回值：档案是否存在并已删除。
-    pub fn delete_profile_and_cleanup_local(
-        db: &crate::db::Database,
-        name: &str,
-    ) -> Result<bool> {
+    pub fn delete_profile_and_cleanup_local(db: &crate::db::Database, name: &str) -> Result<bool> {
         let provider = db
             .get_profile_by_name_and_target(name, crate::models::TargetApp::OpenCode)
             .ok()
@@ -212,10 +210,7 @@ impl OpenCodeAdapter {
             // headers 携带认证信息（如 Bearer token），OpenCode 远程 MCP 支持，保留
             if let Some(headers) = obj.get("headers").and_then(|v| v.as_object()) {
                 if !headers.is_empty() {
-                    out.insert(
-                        "headers".into(),
-                        serde_json::Value::Object(headers.clone()),
-                    );
+                    out.insert("headers".into(), serde_json::Value::Object(headers.clone()));
                 }
             }
         } else if let Some(command) = obj.get("command").and_then(|v| v.as_str()) {
@@ -229,10 +224,7 @@ impl OpenCodeAdapter {
             // env → environment（仅非空对象）
             if let Some(env) = obj.get("env").and_then(|v| v.as_object()) {
                 if !env.is_empty() {
-                    out.insert(
-                        "environment".into(),
-                        serde_json::Value::Object(env.clone()),
-                    );
+                    out.insert("environment".into(), serde_json::Value::Object(env.clone()));
                 }
             }
         } else {
@@ -266,10 +258,7 @@ impl OpenCodeAdapter {
             _ => return, // 没有要合并的，直接返回
         };
         // 确保 config["mcp"] 是对象
-        let needs_init = !config
-            .get("mcp")
-            .map(|v| v.is_object())
-            .unwrap_or(false);
+        let needs_init = !config.get("mcp").map(|v| v.is_object()).unwrap_or(false);
         if needs_init {
             config["mcp"] = serde_json::json!({});
         }
@@ -287,6 +276,12 @@ impl OpenCodeAdapter {
         let content = fs::read_to_string(&path).ok()?;
         let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
         parsed.get("mcpServers").cloned()
+    }
+}
+
+impl Default for OpenCodeAdapter {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -437,18 +432,10 @@ impl ConfigAdapter for OpenCodeAdapter {
     fn write_config(&self, config: &serde_json::Value) -> Result<()> {
         let path = self.config_path();
 
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).context("Failed to create OpenCode config directory")?;
-        }
-
         let content =
             serde_json::to_string_pretty(config).context("Failed to serialize OpenCode config")?;
-        let temp_path = path.with_extension("json.tmp");
-        fs::write(&temp_path, &content).context("Failed to write temp OpenCode config")?;
-        if let Ok(file) = fs::File::open(&temp_path) {
-            let _ = file.sync_all();
-        }
-        fs::rename(&temp_path, &path).context("Failed to rename temp OpenCode config")?;
+        atomic_write_private(&path, content.as_bytes())
+            .context("Failed to write OpenCode config")?;
 
         Ok(())
     }
@@ -465,7 +452,7 @@ impl ConfigAdapter for OpenCodeAdapter {
             .config_dir
             .join(format!("opencode.backup.{}.json", timestamp));
 
-        fs::copy(&path, &backup_path).context("Failed to backup config")?;
+        copy_private(&path, &backup_path).context("Failed to backup config")?;
 
         self.cleanup_old_backups(10)?;
 
@@ -501,8 +488,8 @@ impl ConfigAdapter for OpenCodeAdapter {
 
 #[cfg(test)]
 mod tests {
-    use crate::models::OpenCodeProfileFields;
     use super::*;
+    use crate::models::OpenCodeProfileFields;
 
     fn sample_profile() -> ApiProfile {
         ApiProfile {
@@ -538,7 +525,9 @@ mod tests {
             "http://127.0.0.1:8317/v1"
         );
         assert_eq!(
-            OpenCodeAdapter::normalize_openai_compatible_base_url("https://dashscope.aliyuncs.com/compatible-mode/v1"),
+            OpenCodeAdapter::normalize_openai_compatible_base_url(
+                "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            ),
             "https://dashscope.aliyuncs.com/compatible-mode/v1"
         );
         assert_eq!(
@@ -632,8 +621,14 @@ mod tests {
         let shared = adapter.extract_shared_config(&config);
 
         // 凭据被保留（共存 provider 仍可用）
-        assert_eq!(shared["provider"]["anthropic"]["options"]["apiKey"], "sk-secret");
-        assert_eq!(shared["provider"]["anthropic"]["options"]["baseURL"], "https://api.com");
+        assert_eq!(
+            shared["provider"]["anthropic"]["options"]["apiKey"],
+            "sk-secret"
+        );
+        assert_eq!(
+            shared["provider"]["anthropic"]["options"]["baseURL"],
+            "https://api.com"
+        );
         assert_eq!(shared["provider"]["anthropic"]["options"]["timeout"], 30000);
         // 其余配置原样保留
         assert_eq!(shared["provider"]["anthropic"]["name"], "Anthropic");
@@ -659,10 +654,16 @@ mod tests {
         let merged = adapter.merge_config(&sample_profile(), &shared);
 
         // 新 provider anthropic 写入
-        assert_eq!(merged["provider"]["anthropic"]["options"]["apiKey"], "sk-test-key");
+        assert_eq!(
+            merged["provider"]["anthropic"]["options"]["apiKey"],
+            "sk-test-key"
+        );
         // 旧 provider cpa 凭据原样保留，不被清空
         assert_eq!(merged["provider"]["cpa"]["options"]["apiKey"], "sk-cpa");
-        assert_eq!(merged["provider"]["cpa"]["options"]["baseURL"], "http://127.0.0.1:8317/v1");
+        assert_eq!(
+            merged["provider"]["cpa"]["options"]["baseURL"],
+            "http://127.0.0.1:8317/v1"
+        );
     }
 
     #[test]
@@ -685,7 +686,10 @@ mod tests {
         let adapter = OpenCodeAdapter::new();
         let profile = ApiProfile {
             opencode: OpenCodeProfileFields {
-                models: Some(vec!["claude-sonnet-4-6".to_string(), "claude-haiku-4-5".to_string()]),
+                models: Some(vec![
+                    "claude-sonnet-4-6".to_string(),
+                    "claude-haiku-4-5".to_string(),
+                ]),
             },
             ..sample_profile()
         };
@@ -704,7 +708,10 @@ mod tests {
         let merged = adapter.merge_config(&sample_profile(), &shared);
 
         // API 写入 provider.anthropic.options
-        assert_eq!(merged["provider"]["anthropic"]["options"]["apiKey"], "sk-test-key");
+        assert_eq!(
+            merged["provider"]["anthropic"]["options"]["apiKey"],
+            "sk-test-key"
+        );
         assert_eq!(
             merged["provider"]["anthropic"]["options"]["baseURL"],
             "https://api.example.com/v1"
@@ -740,7 +747,10 @@ mod tests {
         // 多选的两个 + 默认模型，共 3 个都在 provider.models
         assert!(models["claude-sonnet-4-6"].is_object());
         assert!(models["claude-haiku-4-5"].is_object());
-        assert!(models["claude-opus-4-8"].is_object(), "默认模型也应在 models 里");
+        assert!(
+            models["claude-opus-4-8"].is_object(),
+            "默认模型也应在 models 里"
+        );
         // 顶层默认 model
         assert_eq!(merged["model"], "anthropic/claude-opus-4-8");
     }
@@ -780,9 +790,18 @@ mod tests {
         // 只更新凭据，保留已有 npm / name / models
         assert_eq!(merged["provider"]["anthropic"]["npm"], "@ai-sdk/openai");
         assert_eq!(merged["provider"]["anthropic"]["name"], "我的代理");
-        assert_eq!(merged["provider"]["anthropic"]["models"]["gpt-5.5"]["name"], "GPT-5.5");
-        assert_eq!(merged["provider"]["anthropic"]["options"]["baseURL"], "https://api.example.com/v1");
-        assert_eq!(merged["provider"]["anthropic"]["options"]["apiKey"], "sk-test-key");
+        assert_eq!(
+            merged["provider"]["anthropic"]["models"]["gpt-5.5"]["name"],
+            "GPT-5.5"
+        );
+        assert_eq!(
+            merged["provider"]["anthropic"]["options"]["baseURL"],
+            "https://api.example.com/v1"
+        );
+        assert_eq!(
+            merged["provider"]["anthropic"]["options"]["apiKey"],
+            "sk-test-key"
+        );
     }
 
     #[test]
@@ -803,7 +822,10 @@ mod tests {
         assert_eq!(merged["provider"]["openai"]["name"], "OpenAI");
         assert_eq!(merged["provider"]["openai"]["options"]["timeout"], 5000);
         // 新 provider 已添加
-        assert_eq!(merged["provider"]["anthropic"]["options"]["apiKey"], "sk-test-key");
+        assert_eq!(
+            merged["provider"]["anthropic"]["options"]["apiKey"],
+            "sk-test-key"
+        );
     }
 
     #[test]
@@ -834,7 +856,10 @@ mod tests {
     fn test_convert_empty_env_omitted() {
         let claude = serde_json::json!({ "command": "foo", "env": {} });
         let out = OpenCodeAdapter::convert_one_server(&claude).unwrap();
-        assert!(out.get("environment").is_none(), "空 env 不应写 environment");
+        assert!(
+            out.get("environment").is_none(),
+            "空 env 不应写 environment"
+        );
     }
 
     #[test]
@@ -871,7 +896,10 @@ mod tests {
         let out = OpenCodeAdapter::convert_one_server(&claude).unwrap();
         assert!(out.get("alwaysAllow").is_none());
         assert!(out.get("startup_timeout_sec").is_none());
-        assert_eq!(out["command"], serde_json::json!(["npx", "chrome-devtools-mcp@latest"]));
+        assert_eq!(
+            out["command"],
+            serde_json::json!(["npx", "chrome-devtools-mcp@latest"])
+        );
     }
 
     #[test]
@@ -1007,7 +1035,10 @@ mod tests {
         ];
         assert!(OpenCodeAdapter::provider_still_used(&remaining, "cpa"));
         assert!(OpenCodeAdapter::provider_still_used(&remaining, "CPA"));
-        assert!(!OpenCodeAdapter::provider_still_used(&remaining, "anthropic"));
+        assert!(!OpenCodeAdapter::provider_still_used(
+            &remaining,
+            "anthropic"
+        ));
         // 其它工具的同名 provider 不算
         let mixed = vec![ApiProfile {
             name: "c".into(),
@@ -1017,5 +1048,4 @@ mod tests {
         }];
         assert!(!OpenCodeAdapter::provider_still_used(&mixed, "cpa"));
     }
-
 }

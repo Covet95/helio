@@ -1,13 +1,12 @@
 //! macOS 状态栏(tray)：动态菜单 + 一键切换 profile。
-use switch_api::models::TargetApp;
 use crate::commands::AppState;
-use switch_api::models::ApiProfile;
-use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
-use tauri::tray::{TrayIconBuilder, TrayIconEvent, MouseButton, MouseButtonState};
-use tauri::{AppHandle, Manager};
-use crate::commands::apply_profile_config;
 use serde_json::json;
+use switch_api::models::ApiProfile;
+use switch_api::models::TargetApp;
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::Emitter;
+use tauri::{AppHandle, Manager};
 use tauri_plugin_notification::NotificationExt;
 
 /// 固定菜单项 id（事件处理器按字符串匹配，集中定义避免拼写漂移）。
@@ -25,13 +24,11 @@ fn encode_switch_id(tool: TargetApp, profile_name: &str) -> String {
 /// 解析切换菜单项 id。非切换 id（open_window/quit/非法）返回 None。
 fn parse_switch_id(id: &str) -> Option<(TargetApp, String)> {
     let rest = id.strip_prefix("switch::")?;
-    let mut parts = rest.splitn(2, "::");
-    let tool_str = parts.next()?;
-    let name = parts.next()?;
+    let (tool_str, name) = rest.split_once("::")?;
     if name.is_empty() {
         return None;
     }
-    let tool = TargetApp::from_str(tool_str)?;
+    let tool = TargetApp::parse(tool_str)?;
     Some((tool, name.to_string()))
 }
 
@@ -40,7 +37,7 @@ fn tool_display_name(tool: TargetApp) -> &'static str {
     match tool {
         TargetApp::ClaudeCode => "Claude Code",
         TargetApp::Codex => "Codex",
-        TargetApp::Gemini => "Gemini",
+        TargetApp::Pi => "Pi",
         TargetApp::OpenCode => "OpenCode",
         TargetApp::Hermes => "Hermes",
         TargetApp::OpenClaw => "OpenClaw",
@@ -59,7 +56,7 @@ fn is_active(profile_id: Option<i64>, active_id: Option<i64>) -> bool {
 const TOOLS: [TargetApp; 6] = [
     TargetApp::ClaudeCode,
     TargetApp::Codex,
-    TargetApp::Gemini,
+    TargetApp::Pi,
     TargetApp::OpenCode,
     TargetApp::Hermes,
     TargetApp::OpenClaw,
@@ -82,7 +79,11 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         let actives = TOOLS
             .iter()
             .map(|&t| {
-                let id = db.get_active_profile(t).ok().flatten().map(|a| a.profile_id);
+                let id = db
+                    .get_active_profile(t)
+                    .ok()
+                    .flatten()
+                    .map(|a| a.profile_id);
                 (t, id)
             })
             .collect();
@@ -114,8 +115,10 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             .collect::<tauri::Result<Vec<_>>>()?;
 
         // 子菜单 items 需要 &dyn IsMenuItem
-        let item_refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> =
-            items.iter().map(|i| i as &dyn tauri::menu::IsMenuItem<tauri::Wry>).collect();
+        let item_refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = items
+            .iter()
+            .map(|i| i as &dyn tauri::menu::IsMenuItem<tauri::Wry>)
+            .collect();
 
         let submenu = if item_refs.is_empty() {
             // 没有 profile：放个禁用占位项，提示去 GUI 添加
@@ -187,10 +190,26 @@ pub(crate) fn show_main_window(app: &AppHandle) {
 fn do_switch(app: &AppHandle, tool: TargetApp, profile_name: &str) {
     let result: Result<(), String> = (|| {
         let state = app.state::<AppState>();
-        let db = state.db.lock().map_err(|e| e.to_string())?;
-        let profile = db.get_profile_by_name_and_target(profile_name, tool).map_err(|e| e.to_string())?;
-        apply_profile_config(&db, tool, &profile)?;
+        let (profile, persisted_shared_config) = {
+            let db = state.db.lock().map_err(|e| e.to_string())?;
+            let profile = db
+                .get_profile_by_name_and_target(profile_name, tool)
+                .map_err(|e| e.to_string())?;
+            let persisted_shared_config = db
+                .get_shared_config(tool)
+                .map_err(|e| e.to_string())?
+                .map(|config| config.config);
+            (profile, persisted_shared_config)
+        };
+        let shared_config = crate::commands::main_cmds::apply_profile_config(
+            tool,
+            &profile,
+            persisted_shared_config,
+        )?;
         let id = profile.id.ok_or_else(|| "profile 无 id".to_string())?;
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        db.save_shared_config(tool, shared_config)
+            .map_err(|e| e.to_string())?;
         db.set_active_profile(tool, id).map_err(|e| e.to_string())?;
         Ok(())
     })();
@@ -207,7 +226,11 @@ fn do_switch(app: &AppHandle, tool: TargetApp, profile_name: &str) {
                 .notification()
                 .builder()
                 .title("Helio")
-                .body(format!("已切换 {} → {}", tool_display_name(tool), profile_name))
+                .body(format!(
+                    "已切换 {} → {}",
+                    tool_display_name(tool),
+                    profile_name
+                ))
                 .show();
         }
         Err(e) => {
@@ -215,7 +238,12 @@ fn do_switch(app: &AppHandle, tool: TargetApp, profile_name: &str) {
                 .notification()
                 .builder()
                 .title("Helio 切换失败")
-                .body(format!("{} → {}：{}", tool_display_name(tool), profile_name, e))
+                .body(format!(
+                    "{} → {}：{}",
+                    tool_display_name(tool),
+                    profile_name,
+                    e
+                ))
                 .show();
         }
     }
@@ -350,10 +378,10 @@ mod tests {
     #[test]
     fn test_parse_name_with_double_colon() {
         // profile 名里带 "::" 不能被截断
-        let id = encode_switch_id(TargetApp::Gemini, "weird::name");
+        let id = encode_switch_id(TargetApp::Pi, "weird::name");
         assert_eq!(
             parse_switch_id(&id),
-            Some((TargetApp::Gemini, "weird::name".to_string()))
+            Some((TargetApp::Pi, "weird::name".to_string()))
         );
     }
 

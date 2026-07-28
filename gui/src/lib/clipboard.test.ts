@@ -1,15 +1,14 @@
 import { copyText } from './clipboard';
+import { describe, expect, it } from 'vitest';
 
-function equal(actual: unknown, expected: unknown) {
-  if (actual !== expected) {
-    throw new Error(`expected ${String(expected)}, got ${String(actual)}`);
-  }
-}
+describe('copyText', () => {
+  it('uses the supplied native clipboard writer', async () => {
+    let copied = '';
 
-let copied = '';
+    await copyText('native clipboard text', async (text) => {
+      copied = text;
+    });
 
-await copyText('native clipboard text', async (text) => {
-  copied = text;
+    expect(copied).toBe('native clipboard text');
+  });
 });
-
-equal(copied, 'native clipboard text');

@@ -22,6 +22,7 @@ interface Scanned {
   reasoning_effort?: string;
   context_1m?: boolean;
   wire_api?: string;
+  env_key?: string;
   requires_openai_auth?: boolean;
   experimental_bearer_token?: string;
   model_thinking_enabled?: boolean;
@@ -111,11 +112,9 @@ export default function ImportPage() {
         model_mapping: api.model_mapping,
         reasoning_effort: api.reasoning_effort,
         context_1m: api.context_1m,
-        wire_api: tool === 'hermes' || tool === 'openclaw' ? undefined : api.wire_api,
+        env_key: tool === 'codex' ? api.env_key : undefined,
         api_mode: tool === 'hermes' || tool === 'openclaw' ? api.api_mode : undefined,
         max_tokens: tool === 'openclaw' ? api.max_tokens : undefined,
-        requires_openai_auth: api.requires_openai_auth,
-        experimental_bearer_token: api.experimental_bearer_token,
         model_thinking_enabled: api.model_thinking_enabled,
         service_tier: api.service_tier,
         target_app: tool,

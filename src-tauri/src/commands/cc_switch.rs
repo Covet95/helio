@@ -1,6 +1,6 @@
 //! 从本机 cc-switch 数据库导入 provider → Helio ApiProfile。
-use crate::commands::AppState;
 use crate::commands::helpers::{claude_extract_models, str_field};
+use crate::commands::AppState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use switch_api::models::{ApiProfile, ClaudeProfileFields, CodexProfileFields, TargetApp};
@@ -18,6 +18,7 @@ pub struct CcSwitchProvider {
     pub reasoning_effort: Option<String>,
     pub context_1m: bool,
     pub wire_api: Option<String>,
+    pub env_key: Option<String>,
     pub requires_openai_auth: Option<bool>,
     pub experimental_bearer_token: Option<String>,
     pub model_thinking_enabled: Option<bool>,
@@ -66,7 +67,7 @@ pub async fn import_cc_switch(
     providers: Vec<CcSwitchProvider>,
     state: State<'_, AppState>,
 ) -> Result<usize, String> {
-    let target = TargetApp::from_str(&target_app)
+    let target = TargetApp::parse(&target_app)
         .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
     let mut count = 0;
@@ -88,9 +89,8 @@ pub async fn import_cc_switch(
             },
             codex: CodexProfileFields {
                 reasoning_effort: p.reasoning_effort,
-                wire_api: p.wire_api,
-                requires_openai_auth: p.requires_openai_auth,
-                experimental_bearer_token: p.experimental_bearer_token,
+                wire_api: (target == TargetApp::Codex).then(|| "responses".to_string()),
+                env_key: p.env_key,
                 model_thinking_enabled: p.model_thinking_enabled,
                 service_tier: p.service_tier,
                 ..Default::default()
@@ -117,6 +117,7 @@ pub(crate) fn parse_cc_provider(app_type: &str, settings: &str) -> CcSwitchProvi
         reasoning_effort: None,
         context_1m: false,
         wire_api: None,
+        env_key: None,
         requires_openai_auth: None,
         experimental_bearer_token: None,
         model_thinking_enabled: None,
@@ -151,6 +152,10 @@ pub(crate) fn parse_cc_provider(app_type: &str, settings: &str) -> CcSwitchProvi
                     out.wire_api = Some(w);
                 }
                 out.requires_openai_auth = b.get("requires_openai_auth").and_then(|x| x.as_bool());
+                let env_key = str_field(b, "env_key");
+                if !env_key.trim().is_empty() {
+                    out.env_key = Some(env_key);
+                }
                 let bearer = str_field(b, "experimental_bearer_token");
                 if !bearer.trim().is_empty() {
                     out.experimental_bearer_token = Some(bearer);
@@ -201,9 +206,7 @@ pub(crate) fn parse_cc_provider(app_type: &str, settings: &str) -> CcSwitchProvi
                 out.model = model;
                 out.model_mapping = mapping;
                 if let Some(ref mm) = out.model_mapping {
-                    out.context_1m = mm
-                        .iter()
-                        .any(|(k, v)| k.ends_with("_one_m") && v == "true");
+                    out.context_1m = mm.iter().any(|(k, v)| k.ends_with("_one_m") && v == "true");
                 }
             }
         }

@@ -1,5 +1,6 @@
 use super::ConfigAdapter;
 use crate::models::ApiProfile;
+use crate::utils::secure_fs::{atomic_write_private, copy_private};
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
@@ -18,6 +19,12 @@ impl ClaudeCodeAdapter {
     /// 获取 settings.json 路径（Claude Code 的用户级/全局配置文件）
     fn global_settings_path(&self) -> PathBuf {
         self.config_dir.join("settings.json")
+    }
+}
+
+impl Default for ClaudeCodeAdapter {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -80,7 +87,11 @@ impl ConfigAdapter for ClaudeCodeAdapter {
         shared
     }
 
-    fn merge_config(&self, api_profile: &ApiProfile, shared_config: &serde_json::Value) -> serde_json::Value {
+    fn merge_config(
+        &self,
+        api_profile: &ApiProfile,
+        shared_config: &serde_json::Value,
+    ) -> serde_json::Value {
         let mut config = shared_config.clone();
 
         // 确保 env 对象存在
@@ -165,31 +176,8 @@ impl ConfigAdapter for ClaudeCodeAdapter {
     fn write_config(&self, config: &serde_json::Value) -> Result<()> {
         let path = self.config_path();
 
-        // 确保配置目录存在
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .context("Failed to create config directory")?;
-        }
-
-        // 格式化 JSON（美化输出）
-        let content = serde_json::to_string_pretty(config)
-            .context("Failed to serialize config")?;
-
-        // 原子写入：先写临时文件，再重命名
-        let temp_path = path.with_extension("tmp");
-
-        // 写入临时文件
-        fs::write(&temp_path, &content)
-            .context("Failed to write temp config file")?;
-
-        // 同步到磁盘（确保数据持久化）
-        if let Ok(file) = fs::File::open(&temp_path) {
-            let _ = file.sync_all();
-        }
-
-        // 原子重命名
-        fs::rename(&temp_path, &path)
-            .context("Failed to rename temp config to final config")?;
+        let content = serde_json::to_string_pretty(config).context("Failed to serialize config")?;
+        atomic_write_private(&path, content.as_bytes()).context("Failed to write config")?;
 
         Ok(())
     }
@@ -202,10 +190,11 @@ impl ConfigAdapter for ClaudeCodeAdapter {
         }
 
         let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-        let backup_path = self.config_dir.join(format!("settings.backup.{}.json", timestamp));
+        let backup_path = self
+            .config_dir
+            .join(format!("settings.backup.{}.json", timestamp));
 
-        fs::copy(&path, &backup_path)
-            .context("Failed to backup config")?;
+        copy_private(&path, &backup_path).context("Failed to backup config")?;
 
         // 清理旧备份（保留最近 10 个）
         self.cleanup_old_backups(10)?;

@@ -1,14 +1,15 @@
-use switch_api::adapters::get_adapter;
-use switch_api::db::Database;
-use switch_api::models::{
-    ApiKeyEntry, ApiProfile, HermesProfileFields, OpenClawProfileFields, TargetApp,
-};
-use switch_api::utils;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use switch_api::adapters::get_adapter;
+use switch_api::db::Database;
+use switch_api::models::{
+    ApiKeyEntry, ApiProfile, HermesProfileFields, OpenClawProfileFields, TargetApp,
+};
+use switch_api::probe::ProbeRequest;
+use switch_api::utils;
 
 #[derive(Parser)]
 #[command(name = "switch-api")]
@@ -30,7 +31,7 @@ pub struct Cli {
 pub enum Commands {
     /// 初始化：从现有配置导入
     Init {
-        /// 目标应用 (claude-code, codex, gemini, opencode, hermes, openclaw)
+        /// 目标应用 (claude-code, codex, pi, opencode, hermes, openclaw)
         target_app: String,
     },
 
@@ -40,7 +41,7 @@ pub enum Commands {
 
     /// 切换 API Profile
     Switch {
-        /// 目标应用 (claude-code, codex, gemini, opencode, hermes, openclaw)
+        /// 目标应用 (claude-code, codex, pi, opencode, hermes, openclaw)
         target_app: String,
         /// Profile 名称
         profile_name: String,
@@ -61,7 +62,7 @@ pub enum Commands {
 
     /// 同步共享配置（从配置文件回填到数据库）
     Sync {
-        /// 目标应用 (claude-code, codex, gemini, opencode, hermes, openclaw)
+        /// 目标应用 (claude-code, codex, pi, opencode, hermes, openclaw)
         target_app: String,
     },
 
@@ -115,7 +116,7 @@ pub enum ProfileCommands {
         /// OpenClaw models[].maxTokens
         #[arg(long)]
         max_tokens: Option<i64>,
-        /// 目标应用 (claude-code, codex, gemini, opencode, hermes, openclaw)
+        /// 目标应用 (claude-code, codex, pi, opencode, hermes, openclaw)
         #[arg(long)]
         target_app: Option<String>,
     },
@@ -131,7 +132,7 @@ pub enum ProfileCommands {
     Delete {
         /// Profile 名称
         name: String,
-        /// 目标应用 (claude-code, codex, gemini, opencode, hermes, openclaw)
+        /// 目标应用 (claude-code, codex, pi, opencode, hermes, openclaw)
         #[arg(long)]
         target_app: Option<String>,
         /// 强制删除不提示
@@ -143,7 +144,7 @@ pub enum ProfileCommands {
     Show {
         /// Profile 名称
         name: String,
-        /// 目标应用 (claude-code, codex, gemini, opencode, hermes, openclaw)
+        /// 目标应用 (claude-code, codex, pi, opencode, hermes, openclaw)
         #[arg(long)]
         target_app: Option<String>,
     },
@@ -152,7 +153,7 @@ pub enum ProfileCommands {
     Update {
         /// Profile 名称
         name: String,
-        /// 目标应用 (claude-code, codex, gemini, opencode, hermes, openclaw)
+        /// 目标应用 (claude-code, codex, pi, opencode, hermes, openclaw)
         #[arg(long)]
         target_app: Option<String>,
         /// 新的 API URL
@@ -260,23 +261,29 @@ pub fn execute(cli: Cli) -> Result<()> {
             } => {
                 cmd_profile_add(
                     &db,
-                    name,
-                    url,
-                    key,
-                    provider,
-                    model_mapping,
-                    model,
-                    reasoning_effort,
-                    context_1m,
-                    api_mode,
-                    max_tokens,
-                    target_app,
+                    ProfileAddRequest {
+                        name,
+                        url,
+                        key,
+                        provider,
+                        model_mapping,
+                        model,
+                        reasoning_effort,
+                        context_1m,
+                        api_mode,
+                        max_tokens,
+                        target_app,
+                    },
                 )?;
             }
             ProfileCommands::List { verbose } => {
                 cmd_profile_list(&db, verbose)?;
             }
-            ProfileCommands::Delete { name, target_app, force } => {
+            ProfileCommands::Delete {
+                name,
+                target_app,
+                force,
+            } => {
                 cmd_profile_delete(&db, name, target_app, force)?;
             }
             ProfileCommands::Show { name, target_app } => {
@@ -297,17 +304,19 @@ pub fn execute(cli: Cli) -> Result<()> {
             } => {
                 cmd_profile_update(
                     &db,
-                    name,
-                    target_app,
-                    url,
-                    key,
-                    provider,
-                    model_mapping,
-                    model,
-                    reasoning_effort,
-                    context_1m,
-                    api_mode,
-                    max_tokens,
+                    ProfileUpdateRequest {
+                        name,
+                        target_app,
+                        url,
+                        key,
+                        provider,
+                        model_mapping,
+                        model,
+                        reasoning_effort,
+                        context_1m,
+                        api_mode,
+                        max_tokens,
+                    },
                 )?;
             }
             ProfileCommands::Key(key_cmd) => match key_cmd {
@@ -365,6 +374,34 @@ pub fn execute(cli: Cli) -> Result<()> {
 
 // ========== 命令实现 ==========
 
+struct ProfileAddRequest {
+    name: String,
+    url: String,
+    key: String,
+    provider: String,
+    model_mapping: Option<String>,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    context_1m: bool,
+    api_mode: Option<String>,
+    max_tokens: Option<i64>,
+    target_app: Option<String>,
+}
+
+struct ProfileUpdateRequest {
+    name: String,
+    target_app: Option<String>,
+    url: Option<String>,
+    key: Option<String>,
+    provider: Option<String>,
+    model_mapping: Option<String>,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    context_1m: Option<bool>,
+    api_mode: Option<String>,
+    max_tokens: Option<i64>,
+}
+
 fn cmd_init(db: &Database, target_app: TargetApp) -> Result<()> {
     utils::info(&format!("初始化 {} 配置...", target_app));
 
@@ -379,30 +416,35 @@ fn cmd_init(db: &Database, target_app: TargetApp) -> Result<()> {
     // 保存到数据库
     db.save_shared_config(target_app, shared)?;
 
-    utils::success(&format!("已从 {} 导入共享配置", adapter.config_path().display()));
+    utils::success(&format!(
+        "已从 {} 导入共享配置",
+        adapter.config_path().display()
+    ));
     utils::info("现在可以添加 API Profile:");
     println!("   switch-api profile add official --url https://api.anthropic.com --key sk-ant-xxx");
 
     Ok(())
 }
 
-fn cmd_profile_add(
-    db: &Database,
-    name: String,
-    url: String,
-    key: String,
-    provider: String,
-    model_mapping: Option<String>,
-    model: Option<String>,
-    reasoning_effort: Option<String>,
-    context_1m: bool,
-    api_mode: Option<String>,
-    max_tokens: Option<i64>,
-    target_app: Option<String>,
-) -> Result<()> {
+fn cmd_profile_add(db: &Database, request: ProfileAddRequest) -> Result<()> {
+    let ProfileAddRequest {
+        name,
+        url,
+        key,
+        provider,
+        model_mapping,
+        model,
+        reasoning_effort,
+        context_1m,
+        api_mode,
+        max_tokens,
+        target_app,
+    } = request;
     let model_mapping_map = if let Some(json) = model_mapping {
-        Some(serde_json::from_str::<HashMap<String, String>>(&json)
-            .context("Invalid model mapping JSON")?)
+        Some(
+            serde_json::from_str::<HashMap<String, String>>(&json)
+                .context("Invalid model mapping JSON")?,
+        )
     } else {
         None
     };
@@ -472,7 +514,12 @@ fn cmd_profile_list(db: &Database, verbose: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_profile_delete(db: &Database, name: String, target_app: Option<String>, force: bool) -> Result<()> {
+fn cmd_profile_delete(
+    db: &Database,
+    name: String,
+    target_app: Option<String>,
+    force: bool,
+) -> Result<()> {
     let target = resolve_target_for_name(db, &name, target_app.as_deref())?;
     if !force {
         use std::io::Write;
@@ -487,8 +534,9 @@ fn cmd_profile_delete(db: &Database, name: String, target_app: Option<String>, f
     }
     // OpenCode：删档案 + 无共用时清本地 provider（统一入口，与 GUI 共用）
     if target == TargetApp::OpenCode {
-        if switch_api::adapters::opencode::OpenCodeAdapter::delete_profile_and_cleanup_local(db, &name)?
-        {
+        if switch_api::adapters::opencode::OpenCodeAdapter::delete_profile_and_cleanup_local(
+            db, &name,
+        )? {
             utils::success(&format!("已删除 Profile: {} ({})", name, target));
         } else {
             utils::warning(&format!("未找到 Profile: {} ({})", name, target));
@@ -504,11 +552,16 @@ fn cmd_profile_delete(db: &Database, name: String, target_app: Option<String>, f
 }
 
 /// 解析 name 对应的 target：显式给了就用;没给则按 name 找所有匹配,唯一则用,多/零则报错。
-fn resolve_target_for_name(db: &Database, name: &str, target_app: Option<&str>) -> Result<TargetApp> {
+fn resolve_target_for_name(
+    db: &Database,
+    name: &str,
+    target_app: Option<&str>,
+) -> Result<TargetApp> {
     if let Some(s) = target_app {
         return parse_target_app(s);
     }
-    let matches: Vec<TargetApp> = db.list_profiles()?
+    let matches: Vec<TargetApp> = db
+        .list_profiles()?
         .into_iter()
         .filter(|p| p.name == name)
         .filter_map(|p| p.target_app)
@@ -516,7 +569,9 @@ fn resolve_target_for_name(db: &Database, name: &str, target_app: Option<&str>) 
     match matches.as_slice() {
         [t] => Ok(*t),
         [] => Err(anyhow::anyhow!("未找到 Profile: {name}")),
-        _ => Err(anyhow::anyhow!("存在多个同名 Profile「{name}」,请用 --target-app 指定工具")),
+        _ => Err(anyhow::anyhow!(
+            "存在多个同名 Profile「{name}」,请用 --target-app 指定工具"
+        )),
     }
 }
 
@@ -535,7 +590,10 @@ fn cmd_profile_show(db: &Database, name: String, target_app: Option<String>) -> 
         println!("  Reasoning Effort: {}", reasoning_effort);
     }
     if let Some(context_1m) = profile.context_1m {
-        println!("  1M Context: {}", if context_1m { "enabled" } else { "disabled" });
+        println!(
+            "  1M Context: {}",
+            if context_1m { "enabled" } else { "disabled" }
+        );
     }
     match profile.target_app {
         Some(TargetApp::Hermes) => {
@@ -562,28 +620,27 @@ fn cmd_profile_show(db: &Database, name: String, target_app: Option<String>) -> 
     }
 
     if let Some(created_at) = profile.created_at {
-        let dt = chrono::DateTime::from_timestamp(created_at, 0)
-            .unwrap_or_default();
+        let dt = chrono::DateTime::from_timestamp(created_at, 0).unwrap_or_default();
         println!("  Created: {}", dt.format("%Y-%m-%d %H:%M:%S"));
     }
 
     Ok(())
 }
 
-fn cmd_profile_update(
-    db: &Database,
-    name: String,
-    target_app: Option<String>,
-    url: Option<String>,
-    key: Option<String>,
-    provider: Option<String>,
-    model_mapping: Option<String>,
-    model: Option<String>,
-    reasoning_effort: Option<String>,
-    context_1m: Option<bool>,
-    api_mode: Option<String>,
-    max_tokens: Option<i64>,
-) -> Result<()> {
+fn cmd_profile_update(db: &Database, request: ProfileUpdateRequest) -> Result<()> {
+    let ProfileUpdateRequest {
+        name,
+        target_app,
+        url,
+        key,
+        provider,
+        model_mapping,
+        model,
+        reasoning_effort,
+        context_1m,
+        api_mode,
+        max_tokens,
+    } = request;
     let target = resolve_target_for_name(db, &name, target_app.as_deref())?;
     let mut profile = db.get_profile_by_name_and_target(&name, target)?;
 
@@ -678,8 +735,17 @@ fn cmd_profile_update(
     Ok(())
 }
 
-fn cmd_switch(db: &Database, target_app: TargetApp, profile_name: String, backup: bool, probe: bool) -> Result<()> {
-    utils::info(&format!("切换 {} 到 Profile: {}...", target_app, profile_name));
+fn cmd_switch(
+    db: &Database,
+    target_app: TargetApp,
+    profile_name: String,
+    backup: bool,
+    probe: bool,
+) -> Result<()> {
+    utils::info(&format!(
+        "切换 {} 到 Profile: {}...",
+        target_app, profile_name
+    ));
 
     // 1. 获取 API Profile
     let mut api_profile = db.get_profile_by_name_and_target(&profile_name, target_app)?;
@@ -694,46 +760,28 @@ fn cmd_switch(db: &Database, target_app: TargetApp, profile_name: String, backup
         db.update_profile(&api_profile)?;
     }
 
+    let persisted_shared_config = db
+        .get_shared_config(target_app)?
+        .map(|config| config.config);
+    let shared_config =
+        switch_api::adapters::resolve_shared_config(target_app, persisted_shared_config)?;
+    db.save_shared_config(target_app, shared_config.clone())?;
 
-    // 2. 获取适配器
-    let adapter = get_adapter(target_app);
-
-    // 3. 读取当前配置文件（如果存在）并提取共享部分
-    let shared_config = if adapter.config_path().exists() {
-        let current_config = adapter.read_config()?;
-        let extracted = adapter.extract_shared_config(&current_config);
-
-        // 同步到数据库（自动保存）
-        db.save_shared_config(target_app, extracted.clone())?;
-
-        extracted
-    } else {
-        // 如果配置文件不存在，从数据库获取
-        db.get_shared_config(target_app)?
-            .map(|c| c.config)
-            .unwrap_or_else(|| serde_json::json!({}))
-    };
-
-    // 4. 备份现有配置
-    if backup && adapter.config_path().exists() {
-        let backup_path = adapter.backup_config()?;
+    let applied = switch_api::adapters::apply_profile_configuration(
+        target_app,
+        &api_profile,
+        &shared_config,
+        backup,
+    )?;
+    if let Some(backup_path) = applied.backup_path {
         utils::success(&format!("已备份到: {}", backup_path.display()));
     }
-
-    // 5. 合并配置（只替换 API 字段）
-    let merged = adapter.merge_config(&api_profile, &shared_config);
-
-    // 6. 写入配置
-    adapter.write_config(&merged)?;
-
-    // 6.5 应用工具特定的 API 凭据（如 Gemini 的 .env）
-    adapter.apply_api_credentials(&api_profile)?;
 
     // 7. 更新活动记录
     db.set_active_profile(target_app, api_profile.id.unwrap())?;
 
     utils::success(&format!("已切换到 {}", profile_name));
-    println!("  配置文件: {}", adapter.config_path().display());
+    println!("  配置文件: {}", applied.config_path.display());
 
     Ok(())
 }
@@ -783,7 +831,8 @@ fn cmd_export(db_path: &PathBuf, output: PathBuf) -> Result<()> {
     std::fs::copy(db_path, &output)?;
 
     let size = std::fs::metadata(&output)?.len();
-    utils::success(&format!("已导出数据库到: {} ({})",
+    utils::success(&format!(
+        "已导出数据库到: {} ({})",
         output.display(),
         utils::format_size(size)
     ));
@@ -886,16 +935,12 @@ fn cmd_profile_key_list(db: &Database, name: String, target_app: Option<String>)
     let target = resolve_target_for_name(db, &name, target_app.as_deref())?;
     let mut profile = db.get_profile_by_name_and_target(&name, target)?;
     profile.normalize_keys();
-    let keys = profile.api_keys.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
+    let keys = profile.api_keys.as_deref().unwrap_or(&[]);
     if keys.is_empty() {
         println!("(无 key)");
         return Ok(());
     }
-    println!(
-        "\n{} {} 的 keys:\n",
-        "Profile".bold(),
-        name.cyan()
-    );
+    println!("\n{} {} 的 keys:\n", "Profile".bold(), name.cyan());
     for e in keys {
         let mark = if e.is_active { "●" } else { "○" };
         let masked = if e.key.len() > 15 {
@@ -965,11 +1010,12 @@ fn cmd_profile_key_remove(
     Ok(())
 }
 
-
 // ========== CLI probe failover ==========
 
-fn profile_protocol_fields(profile: &ApiProfile) -> (Option<String>, Option<String>, Option<String>) {
-    let wire = profile.codex.wire_api.clone();
+fn profile_protocol_fields(
+    profile: &ApiProfile,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let wire = None;
     let mode = match profile.target_app {
         Some(TargetApp::Hermes) => profile.hermes.api_mode.clone(),
         Some(TargetApp::OpenClaw) => profile.openclaw.api_mode.clone(),
@@ -979,7 +1025,7 @@ fn profile_protocol_fields(profile: &ApiProfile) -> (Option<String>, Option<Stri
             .clone()
             .or_else(|| profile.openclaw.api_mode.clone()),
     };
-    let exp = profile.codex.experimental_bearer_token.clone();
+    let exp = None;
     (wire, mode, exp)
 }
 
@@ -1017,17 +1063,24 @@ async fn cli_failover(profile: &mut ApiProfile, target: TargetApp) -> Result<boo
     let now = chrono::Utc::now().timestamp();
     let app = target.as_str();
     for entry in keys.iter() {
-        print!("  试 {} … ", if entry.label.is_empty() { entry.id.as_str() } else { entry.label.as_str() });
-        match probe_with_params(
-            app,
-            &profile.api_url,
-            &entry.key,
-            &model,
-            wire.as_deref(),
-            mode.as_deref(),
-            exp.as_deref(),
-            Some(entry.label.clone()),
-        )
+        print!(
+            "  试 {} … ",
+            if entry.label.is_empty() {
+                entry.id.as_str()
+            } else {
+                entry.label.as_str()
+            }
+        );
+        match probe_with_params(ProbeRequest {
+            target_app: app,
+            api_url: &profile.api_url,
+            api_key: &entry.key,
+            model: &model,
+            wire_api: wire.as_deref(),
+            api_mode: mode.as_deref(),
+            experimental_bearer_token: exp.as_deref(),
+            key_label: Some(entry.label.clone()),
+        })
         .await
         {
             Ok(ok) => {
@@ -1092,7 +1145,7 @@ fn cmd_profile_key_failover(db: &Database, name: String, target_app: Option<Stri
 // ========== 工具函数 ==========
 
 fn parse_target_app(s: &str) -> Result<TargetApp> {
-    TargetApp::from_str(s).ok_or_else(|| anyhow::anyhow!("未知的目标应用: {}", s))
+    TargetApp::parse(s).ok_or_else(|| anyhow::anyhow!("未知的目标应用: {}", s))
 }
 
 fn default_db_path() -> PathBuf {

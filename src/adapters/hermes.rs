@@ -1,5 +1,6 @@
 use super::ConfigAdapter;
 use crate::models::ApiProfile;
+use crate::utils::secure_fs::{atomic_write_private, copy_private};
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -97,9 +98,7 @@ impl HermesAdapter {
             Some(m) if m.is_object() => m.clone(),
             _ => serde_json::json!({}),
         };
-        let existing_model_ctx = model
-            .get("context_length")
-            .and_then(|v| v.as_i64());
+        let existing_model_ctx = model.get("context_length").and_then(|v| v.as_i64());
         if let Some(obj) = model.as_object_mut() {
             if let Some(ref mid) = api_profile.model {
                 if !mid.is_empty() {
@@ -117,9 +116,7 @@ impl HermesAdapter {
                 );
             }
         }
-        cfg.as_object_mut()
-            .unwrap()
-            .insert("model".into(), model);
+        cfg.as_object_mut().unwrap().insert("model".into(), model);
 
         // upsert custom_providers
         let mut providers = match cfg.get("custom_providers") {
@@ -132,10 +129,7 @@ impl HermesAdapter {
             let Some(obj) = entry.as_object_mut() else {
                 continue;
             };
-            let ename = obj
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let ename = obj.get("name").and_then(|v| v.as_str()).unwrap_or("");
             if Self::normalize_provider_name(ename) != name {
                 continue;
             }
@@ -197,17 +191,10 @@ impl HermesAdapter {
     }
 
     fn write_yaml(path: &Path, config: &serde_json::Value) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).context("Failed to create Hermes config directory")?;
-        }
         let content =
             serde_yaml::to_string(config).context("Failed to serialize Hermes config.yaml")?;
-        let temp_path = path.with_extension("yaml.tmp");
-        fs::write(&temp_path, &content).context("Failed to write temp Hermes config.yaml")?;
-        if let Ok(file) = fs::File::open(&temp_path) {
-            let _ = file.sync_all();
-        }
-        fs::rename(&temp_path, path).context("Failed to rename temp Hermes config.yaml")?;
+        atomic_write_private(path, content.as_bytes())
+            .context("Failed to write Hermes config.yaml")?;
         Ok(())
     }
 
@@ -269,21 +256,18 @@ impl HermesAdapter {
             .collect();
         pool.insert(pool_key, serde_json::Value::Array(arr));
 
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).context("Failed to create Hermes config dir")?;
-        }
         let out =
             serde_json::to_string_pretty(&data).context("Failed to serialize Hermes auth.json")?;
-        let temp = path.with_extension("json.tmp");
-        fs::write(&temp, &out).context("Failed to write temp Hermes auth.json")?;
-        if let Ok(file) = fs::File::open(&temp) {
-            let _ = file.sync_all();
-        }
-        fs::rename(&temp, &path).context("Failed to rename temp Hermes auth.json")?;
+        atomic_write_private(&path, out.as_bytes()).context("Failed to write Hermes auth.json")?;
         Ok(())
     }
+}
 
+impl Default for HermesAdapter {
+    fn default() -> Self {
+        Self::new()
     }
+}
 
 impl ConfigAdapter for HermesAdapter {
     fn config_path(&self) -> PathBuf {
@@ -327,14 +311,14 @@ impl ConfigAdapter for HermesAdapter {
         let backup_path = self
             .config_dir
             .join(format!("config.backup.{}.yaml", timestamp));
-        fs::copy(&path, &backup_path).context("Failed to backup Hermes config.yaml")?;
+        copy_private(&path, &backup_path).context("Failed to backup Hermes config.yaml")?;
 
         let auth = self.auth_path();
         if auth.exists() {
             let auth_backup = self
                 .config_dir
                 .join(format!("auth.backup.{}.json", timestamp));
-            let _ = fs::copy(&auth, &auth_backup);
+            let _ = copy_private(&auth, &auth_backup);
         }
 
         self.cleanup_old_backups(10)?;
@@ -362,6 +346,10 @@ impl ConfigAdapter for HermesAdapter {
             let _ = fs::remove_file(entry.path());
         }
         Ok(())
+    }
+
+    fn managed_paths(&self) -> Vec<PathBuf> {
+        vec![self.config_file_path(), self.auth_path()]
     }
 
     fn apply_api_credentials(&self, api_profile: &ApiProfile) -> Result<()> {
@@ -405,14 +393,8 @@ mod tests {
             HermesAdapter::normalize_provider_name("custom:Free Model"),
             "free-model"
         );
-        assert_eq!(
-            HermesAdapter::normalize_provider_name("cpa"),
-            "cpa"
-        );
-        assert_eq!(
-            HermesAdapter::custom_provider_slug("CPA"),
-            "custom:cpa"
-        );
+        assert_eq!(HermesAdapter::normalize_provider_name("cpa"), "cpa");
+        assert_eq!(HermesAdapter::custom_provider_slug("CPA"), "custom:cpa");
     }
 
     #[test]

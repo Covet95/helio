@@ -14,6 +14,16 @@ pub struct CodexCatalogModel {
     pub slug: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_reasoning: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_images: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_tool_calls: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_web_search: Option<bool>,
 }
 
 /// Codex 专用字段（JSON flatten → IPC 仍为顶层键）
@@ -23,6 +33,9 @@ pub struct CodexProfileFields {
     pub reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wire_api: Option<String>,
+    /// Provider-scoped environment variable containing the API key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requires_openai_auth: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -280,7 +293,7 @@ impl ApiProfile {
 pub enum TargetApp {
     ClaudeCode,
     Codex,
-    Gemini,
+    Pi,
     #[serde(rename = "opencode")]
     OpenCode,
     Hermes,
@@ -293,18 +306,18 @@ impl TargetApp {
         match self {
             TargetApp::ClaudeCode => "claude-code",
             TargetApp::Codex => "codex",
-            TargetApp::Gemini => "gemini",
+            TargetApp::Pi => "pi",
             TargetApp::OpenCode => "opencode",
             TargetApp::Hermes => "hermes",
             TargetApp::OpenClaw => "openclaw",
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "claude-code" => Some(TargetApp::ClaudeCode),
             "codex" => Some(TargetApp::Codex),
-            "gemini" => Some(TargetApp::Gemini),
+            "pi" => Some(TargetApp::Pi),
             "opencode" => Some(TargetApp::OpenCode),
             "hermes" => Some(TargetApp::Hermes),
             "openclaw" => Some(TargetApp::OpenClaw),
@@ -312,16 +325,23 @@ impl TargetApp {
         }
     }
 
-    #[cfg(not(feature = "tauri-gui"))]
     pub fn all() -> Vec<Self> {
         vec![
             TargetApp::ClaudeCode,
             TargetApp::Codex,
-            TargetApp::Gemini,
+            TargetApp::Pi,
             TargetApp::OpenCode,
             TargetApp::Hermes,
             TargetApp::OpenClaw,
         ]
+    }
+}
+
+impl std::str::FromStr for TargetApp {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        TargetApp::parse(value).ok_or(())
     }
 }
 
@@ -343,7 +363,6 @@ pub struct ActiveProfile {
     pub profile_id: i64,
 }
 
-#[cfg(not(feature = "tauri-gui"))]
 impl ApiProfile {
     pub fn new(
         name: String,
@@ -428,7 +447,12 @@ mod tests {
         assert_eq!(p.api_key, "sk-b");
         assert_eq!(p.active_key(), "sk-b");
         assert_eq!(
-            p.api_keys.as_ref().unwrap().iter().filter(|e| e.is_active).count(),
+            p.api_keys
+                .as_ref()
+                .unwrap()
+                .iter()
+                .filter(|e| e.is_active)
+                .count(),
             1
         );
     }
@@ -465,22 +489,23 @@ mod tests {
         for app in [
             TargetApp::ClaudeCode,
             TargetApp::Codex,
-            TargetApp::Gemini,
+            TargetApp::Pi,
             TargetApp::OpenCode,
             TargetApp::Hermes,
             TargetApp::OpenClaw,
         ] {
-            assert_eq!(TargetApp::from_str(app.as_str()), Some(app));
+            assert_eq!(TargetApp::parse(app.as_str()), Some(app));
         }
-        assert_eq!(TargetApp::from_str("unknown"), None);
+        assert_eq!(TargetApp::parse("unknown"), None);
+        assert_eq!(TargetApp::parse("gemini"), None);
     }
 
     #[test]
     fn test_new_tools_registered() {
-        assert_eq!(TargetApp::from_str("gemini"), Some(TargetApp::Gemini));
-        assert_eq!(TargetApp::from_str("opencode"), Some(TargetApp::OpenCode));
-        assert_eq!(TargetApp::from_str("hermes"), Some(TargetApp::Hermes));
-        assert_eq!(TargetApp::from_str("openclaw"), Some(TargetApp::OpenClaw));
+        assert_eq!(TargetApp::parse("pi"), Some(TargetApp::Pi));
+        assert_eq!(TargetApp::parse("opencode"), Some(TargetApp::OpenCode));
+        assert_eq!(TargetApp::parse("hermes"), Some(TargetApp::Hermes));
+        assert_eq!(TargetApp::parse("openclaw"), Some(TargetApp::OpenClaw));
     }
 
     #[test]
@@ -488,15 +513,14 @@ mod tests {
         for app in [
             TargetApp::ClaudeCode,
             TargetApp::Codex,
-            TargetApp::Gemini,
+            TargetApp::Pi,
             TargetApp::OpenCode,
             TargetApp::Hermes,
             TargetApp::OpenClaw,
         ] {
             let json = serde_json::to_string(&app).unwrap();
             assert_eq!(json, format!("\"{}\"", app.as_str()));
-            let back: TargetApp =
-                serde_json::from_str(&format!("\"{}\"", app.as_str())).unwrap();
+            let back: TargetApp = serde_json::from_str(&format!("\"{}\"", app.as_str())).unwrap();
             assert_eq!(back, app);
         }
         assert_eq!(
@@ -533,6 +557,7 @@ mod tests {
                 catalog_models: Some(vec![CodexCatalogModel {
                     slug: "gpt-5.6-sol".into(),
                     display_name: Some("GPT-5.6 Sol".into()),
+                    ..Default::default()
                 }]),
                 ..Default::default()
             },
@@ -584,7 +609,7 @@ mod tests {
     #[test]
     fn test_all_variants_roundtrip() {
         for app in TargetApp::all() {
-            assert_eq!(TargetApp::from_str(app.as_str()), Some(app));
+            assert_eq!(TargetApp::parse(app.as_str()), Some(app));
         }
     }
 }

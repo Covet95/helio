@@ -186,10 +186,8 @@ impl SessionReader for CodexSessionReader {
                 Err(_) => continue,
             };
             let payload = v.get("payload");
-            let is_message = payload
-                .and_then(|p| p.get("type"))
-                .and_then(|t| t.as_str())
-                == Some("message");
+            let is_message =
+                payload.and_then(|p| p.get("type")).and_then(|t| t.as_str()) == Some("message");
             if !is_message {
                 continue;
             }
@@ -448,17 +446,44 @@ fn delete_one_with(
     let tool = reader.tool().to_string();
     let path = match reader.resolve_path(id) {
         Some(p) => p,
-        None => return DeleteResult { id: id.into(), tool, ok: true, error: None }, // 不存在=成功
+        None => {
+            return DeleteResult {
+                id: id.into(),
+                tool,
+                ok: true,
+                error: None,
+            }
+        } // 不存在=成功
     };
     if !is_within_root(&reader.root(), &path) {
-        return DeleteResult { id: id.into(), tool, ok: false, error: Some("路径越界，拒绝删除".into()) };
+        return DeleteResult {
+            id: id.into(),
+            tool,
+            ok: false,
+            error: Some("路径越界，拒绝删除".into()),
+        };
     }
     if !path.exists() {
-        return DeleteResult { id: id.into(), tool, ok: true, error: None };
+        return DeleteResult {
+            id: id.into(),
+            tool,
+            ok: true,
+            error: None,
+        };
     }
     match do_delete(&path) {
-        Ok(_) => DeleteResult { id: id.into(), tool, ok: true, error: None },
-        Err(e) => DeleteResult { id: id.into(), tool, ok: false, error: Some(e.to_string()) },
+        Ok(_) => DeleteResult {
+            id: id.into(),
+            tool,
+            ok: true,
+            error: None,
+        },
+        Err(e) => DeleteResult {
+            id: id.into(),
+            tool,
+            ok: false,
+            error: Some(e.to_string()),
+        },
     }
 }
 
@@ -504,16 +529,32 @@ fn all_readers() -> Vec<Box<dyn SessionReader>> {
 }
 
 /// 按 tool / search 过滤（search 命中 cwd 或 title）
-pub(crate) fn apply_filters(metas: Vec<SessionMeta>, tool: Option<&str>, search: Option<&str>) -> Vec<SessionMeta> {
-    metas.into_iter().filter(|m| {
-        if let Some(t) = tool { if m.tool != t { return false; } }
-        if let Some(q) = search {
-            if q.is_empty() { return true; }
-            let hit = m.cwd.contains(q) || m.title.as_deref().map(|t| t.contains(q)).unwrap_or(false);
-            if !hit { return false; }
-        }
-        true
-    }).collect()
+pub(crate) fn apply_filters(
+    metas: Vec<SessionMeta>,
+    tool: Option<&str>,
+    search: Option<&str>,
+) -> Vec<SessionMeta> {
+    metas
+        .into_iter()
+        .filter(|m| {
+            if let Some(t) = tool {
+                if m.tool != t {
+                    return false;
+                }
+            }
+            if let Some(q) = search {
+                if q.is_empty() {
+                    return true;
+                }
+                let hit =
+                    m.cwd.contains(q) || m.title.as_deref().map(|t| t.contains(q)).unwrap_or(false);
+                if !hit {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect()
 }
 
 fn reader_for(tool: &str) -> Option<Box<dyn SessionReader>> {
@@ -525,9 +566,14 @@ fn reader_for(tool: &str) -> Option<Box<dyn SessionReader>> {
 }
 
 #[tauri::command]
-pub async fn list_sessions(tool: Option<String>, search: Option<String>) -> Result<Vec<SessionMeta>, String> {
+pub async fn list_sessions(
+    tool: Option<String>,
+    search: Option<String>,
+) -> Result<Vec<SessionMeta>, String> {
     let mut all = Vec::new();
-    for r in all_readers() { all.extend(r.list_sessions()); }
+    for r in all_readers() {
+        all.extend(r.list_sessions());
+    }
     // 默认按修改时间倒序
     all.sort_by_key(|b| std::cmp::Reverse(b.modified_at));
     Ok(apply_filters(all, tool.as_deref(), search.as_deref()))
@@ -546,7 +592,10 @@ pub async fn delete_session(tool: String, id: String) -> Result<DeleteResult, St
 }
 
 #[derive(serde::Deserialize)]
-pub struct DeleteItem { pub tool: String, pub id: String }
+pub struct DeleteItem {
+    pub tool: String,
+    pub id: String,
+}
 
 #[tauri::command]
 pub async fn delete_sessions(items: Vec<DeleteItem>) -> Result<Vec<DeleteResult>, String> {
@@ -554,14 +603,22 @@ pub async fn delete_sessions(items: Vec<DeleteItem>) -> Result<Vec<DeleteResult>
     for it in items {
         match reader_for(&it.tool) {
             Some(r) => out.push(delete_one(r.as_ref(), &it.id)),
-            None => out.push(DeleteResult { id: it.id, tool: it.tool, ok: false, error: Some("未知工具".into()) }),
+            None => out.push(DeleteResult {
+                id: it.id,
+                tool: it.tool,
+                ok: false,
+                error: Some("未知工具".into()),
+            }),
         }
     }
     Ok(out)
 }
 
 #[tauri::command]
-pub async fn cleanup_sessions(tool: Option<String>, older_than_days: i64) -> Result<Vec<DeleteResult>, String> {
+pub async fn cleanup_sessions(
+    tool: Option<String>,
+    older_than_days: i64,
+) -> Result<Vec<DeleteResult>, String> {
     if older_than_days <= 0 {
         return Ok(Vec::new());
     }
@@ -569,7 +626,11 @@ pub async fn cleanup_sessions(tool: Option<String>, older_than_days: i64) -> Res
     let cutoff = now - older_than_days * 86400;
     let mut out = Vec::new();
     for r in all_readers() {
-        if let Some(t) = &tool { if r.tool() != t { continue; } }
+        if let Some(t) = &tool {
+            if r.tool() != t {
+                continue;
+            }
+        }
         for m in r.list_sessions() {
             if m.modified_at < cutoff {
                 out.push(delete_one(r.as_ref(), &m.id));
@@ -604,7 +665,9 @@ mod tests {
             "{\"timestamp\":\"2026-06-03T01:01:29.422Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"abc\",\"timestamp\":\"2026-06-03T01:01:24.892Z\",\"cwd\":\"/Users/u/proj\"}}\n\
              {\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\"}}\n").unwrap();
 
-        let reader = CodexSessionReader { sessions_dir: root.clone() };
+        let reader = CodexSessionReader {
+            sessions_dir: root.clone(),
+        };
         let list = reader.list_sessions();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, "abc");
@@ -626,7 +689,9 @@ mod tests {
              {\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hello world\"}]}}\n\
              {\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi there\"}]}}\n").unwrap();
 
-        let reader = CodexSessionReader { sessions_dir: root.clone() };
+        let reader = CodexSessionReader {
+            sessions_dir: root.clone(),
+        };
         let msgs = reader.read_preview("p1", 1000).unwrap();
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, "user");
@@ -641,9 +706,15 @@ mod tests {
     fn test_is_within_root_rejects_escape() {
         let root = Path::new("/home/u/.codex/sessions");
         // 正常子路径
-        assert!(is_within_root(root, Path::new("/home/u/.codex/sessions/2026/a.jsonl")));
+        assert!(is_within_root(
+            root,
+            Path::new("/home/u/.codex/sessions/2026/a.jsonl")
+        ));
         // 越界
-        assert!(!is_within_root(root, Path::new("/home/u/.codex/../evil.jsonl")));
+        assert!(!is_within_root(
+            root,
+            Path::new("/home/u/.codex/../evil.jsonl")
+        ));
         assert!(!is_within_root(root, Path::new("/etc/passwd")));
     }
 
@@ -653,12 +724,17 @@ mod tests {
         let day = root.join("2026/06/03");
         fs::create_dir_all(&day).unwrap();
         // 合法
-        fs::write(day.join("rollout-good-1.jsonl"),
-            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"g1\",\"cwd\":\"/p\"}}\n").unwrap();
+        fs::write(
+            day.join("rollout-good-1.jsonl"),
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"g1\",\"cwd\":\"/p\"}}\n",
+        )
+        .unwrap();
         // 损坏
         fs::write(day.join("rollout-bad-2.jsonl"), "this is not json\n").unwrap();
 
-        let reader = CodexSessionReader { sessions_dir: root.clone() };
+        let reader = CodexSessionReader {
+            sessions_dir: root.clone(),
+        };
         let list = reader.list_sessions();
         assert_eq!(list.len(), 2, "损坏文件仍应被列出");
         let bad = list.iter().find(|m| !m.parseable).expect("应有不可解析项");
@@ -673,14 +749,21 @@ mod tests {
         let day = root.join("2026/06/03");
         fs::create_dir_all(&day).unwrap();
         let f = day.join("rollout-del-1.jsonl");
-        fs::write(&f, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"d1\"}}\n").unwrap();
+        fs::write(
+            &f,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"d1\"}}\n",
+        )
+        .unwrap();
         assert!(f.exists());
 
-        let reader = CodexSessionReader { sessions_dir: root.clone() };
+        let reader = CodexSessionReader {
+            sessions_dir: root.clone(),
+        };
         let trashed = temp_dir("trashbin");
         let fake_delete = |p: &Path| -> anyhow::Result<()> {
             let dest = trashed.join(p.file_name().unwrap());
-            fs::rename(p, dest)?; Ok(())
+            fs::rename(p, dest)?;
+            Ok(())
         };
         let res = delete_one_with(&reader, "d1", &fake_delete);
         assert!(res.ok, "删除应成功: {:?}", res.error);
@@ -699,7 +782,9 @@ mod tests {
              {\"type\":\"ai-title\",\"title\":\"修复登录bug\"}\n\
              {\"type\":\"user\",\"cwd\":\"/Users/u/Desktop/power\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n").unwrap();
 
-        let reader = ClaudeSessionReader { projects_dir: root.clone() };
+        let reader = ClaudeSessionReader {
+            projects_dir: root.clone(),
+        };
         let list = reader.list_sessions();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, "sess-1");
@@ -713,22 +798,44 @@ mod tests {
     #[test]
     fn test_filter_by_search() {
         let metas = vec![
-            SessionMeta { id:"a".into(), tool:"codex".into(), cwd:"/x/proj".into(), title:None,
-                started_at:0, modified_at:0, size_bytes:0, message_count:0, parseable:true },
-            SessionMeta { id:"b".into(), tool:"codex".into(), cwd:"/y/other".into(), title:Some("登录".into()),
-                started_at:0, modified_at:0, size_bytes:0, message_count:0, parseable:true },
+            SessionMeta {
+                id: "a".into(),
+                tool: "codex".into(),
+                cwd: "/x/proj".into(),
+                title: None,
+                started_at: 0,
+                modified_at: 0,
+                size_bytes: 0,
+                message_count: 0,
+                parseable: true,
+            },
+            SessionMeta {
+                id: "b".into(),
+                tool: "codex".into(),
+                cwd: "/y/other".into(),
+                title: Some("登录".into()),
+                started_at: 0,
+                modified_at: 0,
+                size_bytes: 0,
+                message_count: 0,
+                parseable: true,
+            },
         ];
         let r = apply_filters(metas.clone(), None, Some("proj"));
-        assert_eq!(r.len(), 1); assert_eq!(r[0].id, "a");
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].id, "a");
         let r2 = apply_filters(metas, None, Some("登录"));
-        assert_eq!(r2.len(), 1); assert_eq!(r2[0].id, "b");
+        assert_eq!(r2.len(), 1);
+        assert_eq!(r2[0].id, "b");
     }
 
     #[test]
     fn test_delete_missing_file_is_ok() {
         let root = temp_dir("codex-del-missing");
         fs::create_dir_all(&root).unwrap();
-        let reader = CodexSessionReader { sessions_dir: root.clone() };
+        let reader = CodexSessionReader {
+            sessions_dir: root.clone(),
+        };
         let res = delete_one(&reader, "does-not-exist");
         assert!(res.ok, "目标不存在应视为成功");
         fs::remove_dir_all(&root).ok();

@@ -23,9 +23,11 @@ export const PROVIDER_PRESETS: Record<TargetApp, ProviderPreset[]> = {
     { id: 'openai', label: 'OpenAI 官方', provider: 'openai', api_url: 'https://api.openai.com/v1', model: 'gpt-5.5', category: 'official' },
     { id: 'custom', label: '自定义中转', provider: 'openai', api_url: '', model: 'gpt-5.5', category: 'custom' },
   ],
-  gemini: [
+  pi: [
+    { id: 'anthropic', label: 'Anthropic 官方', provider: 'anthropic', api_url: 'https://api.anthropic.com', model: 'claude-sonnet-4-5', category: 'official' },
+    { id: 'openai', label: 'OpenAI 官方', provider: 'openai', api_url: 'https://api.openai.com/v1', model: 'gpt-5.5', category: 'official' },
     { id: 'google', label: 'Google 官方', provider: 'google', api_url: 'https://generativelanguage.googleapis.com', model: 'gemini-2.0-flash', category: 'official' },
-    { id: 'custom', label: '自定义', provider: 'google', api_url: '', category: 'custom' },
+    { id: 'custom', label: '自定义 endpoint', provider: 'custom', api_url: '', category: 'custom' },
   ],
   opencode: [
     { id: 'anthropic', label: 'Anthropic', provider: 'anthropic', api_url: 'https://api.anthropic.com', category: 'official' },

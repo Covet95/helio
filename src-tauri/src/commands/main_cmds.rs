@@ -1,12 +1,12 @@
 // Tauri commands
-use switch_api::db::Database;
-use switch_api::models::{ApiProfile, TargetApp};
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "macos")]
 use std::io::Write;
 #[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
+use switch_api::db::Database;
+use switch_api::models::{ApiProfile, TargetApp};
 use tauri::State;
 
 use crate::commands::helpers::{
@@ -22,7 +22,7 @@ pub struct AppState {
 pub struct StatusInfo {
     pub claude_code: Option<TargetStatus>,
     pub codex: Option<TargetStatus>,
-    pub gemini: Option<TargetStatus>,
+    pub pi: Option<TargetStatus>,
     pub opencode: Option<TargetStatus>,
     pub hermes: Option<TargetStatus>,
     pub openclaw: Option<TargetStatus>,
@@ -133,7 +133,7 @@ pub struct LocalConfigInfo {
 pub async fn copy_text(text: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        return copy_text_with_pbcopy(&text);
+        copy_text_with_pbcopy(&text)
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -176,7 +176,7 @@ fn copy_text_with_pbcopy(text: &str) -> Result<(), String> {
 pub async fn scan_local_mcp_servers(
     target_app: String,
 ) -> Result<std::collections::HashMap<String, McpServerConfig>, String> {
-    let target = TargetApp::from_str(&target_app)
+    let target = TargetApp::parse(&target_app)
         .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
 
     use switch_api::adapters::get_adapter;
@@ -194,7 +194,7 @@ pub async fn scan_local_mcp_servers(
 // 新增：扫描本地 Skills
 #[tauri::command]
 pub async fn scan_local_skills(target_app: String) -> Result<Vec<String>, String> {
-    let target = TargetApp::from_str(&target_app)
+    let target = TargetApp::parse(&target_app)
         .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
 
     // Claude Code skills 路径: ~/.claude/skills/
@@ -231,7 +231,7 @@ pub async fn scan_local_skills(target_app: String) -> Result<Vec<String>, String
 // 新增：获取完整的本地配置信息
 #[tauri::command]
 pub async fn get_local_config_info(target_app: String) -> Result<LocalConfigInfo, String> {
-    let target = TargetApp::from_str(&target_app)
+    let target = TargetApp::parse(&target_app)
         .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
 
     use switch_api::adapters::get_adapter;
@@ -268,8 +268,7 @@ pub async fn get_local_config_info(target_app: String) -> Result<LocalConfigInfo
     // 的 [hooks.state."..."] 只是 trusted_hash 校验记录，不能当 hook 展示。
     // 其他工具仍从 config 的 hooks 键读取。
     if target == TargetApp::Codex {
-        let hooks_path = dirs::home_dir()
-            .map(|h| h.join(".codex").join("hooks.json"));
+        let hooks_path = dirs::home_dir().map(|h| h.join(".codex").join("hooks.json"));
         if let Some(path) = hooks_path {
             info.hooks = read_codex_hooks(&path);
         }
@@ -282,7 +281,10 @@ pub async fn get_local_config_info(target_app: String) -> Result<LocalConfigInfo
 
     // Permissions（仅当存在且非空）
     if let Some(permissions) = config.get("permissions") {
-        let empty = permissions.as_object().map(|o| o.is_empty()).unwrap_or(false);
+        let empty = permissions
+            .as_object()
+            .map(|o| o.is_empty())
+            .unwrap_or(false);
         if !empty {
             info.permissions = permissions.clone();
         }
@@ -292,9 +294,15 @@ pub async fn get_local_config_info(target_app: String) -> Result<LocalConfigInfo
     // 排除已单独归类的(mcp/hooks/permissions)和 API 凭证类(切换会改、不算共享)。
     if let Some(obj) = config.as_object() {
         const EXCLUDED: &[&str] = &[
-            "mcp_servers", "mcpServers", "mcp",
-            "hooks", "permissions",
-            "model_provider", "model_providers", "api_key", "env",
+            "mcp_servers",
+            "mcpServers",
+            "mcp",
+            "hooks",
+            "permissions",
+            "model_provider",
+            "model_providers",
+            "api_key",
+            "env",
         ];
         let mut other = serde_json::Map::new();
         for (k, v) in obj {
@@ -317,11 +325,16 @@ pub async fn list_profiles(state: State<'_, AppState>) -> Result<Vec<ApiProfile>
 }
 
 #[tauri::command]
-pub async fn get_profile(name: String, target_app: String, state: State<'_, AppState>) -> Result<ApiProfile, String> {
-    let target = TargetApp::from_str(&target_app)
+pub async fn get_profile(
+    name: String,
+    target_app: String,
+    state: State<'_, AppState>,
+) -> Result<ApiProfile, String> {
+    let target = TargetApp::parse(&target_app)
         .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.get_profile_by_name_and_target(&name, target).map_err(|e| e.to_string())
+    db.get_profile_by_name_and_target(&name, target)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -332,27 +345,49 @@ pub async fn add_profile(profile: ApiProfile, state: State<'_, AppState>) -> Res
 
 #[tauri::command]
 pub async fn update_profile(profile: ApiProfile, state: State<'_, AppState>) -> Result<(), String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.update_profile(&profile).map_err(|e| e.to_string())?;
-    if let Some(id) = profile.id {
-        for target in db
-            .get_active_targets_for_profile(id)
-            .map_err(|e| e.to_string())?
-        {
-            if let Some(api_profile) = db
-                .get_active_profile_full(target)
+    let active_profiles = {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        db.update_profile(&profile).map_err(|e| e.to_string())?;
+        let mut active_profiles = Vec::new();
+        if let Some(id) = profile.id {
+            for target in db
+                .get_active_targets_for_profile(id)
                 .map_err(|e| e.to_string())?
             {
-                apply_profile_config(&db, target, &api_profile)?;
+                if let Some(api_profile) = db
+                    .get_active_profile_full(target)
+                    .map_err(|e| e.to_string())?
+                {
+                    let persisted_shared_config = db
+                        .get_shared_config(target)
+                        .map_err(|e| e.to_string())?
+                        .map(|config| config.config);
+                    active_profiles.push((target, api_profile, persisted_shared_config));
+                }
             }
         }
+        active_profiles
+    };
+
+    for (target, api_profile, persisted_shared_config) in active_profiles {
+        let shared_config = apply_profile_config(target, &api_profile, persisted_shared_config)?;
+        state
+            .db
+            .lock()
+            .map_err(|e| e.to_string())?
+            .save_shared_config(target, shared_config)
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
 
 #[tauri::command]
-pub async fn delete_profile(name: String, target_app: String, state: State<'_, AppState>) -> Result<bool, String> {
-    let target = TargetApp::from_str(&target_app)
+pub async fn delete_profile(
+    name: String,
+    target_app: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let target = TargetApp::parse(&target_app)
         .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
     if target == TargetApp::OpenCode {
@@ -371,13 +406,12 @@ pub async fn switch_profile(
     probe: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let target = TargetApp::from_str(&target_app)
+    let target = TargetApp::parse(&target_app)
         .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
     let do_probe = probe.unwrap_or(false);
 
     if do_probe {
-        let result =
-            run_failover(&state, target, &profile_name, false).await?;
+        let result = run_failover(&state, target, &profile_name, false).await?;
         if !result.success {
             return Err(format!(
                 "探活 failover 失败，未写入配置: {}",
@@ -392,17 +426,25 @@ pub async fn switch_profile(
         }
     }
 
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    let mut api_profile = db
-        .get_profile_by_name_and_target(&profile_name, target)
-        .map_err(|e| e.to_string())?;
+    let (mut api_profile, persisted_shared_config) = {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        let api_profile = db
+            .get_profile_by_name_and_target(&profile_name, target)
+            .map_err(|e| e.to_string())?;
+        let persisted_shared_config = db
+            .get_shared_config(target)
+            .map_err(|e| e.to_string())?
+            .map(|config| config.config);
+        (api_profile, persisted_shared_config)
+    };
     api_profile.normalize_keys();
-
-    apply_profile_config(&db, target, &api_profile)?;
-
+    let shared_config = apply_profile_config(target, &api_profile, persisted_shared_config)?;
     let profile_id = api_profile
         .id
         .ok_or_else(|| format!("Profile '{}' has no id", profile_name))?;
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.save_shared_config(target, shared_config)
+        .map_err(|e| e.to_string())?;
     db.set_active_profile(target, profile_id)
         .map_err(|e| e.to_string())?;
 
@@ -410,50 +452,16 @@ pub async fn switch_profile(
 }
 
 pub(crate) fn apply_profile_config(
-    db: &Database,
     target: TargetApp,
     api_profile: &ApiProfile,
-) -> Result<(), String> {
-    use switch_api::adapters::get_adapter;
-
-    let adapter = get_adapter(target);
-    let current_config = adapter.read_config().unwrap_or_else(|_| serde_json::json!({}));
-    let mut shared_config = adapter.extract_shared_config(&current_config);
-
-    // 防残缺护栏:外部工具(如 Codex 自升级)可能把 config 写残,导致 live 里
-    // 顶层键大量消失。若直接用残缺的 live 覆盖 DB 快照并 merge,会把残缺状态固化
-    // 并持续传播。这里用 DB 里更全的旧快照补回 live 缺失的顶层键(只补 live 没有的,
-    // 不覆盖 live 已有的较新值),既止损又自动恢复。
-    if let Ok(Some(prev)) = db.get_shared_config(target) {
-        backfill_missing_top_level(&mut shared_config, &prev.config);
-    }
-
-    let _ = db.save_shared_config(target, shared_config.clone());
-
-    if adapter.config_path().exists() {
-        adapter.backup_config().map_err(|e| e.to_string())?;
-    }
-
-    let merged = adapter.merge_config(api_profile, &shared_config);
-    adapter.write_config(&merged).map_err(|e| e.to_string())?;
-    adapter
-        .apply_api_credentials(api_profile)
+    persisted_shared_config: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let shared_config =
+        switch_api::adapters::resolve_shared_config(target, persisted_shared_config)
+            .map_err(|e| e.to_string())?;
+    switch_api::adapters::apply_profile_configuration(target, api_profile, &shared_config, true)
         .map_err(|e| e.to_string())?;
-
-    Ok(())
-}
-
-/// 用 `prev`(DB 已存的较全快照)里的顶层键补回 `live` 缺失的键。
-/// 只补 `live` 完全没有的顶层键;`live` 已有的键(哪怕值更旧)一律保留不动,
-/// 避免覆盖用户在外部刚改的较新值。
-fn backfill_missing_top_level(live: &mut serde_json::Value, prev: &serde_json::Value) {
-    if let (Some(live_obj), Some(prev_obj)) = (live.as_object_mut(), prev.as_object()) {
-        for (k, v) in prev_obj {
-            if !live_obj.contains_key(k) {
-                live_obj.insert(k.clone(), v.clone());
-            }
-        }
-    }
+    Ok(shared_config)
 }
 
 #[tauri::command]
@@ -461,7 +469,7 @@ pub async fn get_shared_config(
     target_app: String,
     state: State<'_, AppState>,
 ) -> Result<Option<serde_json::Value>, String> {
-    let target = TargetApp::from_str(&target_app)
+    let target = TargetApp::parse(&target_app)
         .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
 
     // 先查数据库
@@ -502,7 +510,7 @@ pub async fn save_shared_config(
     config: serde_json::Value,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let target = TargetApp::from_str(&target_app)
+    let target = TargetApp::parse(&target_app)
         .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
 
     let db = state.db.lock().map_err(|e| e.to_string())?;
@@ -535,8 +543,7 @@ pub async fn save_codex_config_raw(
     let path = adapter.config_path();
 
     // 先校验语法：非法 TOML 直接返回，绝不触碰磁盘（不备份、不写入）。
-    toml::from_str::<toml::Value>(&content)
-        .map_err(|e| format!("TOML 语法错误，未保存：{}", e))?;
+    toml::from_str::<toml::Value>(&content).map_err(|e| format!("TOML 语法错误，未保存：{}", e))?;
 
     // 校验通过后，写前备份当前配置（config.toml + auth.json）。
     if path.exists() {
@@ -569,16 +576,8 @@ fn validate_and_write_codex_config_raw(
     let parsed = toml::from_str::<toml::Value>(content)
         .map_err(|e| format!("TOML 语法错误，未保存：{}", e))?;
 
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败：{}", e))?;
-    }
-
-    let temp_path = path.with_extension("toml.tmp");
-    std::fs::write(&temp_path, content).map_err(|e| format!("写入临时文件失败：{}", e))?;
-    if let Ok(file) = std::fs::File::open(&temp_path) {
-        let _ = file.sync_all();
-    }
-    std::fs::rename(&temp_path, path).map_err(|e| format!("替换 config.toml 失败：{}", e))?;
+    switch_api::utils::secure_fs::atomic_write_private(path, content.as_bytes())
+        .map_err(|e| format!("替换 config.toml 失败：{}", e))?;
 
     Ok(parsed)
 }
@@ -625,10 +624,10 @@ pub async fn update_codex_fields(
     apply_field_updates(&mut config, &fields);
 
     // JSON → TOML 文本。toml::Value::try_from 走 Serialize，自动处理表/值排序。
-    let toml_value = toml::Value::try_from(&config)
-        .map_err(|e| format!("转换为 TOML 失败：{}", e))?;
-    let content = toml::to_string_pretty(&toml_value)
-        .map_err(|e| format!("序列化 TOML 失败：{}", e))?;
+    let toml_value =
+        toml::Value::try_from(&config).map_err(|e| format!("转换为 TOML 失败：{}", e))?;
+    let content =
+        toml::to_string_pretty(&toml_value).map_err(|e| format!("序列化 TOML 失败：{}", e))?;
 
     // 写前备份当前配置（config.toml + auth.json）。
     if path.exists() {
@@ -663,6 +662,7 @@ pub struct ScannedApi {
     pub reasoning_effort: Option<String>,
     pub context_1m: Option<bool>,
     pub wire_api: Option<String>,
+    pub env_key: Option<String>,
     pub requires_openai_auth: Option<bool>,
     pub experimental_bearer_token: Option<String>,
     pub model_thinking_enabled: Option<bool>,
@@ -679,7 +679,7 @@ pub struct ScannedApi {
 #[tauri::command]
 pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
     use switch_api::adapters::get_adapter;
-    let target = TargetApp::from_str(&target_app)
+    let target = TargetApp::parse(&target_app)
         .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
     let adapter = get_adapter(target);
     let source = adapter.config_path().to_string_lossy().to_string();
@@ -688,6 +688,7 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
     let (mut url, mut key, provider) = (String::new(), String::new(), default_provider(target));
     // Codex provider 块内的协议字段（仅 Codex 用到）
     let mut wire_api: Option<String> = None;
+    let mut codex_env_key: Option<String> = None;
     let mut requires_openai_auth: Option<bool> = None;
     let mut experimental_bearer_token: Option<String> = None;
     // Claude Code 的默认模型 / 角色映射（仅 ClaudeCode 用到）
@@ -715,9 +716,7 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
             let pid = str_field(&cfg, "model_provider");
             if let Some(providers) = cfg.get("model_providers").and_then(|v| v.as_object()) {
                 // 优先用 model_provider 指定的块，否则取第一个
-                let block = providers
-                    .get(&pid)
-                    .or_else(|| providers.values().next());
+                let block = providers.get(&pid).or_else(|| providers.values().next());
                 if let Some(b) = block {
                     url = str_field(b, "base_url");
                     // 某些配置把 key 写在 provider 块里
@@ -726,6 +725,9 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
                     }
                     // env_key 指向环境变量名
                     let env_key = str_field(b, "env_key");
+                    if !env_key.trim().is_empty() {
+                        codex_env_key = Some(env_key.clone());
+                    }
                     if key.is_empty() && !env_key.is_empty() {
                         key = std::env::var(&env_key).unwrap_or_default();
                     }
@@ -763,26 +765,62 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
                 key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
             }
         }
-        TargetApp::Gemini => {
-            // Gemini: API 在 .env，adapter.read_config 返回 settings.json，
-            // 这里直接读 ~/.gemini/.env
+        TargetApp::Pi => {
+            // Pi: defaultProvider/defaultModel in settings.json; key in auth.json;
+            // custom baseUrl in models.json.providers.<id>
+            let default_provider = str_field(&cfg, "defaultProvider");
+            let default_model = str_field(&cfg, "defaultModel");
+            if !default_model.is_empty() {
+                claude_model = Some(default_model);
+            }
+            let mut provider_id = default_provider;
             if let Some(home) = dirs::home_dir() {
-                let env_path = home.join(".gemini").join(".env");
-                if let Ok(content) = std::fs::read_to_string(&env_path) {
-                    for line in content.lines() {
-                        if let Some((k, v)) = line.split_once('=') {
-                            let v = v.trim().trim_matches('"').to_string();
-                            match k.trim() {
-                                "GEMINI_API_KEY" | "GOOGLE_API_KEY" => key = v,
-                                "GOOGLE_GEMINI_BASE_URL" => url = v,
-                                _ => {}
+                let agent = home.join(".pi").join("agent");
+                let models_path = agent.join("models.json");
+                if let Ok(c) = std::fs::read_to_string(&models_path) {
+                    if let Ok(j) = serde_json::from_str::<serde_json::Value>(&c) {
+                        if let Some(providers) = j.get("providers").and_then(|v| v.as_object()) {
+                            let block = if !provider_id.is_empty() {
+                                providers.get(&provider_id)
+                            } else {
+                                None
+                            }
+                            .or_else(|| providers.values().next());
+                            if let Some(b) = block {
+                                url = str_field(b, "baseUrl");
+                                if key.is_empty() {
+                                    key = str_field(b, "apiKey");
+                                }
+                                if provider_id.is_empty() {
+                                    if let Some((pid, _)) = providers.iter().next() {
+                                        provider_id = pid.clone();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                let auth_path = agent.join("auth.json");
+                if let Ok(c) = std::fs::read_to_string(&auth_path) {
+                    if let Ok(j) = serde_json::from_str::<serde_json::Value>(&c) {
+                        let entry = if !provider_id.is_empty() {
+                            j.get(&provider_id)
+                        } else {
+                            None
+                        }
+                        .or_else(|| j.as_object().and_then(|m| m.values().next()));
+                        if let Some(e) = entry {
+                            let k = str_field(e, "key");
+                            if !k.is_empty() {
+                                key = k;
                             }
                         }
                     }
                 }
             }
-            if url.is_empty() {
-                url = "https://generativelanguage.googleapis.com".to_string();
+            if !provider_id.is_empty() {
+                // reuse api_mode slot as temporary carrier; cleared when building response
+                api_mode = Some(format!("__pi_provider__:{provider_id}"));
             }
         }
         TargetApp::OpenCode => {
@@ -842,7 +880,7 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
                         .unwrap_or("")
                         .to_lowercase()
                         .replace(' ', "-");
-                    if ename == name || (!name.is_empty() && ename == name) {
+                    if ename == name {
                         url = str_field(entry, "base_url");
                         key = str_field(entry, "api_key");
                         let mode = str_field(entry, "api_mode");
@@ -883,10 +921,7 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
             } else {
                 (String::new(), String::new())
             };
-            if let Some(providers) = cfg
-                .pointer("/models/providers")
-                .and_then(|v| v.as_object())
-            {
+            if let Some(providers) = cfg.pointer("/models/providers").and_then(|v| v.as_object()) {
                 let block = if !pid.is_empty() {
                     providers.get(&pid)
                 } else {
@@ -969,6 +1004,16 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
             }
         }
     }
+    if target == TargetApp::Pi {
+        if let Some(marker) = api_mode.clone() {
+            if let Some(pid) = marker.strip_prefix("__pi_provider__:") {
+                if !pid.is_empty() {
+                    provider = pid.to_string();
+                }
+            }
+        }
+        api_mode = None;
+    }
 
     // Codex/Claude keep their own context_1m path; Hermes/OpenClaw use local scan.
     let resolved_context_1m = match target {
@@ -981,7 +1026,10 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
         api_url: url,
         api_key: key,
         provider,
-        model: if target == TargetApp::Hermes || target == TargetApp::OpenClaw {
+        model: if target == TargetApp::Hermes
+            || target == TargetApp::OpenClaw
+            || target == TargetApp::Pi
+        {
             claude_model
         } else {
             codex_string_field(target, &cfg, "model").or(claude_model)
@@ -990,6 +1038,7 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
         reasoning_effort: codex_string_field(target, &cfg, "model_reasoning_effort"),
         context_1m: resolved_context_1m,
         wire_api,
+        env_key: codex_env_key,
         requires_openai_auth,
         experimental_bearer_token,
         model_thinking_enabled: codex_bool_field(target, &cfg, "model_thinking_enabled"),
@@ -1007,7 +1056,7 @@ pub async fn import_shared_config(
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     use switch_api::adapters::get_adapter;
-    let target = TargetApp::from_str(&target_app)
+    let target = TargetApp::parse(&target_app)
         .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
     let adapter = get_adapter(target);
     let cfg = adapter.read_config().map_err(|e| e.to_string())?;
@@ -1027,7 +1076,7 @@ pub async fn export_database(
     let _db = state.db.lock().map_err(|e| e.to_string())?;
     let db_path = default_db_path()?;
 
-    std::fs::copy(&db_path, &output_path)
+    switch_api::utils::secure_fs::copy_private(&db_path, std::path::Path::new(&output_path))
         .map_err(|e| format!("Failed to export database: {}", e))?;
 
     Ok(())
@@ -1037,30 +1086,39 @@ pub async fn export_database(
 pub async fn import_database(input_path: String, state: State<'_, AppState>) -> Result<(), String> {
     let db_path = default_db_path()?;
 
-    if !std::path::Path::new(&input_path).exists() {
-        return Err(format!("Input file does not exist: {}", input_path));
-    }
-
-    // 覆盖当前库之前，先验证输入文件是可打开的合法数据库，
-    // 避免选错文件（损坏 / 非 SQLite）时把现有数据覆盖掉才发现。
-    Database::open(&input_path)
-        .map_err(|e| format!("Invalid database file: {}", e))?;
-
     let mut db = state.db.lock().map_err(|e| e.to_string())?;
+    let placeholder = Database::open(":memory:").map_err(|e| e.to_string())?;
+    let previous = std::mem::replace(&mut *db, placeholder);
+    drop(previous);
 
-    // 覆盖前自动备份当前库。备份文件名带时间戳，保留历史备份不互相覆盖，
-    // 以便多次导入后仍能回退到任意一次导入前的状态。
-    if db_path.exists() {
-        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-        let backup_path = db_path.with_file_name(format!("db.backup.{}.sqlite", timestamp));
-        std::fs::copy(&db_path, &backup_path)
-            .map_err(|e| format!("Failed to backup database: {}", e))?;
+    let backup = match Database::replace_file_from_import(
+        std::path::Path::new(&input_path),
+        &db_path,
+    ) {
+        Ok(backup) => backup,
+        Err(error) => {
+            *db = Database::open(&db_path)
+                .map_err(|restore| format!("Failed to stage and import database: {error}; failed to reopen current database: {restore}"))?;
+            return Err(format!("Failed to stage and import database: {error}"));
+        }
+    };
+    match Database::open(&db_path) {
+        Ok(reloaded) => {
+            *db = reloaded;
+        }
+        Err(error) => {
+            if let Some(backup_path) = backup.as_ref() {
+                Database::restore_replaced_file(&db_path, backup_path).map_err(|restore| {
+                    format!(
+                        "Failed to reload imported database: {error}; rollback failed: {restore}"
+                    )
+                })?;
+                *db = Database::open(&db_path)
+                    .map_err(|restore| format!("Failed to reload imported database: {error}; failed to reopen restored database: {restore}"))?;
+            }
+            return Err(format!("Failed to reload imported database: {error}"));
+        }
     }
-
-    std::fs::copy(&input_path, &db_path)
-        .map_err(|e| format!("Failed to import database: {}", e))?;
-
-    *db = Database::open(&db_path).map_err(|e| format!("Failed to reload database: {}", e))?;
 
     Ok(())
 }
@@ -1090,13 +1148,13 @@ pub async fn get_status(state: State<'_, AppState>) -> Result<StatusInfo, String
         ..Default::default()
     });
 
-    // Gemini status
-    let gemini_profile = db
-        .get_active_profile_full(TargetApp::Gemini)
+    // Pi status
+    let pi_profile = db
+        .get_active_profile_full(TargetApp::Pi)
         .map_err(|e| e.to_string())?;
-    let gemini = Some(TargetStatus {
-        connected: gemini_profile.is_some(),
-        profile: gemini_profile,
+    let pi = Some(TargetStatus {
+        connected: pi_profile.is_some(),
+        profile: pi_profile,
         ..Default::default()
     });
 
@@ -1141,7 +1199,7 @@ pub async fn get_status(state: State<'_, AppState>) -> Result<StatusInfo, String
     Ok(StatusInfo {
         claude_code,
         codex,
-        gemini,
+        pi,
         opencode,
         hermes,
         openclaw,
@@ -1153,8 +1211,10 @@ pub async fn get_status(state: State<'_, AppState>) -> Result<StatusInfo, String
     })
 }
 
-fn profile_protocol_fields(profile: &ApiProfile) -> (Option<String>, Option<String>, Option<String>) {
-    let wire = profile.codex.wire_api.clone();
+fn profile_protocol_fields(
+    profile: &ApiProfile,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let wire = None;
     let mode = match profile.target_app {
         Some(TargetApp::Hermes) => profile.hermes.api_mode.clone(),
         Some(TargetApp::OpenClaw) => profile.openclaw.api_mode.clone(),
@@ -1164,7 +1224,7 @@ fn profile_protocol_fields(profile: &ApiProfile) -> (Option<String>, Option<Stri
             .clone()
             .or_else(|| profile.openclaw.api_mode.clone()),
     };
-    let exp = profile.codex.experimental_bearer_token.clone();
+    let exp = None;
     (wire, mode, exp)
 }
 
@@ -1232,16 +1292,16 @@ async fn run_failover(
     let now = chrono::Utc::now().timestamp();
 
     for entry in keys.iter() {
-        let res = probe_with_params(
-            &app_str,
-            &profile.api_url,
-            &entry.key,
-            &model,
-            wire.as_deref(),
-            mode.as_deref(),
-            exp.as_deref(),
-            Some(entry.label.clone()),
-        )
+        let res = probe_with_params(switch_api::probe::ProbeRequest {
+            target_app: &app_str,
+            api_url: &profile.api_url,
+            api_key: &entry.key,
+            model: &model,
+            wire_api: wire.as_deref(),
+            api_mode: mode.as_deref(),
+            experimental_bearer_token: exp.as_deref(),
+            key_label: Some(entry.label.clone()),
+        })
         .await;
         match res {
             Ok(ok) => {
@@ -1290,18 +1350,32 @@ async fn run_failover(
         let _ = profile.set_active_key_id(id);
     }
 
-    let mut re_switched = false;
-    {
+    let persisted_shared_config = {
         let db = state.db.lock().map_err(|e| e.to_string())?;
         db.update_profile(&profile).map_err(|e| e.to_string())?;
         let should_switch = re_switch || (was_active && success);
         if should_switch && success {
-            apply_profile_config(&db, target, &profile)?;
-            if let Some(pid) = profile.id {
-                db.set_active_profile(target, pid).map_err(|e| e.to_string())?;
-            }
-            re_switched = true;
+            Some(
+                db.get_shared_config(target)
+                    .map_err(|e| e.to_string())?
+                    .map(|config| config.config),
+            )
+        } else {
+            None
         }
+    };
+
+    let mut re_switched = false;
+    if let Some(persisted_shared_config) = persisted_shared_config {
+        let shared_config = apply_profile_config(target, &profile, persisted_shared_config)?;
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        db.save_shared_config(target, shared_config)
+            .map_err(|e| e.to_string())?;
+        if let Some(profile_id) = profile.id {
+            db.set_active_profile(target, profile_id)
+                .map_err(|e| e.to_string())?;
+        }
+        re_switched = true;
     }
 
     Ok(FailoverResult {
@@ -1320,7 +1394,7 @@ pub async fn failover_profile_keys(
     re_switch: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<crate::model_fetch::FailoverResult, String> {
-    let target = TargetApp::from_str(&target_app)
+    let target = TargetApp::parse(&target_app)
         .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
     // re_switch=Some(true) 强制 re-switch；None/false 时由 run_failover 在「已是 active profile」时自动 re-switch
     let force = re_switch == Some(true);
@@ -1352,7 +1426,6 @@ pub struct ToolProbeResult {
     pub probed_at: i64,
 }
 
-
 /// 状态页「检测可用性」：对齐 CC Switch stream_check。
 /// 对每个已配置工具的 `api_url` 做 GET 可达性探测（不发模型请求、不验 key）。
 #[tauri::command]
@@ -1366,7 +1439,7 @@ pub async fn probe_active_profiles(
         let tools = [
             TargetApp::ClaudeCode,
             TargetApp::Codex,
-            TargetApp::Gemini,
+            TargetApp::Pi,
             TargetApp::OpenCode,
             TargetApp::Hermes,
             TargetApp::OpenClaw,
@@ -1477,7 +1550,7 @@ fn read_local_skills(target: TargetApp) -> Result<Vec<String>, String> {
     let dirs_to_scan: Vec<std::path::PathBuf> = match target {
         TargetApp::ClaudeCode => vec![home.join(".claude").join("skills")],
         TargetApp::Codex => vec![home.join(".codex").join("skills")],
-        TargetApp::Gemini => vec![home.join(".gemini").join("skills")],
+        TargetApp::Pi => vec![home.join(".pi").join("agent").join("skills")],
         TargetApp::OpenCode => vec![
             home.join(".config").join("opencode").join("skills"),
             home.join(".claude").join("skills"),
@@ -1547,8 +1620,8 @@ mod claude_extract_tests {
         assert_eq!(m.get("sonnet_model"), Some(&"gpt-5.5".to_string()));
         assert_eq!(m.get("sonnet_name"), Some(&"Sonnet-Proxy".to_string()));
         assert_eq!(m.get("opus_model"), Some(&"grok-4.3".to_string()));
-        assert!(m.get("haiku_model").is_none());
-        assert!(m.get("opus_name").is_none());
+        assert!(!m.contains_key("haiku_model"));
+        assert!(!m.contains_key("opus_name"));
     }
 
     #[test]
@@ -1569,7 +1642,7 @@ mod claude_extract_tests {
         let mut mapping = None;
         claude_extract_models(&env, &mut model, &mut mapping);
         let m = mapping.unwrap();
-        assert!(m.get("haiku_one_m").is_none());
+        assert!(!m.contains_key("haiku_one_m"));
     }
 
     #[test]
@@ -1606,9 +1679,9 @@ mod claude_extract_tests {
     #[test]
     fn test_round_trip_with_merge_config() {
         // 关键回归：merge_config 写出的 env 必须能被 claude_extract_models 完整读回
+        use std::collections::HashMap;
         use switch_api::adapters::{claude_code::ClaudeCodeAdapter, ConfigAdapter};
         use switch_api::models::ApiProfile;
-        use std::collections::HashMap;
 
         let mut mm = HashMap::new();
         mm.insert("sonnet_model".to_string(), "gpt-5.5".to_string());
@@ -1644,7 +1717,7 @@ mod claude_extract_tests {
         assert_eq!(m.get("opus_model"), Some(&"claude-opus-4".to_string()));
         assert_eq!(m.get("opus_one_m"), Some(&"true".to_string()));
         // 没设的 haiku 不应出现
-        assert!(m.get("haiku_model").is_none());
+        assert!(!m.contains_key("haiku_model"));
     }
 }
 
@@ -1674,10 +1747,7 @@ mod codex_hooks_tests {
 
         let hooks = read_codex_hooks(&path);
         assert_eq!(hooks["PreToolUse"][0]["matcher"], "Bash");
-        assert_eq!(
-            hooks["PreToolUse"][0]["hooks"][0]["command"],
-            "echo hi"
-        );
+        assert_eq!(hooks["PreToolUse"][0]["hooks"][0]["command"], "echo hi");
 
         let _ = std::fs::remove_file(&path);
     }
@@ -1714,7 +1784,7 @@ mod codex_hooks_tests {
 
 #[cfg(test)]
 mod backfill_tests {
-    use super::backfill_missing_top_level;
+    use switch_api::adapters::backfill_missing_top_level;
 
     #[test]
     fn test_backfill_restores_missing_keys_without_overwriting() {
@@ -1808,7 +1878,10 @@ mod mcp_config_tests {
         assert_eq!(map.len(), 2);
         assert_eq!(map["playwright"].command, "npx");
         assert_eq!(map["playwright"].args, vec!["@playwright/mcp@latest"]);
-        assert_eq!(map["github"].url.as_deref(), Some("https://api.githubcopilot.com/mcp/"));
+        assert_eq!(
+            map["github"].url.as_deref(),
+            Some("https://api.githubcopilot.com/mcp/")
+        );
     }
 }
 
@@ -1835,7 +1908,10 @@ mod skills_tests {
         let mut skills = scan_skill_dirs(&[dir_a.clone(), dir_b.clone(), missing]);
         skills.sort();
         // a、b、shared(去重为一个)；不存在的目录被跳过；不报错
-        assert_eq!(skills, vec!["a".to_string(), "b".to_string(), "shared".to_string()]);
+        assert_eq!(
+            skills,
+            vec!["a".to_string(), "b".to_string(), "shared".to_string()]
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -1867,10 +1943,8 @@ mod codex_raw_config_tests {
 
     fn temp_path(name: &str) -> std::path::PathBuf {
         let n = CTR.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!(
-            "switch-api-codex-raw-{}-{n}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("switch-api-codex-raw-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join(name)
     }

@@ -2,7 +2,10 @@
 use switch_api::models::TargetApp;
 
 pub(crate) fn str_field(v: &serde_json::Value, key: &str) -> String {
-    v.get(key).and_then(|x| x.as_str()).unwrap_or("").to_string()
+    v.get(key)
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 pub(crate) fn codex_string_field(
@@ -32,7 +35,11 @@ pub(crate) fn codex_context_1m(target: TargetApp, cfg: &serde_json::Value) -> Op
         .map(|w| w >= 1_000_000)
 }
 
-pub(crate) fn codex_bool_field(target: TargetApp, cfg: &serde_json::Value, key: &str) -> Option<bool> {
+pub(crate) fn codex_bool_field(
+    target: TargetApp,
+    cfg: &serde_json::Value,
+    key: &str,
+) -> Option<bool> {
     if target != TargetApp::Codex {
         return None;
     }
@@ -98,11 +105,10 @@ pub(crate) fn default_provider(target: TargetApp) -> String {
     match target {
         TargetApp::ClaudeCode => "anthropic",
         TargetApp::Codex => "openai",
-        TargetApp::Gemini => "google",
+        TargetApp::Pi => "anthropic",
         TargetApp::OpenCode => "anthropic",
         TargetApp::Hermes => "custom",
         TargetApp::OpenClaw => "custom",
     }
     .to_string()
 }
-

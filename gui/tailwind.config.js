@@ -25,7 +25,7 @@ export default {
 
         claude: "#C2410C",
         codex: "#047857",
-        gemini: "#2563EB",
+        pi: "#2563EB",
         opencode: "#7C3AED",
 
         primary: "#2A2118",

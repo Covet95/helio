@@ -118,9 +118,8 @@ export function ProfileModal({
       apiUrl: form.api_url,
       apiKey,
       model,
-      wireApi: form.wire_api,
+      envKey: form.env_key,
       apiMode: form.api_mode,
-      experimentalBearerToken: form.experimental_bearer_token,
       keyLabel,
     });
   };
@@ -208,7 +207,7 @@ export function ProfileModal({
   };
 
   const presets = PROVIDER_PRESETS[tool];
-  const showModelParams = tool === 'codex' || tool === 'claude-code' || tool === 'opencode' || tool === 'hermes' || tool === 'openclaw';
+  const showModelParams = tool === 'codex' || tool === 'claude-code' || tool === 'pi' || tool === 'opencode' || tool === 'hermes' || tool === 'openclaw';
 
   const applyPreset = (p: typeof presets[number]) => {
     setForm((f) => ({
@@ -221,8 +220,9 @@ export function ProfileModal({
 
   const submit = () => {
     const normalized = withActiveKey(form, ensureKeyPool(form));
-    if (!normalized.name.trim() || !normalized.provider.trim() || !normalized.api_url.trim() || !normalized.api_key.trim()) {
-      setFormErr('请填写名称、Provider、API URL、API Key');
+    const usesCodexEnv = tool === 'codex' && Boolean(normalized.env_key?.trim());
+    if (!normalized.name.trim() || !normalized.provider.trim() || !normalized.api_url.trim() || (!usesCodexEnv && !normalized.api_key.trim())) {
+      setFormErr('请填写名称、Provider、API URL，并提供 API Key 或 Codex 环境变量名');
       return;
     }
     setFormErr('');
@@ -232,6 +232,11 @@ export function ProfileModal({
         .map((e) => ({
           slug: e.slug, // 原样保留，仅去掉完全空白项
           display_name: e.display_name?.trim() ? e.display_name : undefined,
+          context_window: e.context_window && e.context_window > 0 ? e.context_window : undefined,
+          supports_reasoning: e.supports_reasoning || undefined,
+          supports_images: e.supports_images || undefined,
+          supports_tool_calls: e.supports_tool_calls || undefined,
+          supports_web_search: e.supports_web_search || undefined,
         }))
         .filter((e) => e.slug.trim().length > 0);
       catalog_models = cleaned.length ? cleaned : undefined;
@@ -324,7 +329,7 @@ export function ProfileModal({
                 label="API Key"
                 type="password"
                 value={activeKey}
-                required
+                required={tool !== 'codex' || !form.env_key?.trim()}
                 mono
                 onChange={(e) => {
                   const v = e.target.value;
@@ -520,7 +525,8 @@ export function ProfileModal({
                   </div>
                   <div className="space-y-1.5">
                     {(form.catalog_models || []).map((entry, idx) => (
-                      <div key={idx} className="flex flex-wrap items-center gap-2">
+                      <div key={idx} className="space-y-1.5 rounded-md border border-line bg-card/50 p-2">
+                        <div className="flex flex-wrap items-center gap-2">
                         <input
                           value={entry.slug}
                           onChange={(e) => {
@@ -587,6 +593,40 @@ export function ProfileModal({
                         >
                           ×
                         </button>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-3 text-[11px] text-ink-dim">
+                          <input
+                            type="number"
+                            min={1}
+                            value={entry.context_window || ''}
+                            onChange={(e) => {
+                              const next = [...(form.catalog_models || [])];
+                              next[idx] = { ...next[idx], context_window: e.target.value ? Number(e.target.value) : undefined };
+                              setForm({ ...form, catalog_models: next });
+                            }}
+                            placeholder="上下文窗口"
+                            className="h-7 w-28 rounded border border-line bg-surface px-1.5 font-mono text-[11px]"
+                          />
+                          {[
+                            ['supports_reasoning', '推理'],
+                            ['supports_images', '图片'],
+                            ['supports_tool_calls', '工具调用'],
+                            ['supports_web_search', '联网搜索'],
+                          ].map(([key, label]) => (
+                            <label key={key} className="flex items-center gap-1">
+                              <input
+                                type="checkbox"
+                                checked={Boolean(entry[key as keyof typeof entry])}
+                                onChange={(e) => {
+                                  const next = [...(form.catalog_models || [])];
+                                  next[idx] = { ...next[idx], [key]: e.target.checked || undefined };
+                                  setForm({ ...form, catalog_models: next });
+                                }}
+                              />
+                              {label}
+                            </label>
+                          ))}
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -707,35 +747,6 @@ export function ProfileModal({
                       </button>
                     ))}
                   </div>
-                </div>
-              )}
-
-              {tool === 'codex' && (
-                <div>
-                  <span className="block mb-1.5 text-[12px] font-medium text-ink-dim">Wire 协议</span>
-                  <div className="flex gap-1.5">
-                    {[
-                      { value: '', label: '默认' },
-                      { value: 'responses', label: 'Responses' },
-                      { value: 'chat', label: 'Chat' },
-                    ].map((w) => (
-                      <button
-                        key={w.value}
-                        type="button"
-                        onClick={() => setForm({ ...form, wire_api: w.value || undefined })}
-                        className={`flex-1 rounded-md px-2 py-1.5 text-[12px] font-medium border transition-all ${
-                          (form.wire_api || '') === w.value
-                            ? 'border-accent text-accent bg-accent/8'
-                            : 'border-line text-ink-dim hover:border-line-strong'
-                        }`}
-                      >
-                        {w.label}
-                      </button>
-                    ))}
-                  </div>
-                  <div className="mt-1 text-[11px] text-ink-faint">
-                        wire_api：默认（空）与接入一致为 Responses；第三方中转不支持时再选 Chat
-                      </div>
                 </div>
               )}
 
@@ -906,25 +917,9 @@ export function ProfileModal({
               )}
 
               {tool === 'codex' && (
-                <label className="flex cursor-pointer items-center justify-between">
-                  <div>
-                    <div className="text-[13px] font-medium text-ink">要求 OpenAI 鉴权</div>
-                    <div className="text-[11px] text-ink-faint">requires_openai_auth（留默认即可）</div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setForm({ ...form, requires_openai_auth: form.requires_openai_auth === false ? undefined : false })}
-                    className={`relative h-6 w-11 rounded-full transition-colors ${form.requires_openai_auth !== false ? 'bg-accent' : 'bg-line-strong'}`}
-                  >
-                    <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow-soft transition-transform ${form.requires_openai_auth !== false ? 'translate-x-[22px]' : 'translate-x-0.5'}`} />
-                  </button>
-                </label>
-              )}
-
-              {tool === 'codex' && (
-                <Field label="Bearer Token" type="password" value={form.experimental_bearer_token || ''} mono
-                       onChange={(e) => setForm({ ...form, experimental_bearer_token: e.target.value || undefined })}
-                       placeholder="留空 / 部分中转在鉴权失败时需要" />
+                <Field label="API Key 环境变量" value={form.env_key || ''} mono
+                       onChange={(e) => setForm({ ...form, env_key: e.target.value.trim() || undefined })}
+                       placeholder="留空则由 Helio 安全写入 auth.json；例如 OPENAI_API_KEY" />
               )}
 
               {tool === 'codex' && (
@@ -969,4 +964,3 @@ export function ProfileModal({
     </Modal>
   );
 }
-

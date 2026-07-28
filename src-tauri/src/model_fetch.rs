@@ -52,6 +52,20 @@ const PROVIDER_MODELS_URLS: &[(&str, &str)] = &[
     ),
 ];
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestModelRequest {
+    pub target_app: String,
+    pub api_url: String,
+    pub api_key: String,
+    pub model: String,
+    pub env_key: Option<String>,
+    pub wire_api: Option<String>,
+    pub api_mode: Option<String>,
+    pub experimental_bearer_token: Option<String>,
+    pub key_label: Option<String>,
+}
+
 fn provider_models_url(api_url: &str) -> Option<String> {
     let lower = api_url.to_lowercase();
     PROVIDER_MODELS_URLS
@@ -137,30 +151,48 @@ pub async fn fetch_models(api_url: String, api_key: String) -> Result<Vec<Fetche
 
 /// 按目标工具协议探活
 #[tauri::command]
-pub async fn test_model(
-    target_app: String,
-    api_url: String,
-    api_key: String,
-    model: String,
-    wire_api: Option<String>,
-    api_mode: Option<String>,
-    experimental_bearer_token: Option<String>,
-    key_label: Option<String>,
-) -> Result<ModelTestResult, String> {
-    probe::probe_with_params(
-        &target_app,
-        &api_url,
-        &api_key,
-        &model,
-        wire_api.as_deref(),
-        api_mode.as_deref(),
-        experimental_bearer_token.as_deref(),
-        key_label,
-    )
+pub async fn test_model(request: TestModelRequest) -> Result<ModelTestResult, String> {
+    let resolved_api_key = request
+        .env_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|name| std::env::var(name).ok())
+        .unwrap_or(request.api_key);
+    probe::probe_with_params(probe::ProbeRequest {
+        target_app: &request.target_app,
+        api_url: &request.api_url,
+        api_key: &resolved_api_key,
+        model: &request.model,
+        wire_api: request.wire_api.as_deref(),
+        api_mode: request.api_mode.as_deref(),
+        experimental_bearer_token: request.experimental_bearer_token.as_deref(),
+        key_label: request.key_label,
+    })
     .await
 }
 
 #[cfg(test)]
 mod tests {
-    // resolve matrix lives in switch_api::probe tests
+    use super::TestModelRequest;
+
+    #[test]
+    fn test_model_request_deserializes_camel_case() {
+        let request: TestModelRequest = serde_json::from_value(serde_json::json!({
+            "targetApp": "codex",
+            "apiUrl": "https://api.example.test",
+            "apiKey": "key",
+            "model": "gpt-test",
+            "envKey": "CODEX_API_KEY",
+            "wireApi": "responses",
+            "apiMode": "openai",
+            "experimentalBearerToken": "token",
+            "keyLabel": "Primary",
+        }))
+        .unwrap();
+
+        assert_eq!(request.target_app, "codex");
+        assert_eq!(request.env_key.as_deref(), Some("CODEX_API_KEY"));
+        assert_eq!(request.key_label.as_deref(), Some("Primary"));
+    }
 }

@@ -49,8 +49,8 @@ switch-api export --output backup.db
 | 工具 | 探活协议 |
 |------|----------|
 | Claude Code | Anthropic Messages（`x-api-key`，**不**剥 `/anthropic` 后缀改打 OpenAI） |
-| Codex | `wire_api`；**空 = Responses**（与接入默认一致）；`experimental_bearer_token` 参与鉴权 |
-| Gemini | 官方 host → generateContent；自定义 URL → OpenAI chat |
+| Codex | 固定使用 Responses；旧 `wire_api=chat` 会迁移为 Responses |
+| Pi | 官方 Google host → generateContent；自定义默认 chat；可按 api_mode/wire_api 走 anthropic/responses |
 | OpenCode | OpenAI-compatible chat |
 | Hermes / OpenClaw | `api_mode`：chat / anthropic_messages / responses |
 
@@ -87,17 +87,19 @@ Hermes switch 时会把 profile 多 key **镜像**到 `~/.hermes/auth.json` 的 
 | 工具 | 配置文件 | 格式 | API 凭据位置 |
 |------|---------|------|-------------|
 | Claude Code | `~/.claude/settings.local.json` | JSON | `env.ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` |
-| Codex | `~/.codex/config.toml` + `auth.json` | TOML + JSON | `auth.json` 的 `OPENAI_API_KEY` + `model_providers.<id>.base_url` |
-| Gemini CLI | `~/.gemini/settings.json` + `.env` | JSON + env | `.env` 的 `GEMINI_API_KEY` / `GOOGLE_GEMINI_BASE_URL` |
+| Codex | `~/.codex/config.toml` + 可选 `auth.json` | TOML + JSON | `env_key` 指向环境变量，或由 Helio 写入 `auth.json` 的 `OPENAI_API_KEY` |
+| Pi | `~/.pi/agent/settings.json` + `auth.json` + 可选 `models.json` | JSON | `auth.json` 按 provider 的 api_key；自定义 endpoint 写 `models.json.providers.<id>` |
 | OpenCode | `~/.config/opencode/opencode.json` | JSON | `provider.<id>.options.apiKey` / `baseURL` |
 | Hermes | `~/.hermes/config.yaml` (+ 可选 `auth.json`) | YAML | `model.default` / `model.provider=custom:<name>` + `custom_providers[].base_url` / `api_key` |
 | OpenClaw | `~/.openclaw/openclaw.json` (+ `agents/main/agent/models.json`) | JSON | `models.providers.<id>.baseUrl` / `apiKey` + `agents.defaults.model.primary` |
 
 工具特定说明：
 
-- **Gemini CLI**：API key 存在 `~/.gemini/.env`（不在 settings.json）。切换时只重写 `.env` 中的 `GEMINI_API_KEY` 和 `GOOGLE_GEMINI_BASE_URL`，保留其他环境变量；settings.json（mcpServers、model、security）不动。需先设 `security.auth.selectedType` 为 `gemini-api-key`。
+- **Pi**：凭据写 `~/.pi/agent/auth.json`（按 provider id merge api_key，保留其它 OAuth/key）。官方 base 只动 auth + `settings.json` 的 `defaultProvider`/`defaultModel`；自定义 `api_url` 会 upsert `models.json.providers.<id>`（`baseUrl`/`api`/`apiKey`/model）。不改 skills/extensions/themes/trust。
 - **OpenCode**：profile 的 `provider` 字段（小写）作为 provider id，写入 `provider.<id>.options`。切换某个 provider 不影响其他 provider，mcp/permission/tools/agent 全部保留。
-- **Codex**：API key 存在 `~/.codex/auth.json` 的 `OPENAI_API_KEY`（不在 config.toml）。切换时只重写 auth.json 的 key 与 `config.toml` 中对应 provider 的 `base_url`，保留 `wire_api` 等协议字段、MCP servers、projects 等共享配置。TOML 往返会规范化格式并丢失注释（可在 `config.backup.*.toml` 中找回）。若档案配置了 **模型目录**（`catalog_models`），切换时会整表覆盖 `~/.codex/model_catalog.json` 并设置 `model_catalog_json`，供 Codex `/model` 显示第三方模型名（slug 原样保存）；未配置则不改本机 catalog。修改 catalog 后需重启 Codex 才能刷新列表。
+- **Codex**：固定生成 Responses provider。档案设置 `env_key` 时，`model_providers.<id>.env_key` 指向该环境变量、`requires_openai_auth=false`，且 Helio 不修改 `auth.json`；未设置时，Helio 使用文件凭据模式，将活跃 key 写入 `~/.codex/auth.json`，并设置 `auth_mode=apikey`、`cli_auth_credentials_store=file`。切换只修改目标 provider，其他 provider 的 endpoint、鉴权字段和自定义元数据保持不变。`openai`、`ollama`、`lmstudio`、`amazon-bedrock` 等保留 ID 自动加 `-custom`。若档案配置了 **模型目录**，每个模型可独立声明上下文、推理、图片、工具调用和联网搜索能力；未声明的可选能力按保守值生成。切换 config/auth/catalog 任一步失败都会回滚全部受管文件。TOML 往返会规范化格式并丢失注释，时间戳备份仍可用于人工恢复。
+
+> 迁移提示：历史 `wire_api=chat`、`requires_openai_auth=false`（但没有 `env_key`）和 Bearer Token 配置在下次读取/切换时会归一化为 Responses + 文件 API Key 鉴权。数据库、导出、备份及 Codex 凭据文件在 Unix 上会修复为仅当前用户可读写。
 - **Hermes**：MVP 支持 custom OpenAI-compatible endpoint。profile 的 `provider` 为 custom 名（如 `freemodel`），写入 `model.provider: custom:freemodel`、`model.default`，并 upsert `custom_providers` 中对应项的 `base_url`/`api_key`/`api_mode`；`context_1m` 决定 `model.context_length`（并镜像到当前 custom provider）：开启 = **1M**；关闭 = 模型感知默认（**Grok 500k**，其它 **200k**）。新建 Hermes profile 默认关闭 1M。mcp_servers、skills、agent、platforms 等保留。switch 时把 Helio 多 key **整表镜像**到 `auth.json` 的 `credential_pool[custom:<name>]`（活跃 key 在前；无文件则创建）。YAML 写回会丢失注释（可在 `config.backup.*.yaml` 找回）。已开 session 需新会话或 `hermes gateway restart` 才读新配置。
 - **OpenClaw**：MVP 支持 `models.providers.<id>` custom provider。profile 的 `provider` 为 provider id（如 `cpa`），写入 `baseUrl`/`apiKey`/`api`，并设 `agents.defaults.model.primary = provider/model`；保留 fallbacks、mcp、channels、skills。若存在 `agents/main/agent/models.json` 会同步该 provider。`context_1m` 写入 `models[].contextWindow` 与 `agents.defaults.contextTokens`（开 1M / 关则 Grok 500k、其它 200k）；`max_tokens`（OpenClaw 专用）写入 `models[].maxTokens`（默认新建 128000）。已开 gateway 可能需重启才读新配置。
 
@@ -108,7 +110,7 @@ API Profile (只存 API 信息)
     ↓
 Shared Config (permissions, hooks, MCP, skills)
     ↓
-适配器 (Claude Code / Codex / Gemini CLI / OpenCode / Hermes / OpenClaw)
+适配器 (Claude Code / Codex / Pi / OpenCode / Hermes / OpenClaw)
     ↓
 配置文件 (原子写入)
 ```
@@ -116,10 +118,11 @@ Shared Config (permissions, hooks, MCP, skills)
 ## 路线图
 
 - [x] CLI 核心功能
-- [x] Claude Code / Codex / Gemini CLI / OpenCode 适配器
+- [x] Claude Code / Codex / OpenCode 适配器
 - [x] GUI（Tauri）
 - [x] Hermes 适配器（custom endpoint MVP）
 - [x] OpenClaw 适配器（custom provider MVP）
+- [x] Pi 适配器（auth.json / models.json merge；移除 Gemini CLI 目标）
 - [x] 探活按工具协议对齐 + 同 API 多 Key 池
 - [x] Codex 模型目录（model_catalog_json / `/model` 第三方模型名）
 - [ ] MCP 统一管理面板 / Proxy 模式 / Usage 统计

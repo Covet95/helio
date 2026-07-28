@@ -71,20 +71,14 @@ export const tauriApi = {
     apiUrl: string;
     apiKey: string;
     model: string;
+    envKey?: string;
     wireApi?: string;
     apiMode?: string;
     experimentalBearerToken?: string;
     keyLabel?: string;
   }) =>
     command<ModelTestResult>('test_model', {
-      targetApp: args.targetApp,
-      apiUrl: args.apiUrl,
-      apiKey: args.apiKey,
-      model: args.model,
-      wireApi: args.wireApi,
-      apiMode: args.apiMode,
-      experimentalBearerToken: args.experimentalBearerToken,
-      keyLabel: args.keyLabel,
+      request: args,
     }),
 
   // 配置管理
@@ -125,6 +119,7 @@ export const tauriApi = {
       reasoning_effort?: string;
       context_1m?: boolean;
       wire_api?: string;
+      env_key?: string;
       requires_openai_auth?: boolean;
       experimental_bearer_token?: string;
       model_thinking_enabled?: boolean;
@@ -142,6 +137,7 @@ export const tauriApi = {
       reasoning_effort: undefined,
       context_1m: undefined,
       wire_api: undefined,
+      env_key: undefined,
       requires_openai_auth: undefined,
       experimental_bearer_token: undefined,
       model_thinking_enabled: undefined,
@@ -201,6 +197,7 @@ export interface CcSwitchProvider {
   reasoning_effort?: string;
   context_1m: boolean;
   wire_api?: string;
+  env_key?: string;
   requires_openai_auth?: boolean;
   experimental_bearer_token?: string;
   model_thinking_enabled?: boolean;
