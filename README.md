@@ -12,6 +12,18 @@ AI CLI 工具的 API 配置切换器。把 API 凭据与共享配置（权限 / 
 
 ## 安装
 
+### GitHub 发版包（推荐）
+
+正式多端安装包由 **GitHub Actions** 构建，见 [Releases](https://github.com/Covet95/helio/releases)：
+
+| 平台 | 下载 |
+|------|------|
+| Windows | NSIS `Helio_*_x64-setup.exe` |
+| macOS | `.dmg`（Apple Silicon / Intel） |
+| Linux | `.deb` / AppImage |
+
+维护者发版：改版本号 → 推 `main` → `git tag vX.Y.Z && git push origin vX.Y.Z`（工作流 [release.yml](.github/workflows/release.yml)）。
+
 ### 前置依赖
 
 | 平台 | 依赖 |

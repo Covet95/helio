@@ -1,0 +1,138 @@
+# 推送 v* tag → GitHub Actions 跨平台打包并挂到同一 Release
+#
+# 用法（推荐）:
+#   1. 改版本号：src-tauri/tauri.conf.json + gui/package.json
+#   2. git push origin main
+#   3. git tag v0.1.2 && git push origin v0.1.2
+#
+# 或：Actions → Release → Run workflow，填写 tag（如 v0.1.2）
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag（如 v0.1.2；须已存在于仓库，或将由本 workflow 创建 Release）"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS Apple Silicon
+          - platform: macos-latest
+            rust_target: aarch64-apple-darwin
+            args: --target aarch64-apple-darwin --bundles dmg
+          # macOS Intel
+          - platform: macos-latest
+            rust_target: x86_64-apple-darwin
+            args: --target x86_64-apple-darwin --bundles dmg
+          # Linux
+          - platform: ubuntu-22.04
+            rust_target: ""
+            args: --bundles deb,appimage
+          # Windows：只打 NSIS（不要 MSI，避免双桌面图标）
+          - platform: windows-latest
+            rust_target: ""
+            args: --bundles nsis
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # workflow_dispatch 时默认在 main；tag 推送时在 tag commit
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: gui/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: gui
+        run: npm ci
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            src-tauri -> target
+
+      - name: Install Linux system deps
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev
+
+      - name: Resolve release tag
+        id: meta
+        shell: bash
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG="${{ github.ref_name }}"
+          else
+            TAG="${{ inputs.tag }}"
+          fi
+          if [ -z "$TAG" ]; then
+            echo "Release tag is empty" >&2
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Using release tag: $TAG"
+
+      - name: Build and upload to GitHub Release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: src-tauri
+          tagName: ${{ steps.meta.outputs.tag }}
+          releaseName: Helio ${{ steps.meta.outputs.tag }}
+          releaseBody: |
+            ## Helio ${{ steps.meta.outputs.tag }}
+
+            由 **GitHub Actions** 自动跨平台构建并上传。
+
+            | 平台 | 产物 |
+            |------|------|
+            | **Windows** | NSIS `*-setup.exe`（推荐；勿与 MSI 叠装） |
+            | **macOS** | `.dmg`（Apple Silicon `aarch64` + Intel `x86_64`） |
+            | **Linux** | `.deb` / AppImage |
+
+            ### 说明
+
+            - 配置目录均相对**用户主目录**（Windows 即 `%USERPROFILE%\.claude` 等）
+            - Windows 细节：[docs/WINDOWS.md](https://github.com/Covet95/helio/blob/main/docs/WINDOWS.md)
+            - 源码与变更见对应 tag 的 commit 历史
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}
