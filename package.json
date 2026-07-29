@@ -1,0 +1,12 @@
+{
+  "name": "helio",
+  "private": true,
+  "description": "Workspace root scripts so tauri beforeBuildCommand works whether cwd is repo root (CI) or gui (some local shells)",
+  "scripts": {
+    "dev": "npm --prefix gui run dev",
+    "build": "npm --prefix gui run build",
+    "test": "npm --prefix gui run test",
+    "lint": "npm --prefix gui run lint",
+    "type-check": "npm --prefix gui run type-check"
+  }
+}
