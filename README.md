@@ -24,6 +24,8 @@ AI CLI 工具的 API 配置切换器。把 API 凭据与共享配置（权限 / 
 
 维护者发版：改版本号 → 推 `main` → `git tag vX.Y.Z && git push origin vX.Y.Z`（工作流 [release.yml](.github/workflows/release.yml)）。
 
+> **macOS 提示「已损坏」？** 当前发版包未做 Apple 公证（省钱路线）。装好后执行 `xattr -cr /Applications/Helio.app`，或右键 → 打开。详见 [docs/MACOS.md](docs/MACOS.md)。
+
 ### 前置依赖
 
 | 平台 | 依赖 |
@@ -38,6 +40,16 @@ AI CLI 工具的 API 配置切换器。把 API 凭据与共享配置（权限 / 
 ### 桌面应用（Helio GUI，推荐）
 
 **macOS**
+
+从 [Releases](https://github.com/Covet95/helio/releases) 下对应芯片的 `.dmg`，拖到「应用程序」。若系统报「已损坏」或无法验证开发者：
+
+```bash
+xattr -cr /Applications/Helio.app
+```
+
+更多绕过方式与发版说明见 [docs/MACOS.md](docs/MACOS.md)。
+
+本机构建：
 
 ```bash
 ./run.sh   # 打包 .app 并打开（构建产物在 target/release/bundle/）
