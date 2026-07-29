@@ -12,7 +12,20 @@ AI CLI 工具的 API 配置切换器。把 API 凭据与共享配置（权限 / 
 
 ## 安装
 
+### 前置依赖
+
+| 平台 | 依赖 |
+|------|------|
+| 通用 | Rust（stable）、Node.js 18+ |
+| macOS | Xcode CLT |
+| Windows | [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)、MSVC 构建工具（Visual Studio Build Tools）、`cargo install tauri-cli --version "^2"` |
+| Linux | `webkit2gtk` / 发行版对应的 Tauri 系统依赖 |
+
+配置目录均基于用户主目录（Windows 上即 `%USERPROFILE%\.claude` 等），与各 AI CLI 在 Windows 上的路径约定一致。
+
 ### 桌面应用（Helio GUI，推荐）
+
+**macOS**
 
 ```bash
 ./run.sh   # 打包 .app 并打开（构建产物在 target/release/bundle/）
@@ -21,15 +34,60 @@ AI CLI 工具的 API 配置切换器。把 API 凭据与共享配置（权限 / 
 或手动打包 `.dmg` / `.app`：
 
 ```bash
-cd src-tauri && cargo tauri build
+cargo tauri build
 # 安装包：target/release/bundle/dmg/Helio_<版本>_aarch64.dmg
 ```
 
+**Windows（只打一份 NSIS 安装包，不要再装 MSI）**
+
+```powershell
+.\run.ps1
+# 产物：target\release\bundle\nsis\Helio_<版本>_x64-setup.exe
+```
+
+手动构建：
+
+```powershell
+cd gui; npm install; cd ..
+cargo install tauri-cli --version "^2"   # 首次
+cargo tauri build --bundles nsis
+# 安装包（唯一）：target\release\bundle\nsis\Helio_*_x64-setup.exe
+# 绿色版：      target\release\Helio.exe
+```
+
+> 注意：不要对同一台机器同时安装 NSIS 与 MSI，否则桌面会出现**两个 Helio**。  
+> 细节见 [docs/WINDOWS.md](docs/WINDOWS.md)。
+
+开发模式（热重载前端）：
+
+```powershell
+# 仓库根目录
+cargo tauri dev
+```
+
+Windows 行为说明：
+
+- **唯一官方安装包**：NSIS `*-setup.exe`（当前用户，安装到 `%LOCALAPPDATA%\Helio`）
+- 关闭主窗口会**缩到系统托盘**，不会退出；托盘左键打开，右键切换 profile
+- 托盘图标为金橙色太阳（macOS 仍为模板黑图标）
+- 需要 **WebView2**（Win10/11 通常自带）
+
 ### 命令行（CLI）
+
+**macOS / Linux**
 
 ```bash
 cargo build --release
 sudo cp target/release/switch-api /usr/local/bin/
+```
+
+**Windows**
+
+```powershell
+cargo build --release
+# 可执行文件：target\release\switch-api.exe
+# 可选：复制到已在 PATH 中的目录，例如
+Copy-Item target\release\switch-api.exe $env:USERPROFILE\bin\
 ```
 
 ## 使用
@@ -125,7 +183,10 @@ Shared Config (permissions, hooks, MCP, skills)
 - [x] Pi 适配器（auth.json / models.json merge；移除 Gemini CLI 目标）
 - [x] 探活按工具协议对齐 + 同 API 多 Key 池
 - [x] Codex 模型目录（model_catalog_json / `/model` 第三方模型名）
+- [x] Windows 支持（托盘、NSIS 打包、`run.ps1`）
 - [ ] MCP 统一管理面板 / Proxy 模式 / Usage 统计
+
+Windows 细节见 [docs/WINDOWS.md](docs/WINDOWS.md)。
 
 ## 许可证
 

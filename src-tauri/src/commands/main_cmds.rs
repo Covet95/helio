@@ -1,8 +1,6 @@
 // Tauri commands
 use serde::{Deserialize, Serialize};
-#[cfg(target_os = "macos")]
 use std::io::Write;
-#[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use switch_api::db::Database;
@@ -131,15 +129,34 @@ pub struct LocalConfigInfo {
 
 #[tauri::command]
 pub async fn copy_text(text: String) -> Result<(), String> {
+    copy_text_native(&text)
+}
+
+/// 跨平台剪贴板写入：macOS pbcopy / Windows PowerShell Set-Clipboard / Linux wl-copy|xclip。
+fn copy_text_native(text: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        copy_text_with_pbcopy(&text)
+        return copy_text_with_pbcopy(text);
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        return copy_text_with_powershell(text);
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        return copy_text_with_linux_clipboard(text);
+    }
+
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "windows",
+        all(unix, not(target_os = "macos"))
+    )))]
     {
         let _ = text;
-        Err("Clipboard copy is only implemented for macOS".to_string())
+        Err("Clipboard copy is not implemented on this platform".to_string())
     }
 }
 
@@ -169,6 +186,97 @@ fn copy_text_with_pbcopy(text: &str) -> Result<(), String> {
     } else {
         Err(format!("pbcopy exited with status {}", status))
     }
+}
+
+/// Windows：经 PowerShell `Set-Clipboard` 写入；stdin 用 UTF-8 文本，避免参数转义问题。
+/// 空串在 Win 上 Set-Clipboard 会抛 ArgumentNullException，视为成功 no-op。
+#[cfg(target_os = "windows")]
+fn copy_text_with_powershell(text: &str) -> Result<(), String> {
+    if text.is_empty() {
+        return Ok(());
+    }
+
+    // 读 UTF-8 标准输入再 Set-Clipboard，兼容多行/特殊字符，且不把正文塞进命令行参数。
+    let mut child = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "[Console]::InputEncoding = [System.Text.Encoding]::UTF8; $t = [Console]::In.ReadToEnd(); if ($null -eq $t) { $t = [string]::Empty }; Set-Clipboard -Value $t",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to start PowerShell for clipboard: {}", e))?;
+
+    {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| "Failed to open PowerShell stdin".to_string())?;
+        stdin
+            .write_all(text.as_bytes())
+            .map_err(|e| format!("Failed to write clipboard text: {}", e))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("Failed to wait for PowerShell clipboard: {}", e))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let err = String::from_utf8_lossy(&output.stderr);
+        Err(format!(
+            "Set-Clipboard failed (status {}): {}",
+            output.status,
+            err.trim()
+        ))
+    }
+}
+
+/// Linux：优先 Wayland `wl-copy`，否则 X11 `xclip`。
+#[cfg(all(unix, not(target_os = "macos")))]
+fn copy_text_with_linux_clipboard(text: &str) -> Result<(), String> {
+    let mut last_err = String::from("no clipboard backend found (tried wl-copy, xclip)");
+
+    for (bin, args) in [("wl-copy", vec![] as Vec<&str>), ("xclip", vec!["-selection", "clipboard"])]
+    {
+        match Command::new(bin)
+            .args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(mut child) => {
+                if let Some(stdin) = child.stdin.as_mut() {
+                    if let Err(e) = stdin.write_all(text.as_bytes()) {
+                        last_err = format!("{bin}: write stdin failed: {e}");
+                        continue;
+                    }
+                } else {
+                    last_err = format!("{bin}: no stdin");
+                    continue;
+                }
+                match child.wait_with_output() {
+                    Ok(out) if out.status.success() => return Ok(()),
+                    Ok(out) => {
+                        last_err = format!(
+                            "{bin} exited {}: {}",
+                            out.status,
+                            String::from_utf8_lossy(&out.stderr).trim()
+                        );
+                    }
+                    Err(e) => last_err = format!("{bin}: wait failed: {e}"),
+                }
+            }
+            Err(e) => last_err = format!("{bin}: {e}"),
+        }
+    }
+
+    Err(format!("Clipboard copy failed: {last_err}"))
 }
 
 // 新增：扫描本地 MCP 配置
@@ -1924,13 +2032,19 @@ mod skills_tests {
 }
 
 #[cfg(test)]
-#[cfg(target_os = "macos")]
 mod clipboard_tests {
-    use super::copy_text_with_pbcopy;
+    use super::copy_text_native;
 
     #[test]
-    fn test_copy_text_with_pbcopy_accepts_empty_text() {
-        copy_text_with_pbcopy("").expect("empty clipboard text should copy");
+    fn test_copy_text_native_accepts_empty_text() {
+        // 空串在各平台后端都应可接受（不崩、不拒）。
+        copy_text_native("").expect("empty clipboard text should copy");
+    }
+
+    #[test]
+    fn test_copy_text_native_accepts_unicode() {
+        copy_text_native("Helio 剪贴板 ✓")
+            .expect("unicode clipboard text should copy on this platform");
     }
 }
 

@@ -1105,10 +1105,13 @@ command = "npx"
             ..sample_profile()
         };
         let merged = adapter.merge_config(&profile, &serde_json::json!({}));
-        assert_eq!(
-            merged["model_catalog_json"],
-            "/tmp/helio-codex-fake/model_catalog.json"
-        );
+        // 使用 PathBuf 期望值，避免 Windows 反斜杠与 Unix 正斜杠字面量不一致
+        let expected = adapter
+            .config_dir
+            .join("model_catalog.json")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(merged["model_catalog_json"], expected);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! macOS 状态栏(tray)：动态菜单 + 一键切换 profile。
+//! 系统托盘 / 状态栏：动态菜单 + 一键切换 profile（macOS / Windows / Linux）。
 use crate::commands::AppState;
 use serde_json::json;
 use switch_api::models::ApiProfile;
@@ -176,7 +176,7 @@ fn fallback_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     )
 }
 
-/// 显示并聚焦主窗口（状态栏图标 / 「打开 Helio」/ Dock 点击时用）。
+/// 显示并聚焦主窗口（托盘图标 / 「打开 Helio」/ macOS Dock 点击时用）。
 pub(crate) fn show_main_window(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.unminimize();
@@ -249,8 +249,9 @@ fn do_switch(app: &AppHandle, tool: TargetApp, profile_name: &str) {
     }
 }
 
-/// 生成状态栏用的「太阳」模板图标（实心圆芯 + 8 道细长光芒）。
-/// 纯黑像素 + 透明背景：配合 icon_as_template(true)，macOS 按主题自动反色。
+/// 生成托盘用的「太阳」图标（实心圆芯 + 8 道细长光芒）。
+/// - macOS：纯黑 + 透明，配合 icon_as_template(true) 按主题自动反色。
+/// - Windows / Linux：金橙色实心，任务栏/系统托盘上可辨识（模板图标在这些平台无效）。
 /// 代码生成，不依赖图片文件。参数与设计原型一致（变体 B）。
 fn sun_icon() -> tauri::image::Image<'static> {
     const S: u32 = 44;
@@ -259,6 +260,12 @@ fn sun_icon() -> tauri::image::Image<'static> {
     const RAY_OUTER: f32 = 20.5;
     const RAY_HALF: f32 = 1.6;
     const N_RAYS: u32 = 8;
+
+    // Windows / Linux 托盘用暖色太阳；macOS 模板图标保持纯黑。
+    #[cfg(target_os = "macos")]
+    const RGB: (u8, u8, u8) = (0, 0, 0);
+    #[cfg(not(target_os = "macos"))]
+    const RGB: (u8, u8, u8) = (245, 166, 35); // #F5A623
 
     let cx = (S as f32 - 1.0) / 2.0;
     let cy = (S as f32 - 1.0) / 2.0;
@@ -294,7 +301,9 @@ fn sun_icon() -> tauri::image::Image<'static> {
             }
 
             let i = ((y * S + x) * 4) as usize;
-            // 黑色 + 可变 alpha
+            rgba[i] = RGB.0;
+            rgba[i + 1] = RGB.1;
+            rgba[i + 2] = RGB.2;
             rgba[i + 3] = (a * 255.0).round() as u8;
         }
     }
@@ -302,15 +311,16 @@ fn sun_icon() -> tauri::image::Image<'static> {
     tauri::image::Image::new_owned(rgba, S, S)
 }
 
-/// 应用启动时建状态栏图标。挂菜单 + 事件处理器。
+/// 应用启动时建托盘图标。挂菜单 + 事件处理器。
 pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let menu = build_menu(app)?;
 
-    TrayIconBuilder::with_id(TRAY_ID)
+    let builder = TrayIconBuilder::with_id(TRAY_ID)
         .icon(sun_icon())
-        .icon_as_template(true)
         .tooltip("Helio")
         .menu(&menu)
+        // Windows：左键默认也弹菜单；关掉后由下方 Click 处理器负责显示主窗口。
+        .show_menu_on_left_click(false)
         .on_menu_event(|app, event| {
             let id = event.id.as_ref();
             match id {
@@ -333,7 +343,7 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             }
         })
         .on_tray_icon_event(|tray, event| {
-            // 左键单击图标：显示窗口
+            // 左键单击图标：显示窗口（Windows 任务栏托盘 / macOS 状态栏通用）
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
@@ -342,9 +352,15 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             {
                 let app = tray.app_handle();
                 show_main_window(app);
+                rebuild_tray_menu(app);
             }
-        })
-        .build(app)?;
+        });
+
+    // 仅 macOS 使用模板图标（系统按浅色/深色菜单栏反色）。
+    #[cfg(target_os = "macos")]
+    let builder = builder.icon_as_template(true);
+
+    builder.build(app)?;
 
     Ok(())
 }
@@ -417,8 +433,14 @@ mod tests {
         assert_eq!(img.height(), 44);
         let rgba = img.rgba();
         assert_eq!(rgba.len(), 44 * 44 * 4);
-        // 颜色通道恒为黑（仅 alpha 变化）
-        assert!(rgba.chunks(4).all(|p| p[0] == 0 && p[1] == 0 && p[2] == 0));
+        // 颜色通道在整幅图中恒定（仅 alpha 变化）
+        #[cfg(target_os = "macos")]
+        let expected_rgb = (0u8, 0u8, 0u8);
+        #[cfg(not(target_os = "macos"))]
+        let expected_rgb = (245u8, 166u8, 35u8);
+        assert!(rgba
+            .chunks(4)
+            .all(|p| p[0] == expected_rgb.0 && p[1] == expected_rgb.1 && p[2] == expected_rgb.2));
         // 既有不透明像素（图形），也有透明像素（背景）——不是全黑块、也不是全空
         let opaque = rgba.chunks(4).filter(|p| p[3] == 255).count();
         let transparent = rgba.chunks(4).filter(|p| p[3] == 0).count();

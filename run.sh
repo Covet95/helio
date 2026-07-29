@@ -1,5 +1,6 @@
 #!/bin/bash
-# Helio 永久运行脚本 —— 只打 .app（太阳 dock 图标），绝不跑 dev。
+# Helio macOS 运行脚本 —— 只打 .app（太阳 dock 图标），绝不跑 dev。
+# Windows 请用 run.ps1 / run.cmd。
 # dev 跑的是裸二进制，macOS 给默认 dock 图标（用户已明确要求永久避免）。
 set -e
 cd "$(dirname "$0")/src-tauri"

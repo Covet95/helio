@@ -32,7 +32,7 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // 关红叉 → 隐藏到状态栏，不退出（tray 应用常见行为）
+            // 关窗 → 隐藏到系统托盘 / 状态栏，不退出（macOS / Windows 通用）
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
@@ -76,6 +76,8 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
+            // macOS：关窗 hide 后点 Dock 触发 Reopen，需主动 show。
+            // 其他平台无此事件；参数加下划线避免 unused 警告。
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen {
                 has_visible_windows,
@@ -85,6 +87,10 @@ pub fn run() {
                 if !has_visible_windows {
                     tray::show_main_window(app);
                 }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = (app, event);
             }
         });
 }

@@ -2,6 +2,7 @@
 name = "switch-api-gui"
 version = "0.1.0"
 edition = "2021"
+default-run = "Helio"
 
 [build-dependencies]
 tauri-build = { version = "2.1", features = [] }
@@ -34,3 +35,8 @@ tauri-gui = []
 [lib]
 name = "switch_api_gui_lib"
 crate-type = ["staticlib", "cdylib", "lib"]
+
+# Windows/macOS 安装后的主程序名均为 Helio（与 productName / mainBinaryName 对齐）
+[[bin]]
+name = "Helio"
+path = "src/main.rs"
