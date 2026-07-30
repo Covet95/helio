@@ -12,3 +12,6 @@ gui/node_modules/
 .superpowers/
 
 .claude/settings.local.json
+
+# Windows 保留名：在 Git Bash 里执行 `cmd 2>nul` 会误建同名文件
+nul
