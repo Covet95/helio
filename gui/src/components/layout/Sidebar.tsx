@@ -31,30 +31,27 @@ export default function Sidebar() {
   return (
     <aside className="flex h-full w-[212px] shrink-0 flex-col border-r border-line bg-surface">
       <div className="drag-region px-4 pb-4 pt-5">
-        <div className="flex items-center gap-3">
+        <div className="flex min-h-10 items-center gap-3">
           <div
-            className="grid h-8 w-8 place-items-center rounded-md"
+            className="grid h-10 w-10 shrink-0 place-items-center rounded-[10px]"
             style={{
-              background: 'linear-gradient(180deg,#FB923C,#EA580C)',
-              boxShadow: '0 1px 3px rgba(234,88,12,0.35), inset 0 1px 0 rgba(255,255,255,0.25)',
+              background: 'linear-gradient(180deg, #FF8A3D 0%, #F56817 100%)',
+              boxShadow: '0 2px 5px rgba(234, 88, 12, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.24)',
             }}
+            aria-hidden="true"
           >
-            <svg viewBox="0 0 24 24" width="17" height="17" fill="none">
-              <g stroke="#fff" strokeWidth="1.8" strokeLinecap="round">
-                <line x1="12" y1="3" x2="12" y2="6" />
-                <line x1="12" y1="18" x2="12" y2="21" />
-                <line x1="3" y1="12" x2="6" y2="12" />
-                <line x1="18" y1="12" x2="21" y2="12" />
-                <line x1="5.6" y1="5.6" x2="7.7" y2="7.7" />
-                <line x1="16.3" y1="16.3" x2="18.4" y2="18.4" />
-                <line x1="18.4" y1="5.6" x2="16.3" y2="7.7" />
-                <line x1="7.7" y1="16.3" x2="5.6" y2="18.4" />
-              </g>
-              <circle cx="12" cy="12" r="4" fill="#fff" />
+            <svg className="block h-5 w-5" viewBox="0 0 24 24" fill="none">
+              <circle cx="12" cy="12" r="3.25" stroke="white" strokeWidth="1.65" />
+              <path
+                d="M12 3.25V5.5M12 18.5v2.25M3.25 12H5.5M18.5 12h2.25M5.81 5.81 7.4 7.4m9.2 9.2 1.59 1.59m0-12.38L16.6 7.4m-9.2 9.2-1.59 1.59"
+                stroke="white"
+                strokeWidth="1.65"
+                strokeLinecap="round"
+              />
             </svg>
           </div>
-          <div className="leading-tight">
-            <div className="text-[15px] font-bold tracking-tight text-ink">Helio</div>
+          <div className="flex h-10 items-center">
+            <div className="text-[15px] font-bold leading-none tracking-tight text-ink">Helio</div>
           </div>
         </div>
       </div>
