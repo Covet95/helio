@@ -253,8 +253,27 @@ impl ClaudeSessionReader {
 }
 
 /// 编码目录名反解 cwd：-Users-u-Desktop-power -> /Users/u/Desktop/power
+/// Windows 盘符目录名（C-Users-u-Desktop-power，编码自 C:\Users\...）→ C:\Users\u\Desktop\power
+/// 区分依据：Unix 编码以 - 开头（根 / 被替换成前导 -），Windows 编码以盘符字母开头。
 fn decode_project_dir(name: &str) -> String {
-    name.replacen('-', "/", 1).replace('-', "/")
+    if name.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<&str> = name.split('-').filter(|s| !s.is_empty()).collect();
+    if name.starts_with('-') {
+        // macOS / Linux：-Users-u-Desktop-power -> /Users/u/Desktop/power
+        return format!("/{}", parts.join("/"));
+    }
+    // Windows：C-Users-u-Desktop-power -> C:\Users\u\Desktop\power
+    if parts.is_empty() {
+        return String::new();
+    }
+    let mut out = format!("{}:", parts[0]);
+    for part in &parts[1..] {
+        out.push('\\');
+        out.push_str(part);
+    }
+    out
 }
 
 impl SessionReader for ClaudeSessionReader {
@@ -839,5 +858,27 @@ mod tests {
         let res = delete_one(&reader, "does-not-exist");
         assert!(res.ok, "目标不存在应视为成功");
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn test_decode_project_dir_windows_drive() {
+        assert_eq!(
+            decode_project_dir("C-Users-u-Desktop-power"),
+            "C:\\Users\\u\\Desktop\\power"
+        );
+        assert_eq!(decode_project_dir("c-users-x"), "c:\\users\\x");
+        assert_eq!(decode_project_dir("C-"), "C:");
+    }
+
+    #[test]
+    fn test_decode_project_dir_unix() {
+        assert_eq!(
+            decode_project_dir("-Users-u-Desktop-power"),
+            "/Users/u/Desktop/power"
+        );
+        // 单字母 Unix 目录名不能被误判为 Windows 盘符
+        assert_eq!(decode_project_dir("-u"), "/u");
+        assert_eq!(decode_project_dir(""), "");
+        assert_eq!(decode_project_dir("-"), "/");
     }
 }

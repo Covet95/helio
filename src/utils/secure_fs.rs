@@ -64,9 +64,14 @@ pub fn copy_private(source: &Path, destination: &Path) -> Result<u64> {
     Ok(bytes)
 }
 
-#[cfg(test)]
+// 权限测试仅 Unix 有意义（Windows 无 POSIX mode），整体在 Windows 上不编译。
+#[cfg(all(test, unix))]
 mod tests {
-    use super::*;
+    use super::{atomic_write_private, copy_private, ensure_private_dir, ensure_private_file};
+    use anyhow::Result;
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     #[cfg(unix)]
     #[test]
