@@ -1,6 +1,6 @@
-use super::ConfigAdapter;
+use super::{backup, ConfigAdapter};
 use crate::models::ApiProfile;
-use crate::utils::secure_fs::{atomic_write_private, copy_private};
+use crate::utils::secure_fs::atomic_write_private;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -219,14 +219,27 @@ impl HermesAdapter {
         }
 
         let pool_key = Self::custom_provider_slug(provider);
-        let root = data.as_object_mut().unwrap();
+        let Some(root) = data.as_object_mut() else {
+            return Err(anyhow::anyhow!(
+                "Hermes auth.json 结构异常（非对象），拒绝覆写"
+            ));
+        };
         if !root.contains_key("credential_pool") {
             root.insert("credential_pool".into(), serde_json::json!({}));
         }
-        let pool = root
+        // 用户旧版数据 credential_pool 可能是数组/字符串：重建为空对象而非 panic
+        let pool = match root
             .get_mut("credential_pool")
             .and_then(|v| v.as_object_mut())
-            .unwrap();
+        {
+            Some(p) => p,
+            None => {
+                root.insert("credential_pool".into(), serde_json::json!({}));
+                root.get_mut("credential_pool")
+                    .and_then(|v| v.as_object_mut())
+                    .ok_or_else(|| anyhow::anyhow!("无法重建 credential_pool"))?
+            }
+        };
 
         // active first, then others; skip empty secrets; de-dupe by secret
         let mut ordered: Vec<&str> = Vec::new();
@@ -269,6 +282,62 @@ impl Default for HermesAdapter {
     }
 }
 
+/// 剥离 custom_providers[].api_key。
+fn strip_credentials(config: &mut serde_json::Value) {
+    if let Some(arr) = config
+        .get_mut("custom_providers")
+        .and_then(|v| v.as_array_mut())
+    {
+        for entry in arr.iter_mut() {
+            if let Some(obj) = entry.as_object_mut() {
+                obj.remove("api_key");
+            }
+        }
+    }
+}
+
+/// 把磁盘配置中其他 provider 的 api_key 补回 shared（shared 已剥离）。
+/// 当前 provider 的 key 随后会被 merge 用 profile 的值覆盖。
+fn restore_credentials(config: &mut serde_json::Value, disk: &serde_json::Value) {
+    let Some(shared_arr) = config
+        .get_mut("custom_providers")
+        .and_then(|v| v.as_array_mut())
+    else {
+        return;
+    };
+    let Some(disk_arr) = disk.get("custom_providers").and_then(|v| v.as_array()) else {
+        return;
+    };
+    for shared_entry in shared_arr.iter_mut() {
+        let Some(sobj) = shared_entry.as_object_mut() else {
+            continue;
+        };
+        if sobj.contains_key("api_key") {
+            continue;
+        }
+        let Some(name) = sobj.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if name.trim().is_empty() {
+            continue;
+        }
+        for d in disk_arr {
+            let Some(dobj) = d.as_object() else {
+                continue;
+            };
+            let dname = dobj.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            if HermesAdapter::normalize_provider_name(dname)
+                == HermesAdapter::normalize_provider_name(name)
+            {
+                if let Some(k) = dobj.get("api_key") {
+                    sobj.insert("api_key".into(), k.clone());
+                }
+                break;
+            }
+        }
+    }
+}
+
 impl ConfigAdapter for HermesAdapter {
     fn config_path(&self) -> PathBuf {
         self.config_file_path()
@@ -286,8 +355,12 @@ impl ConfigAdapter for HermesAdapter {
     }
 
     fn extract_shared_config(&self, config: &serde_json::Value) -> serde_json::Value {
-        // Full document is shared; merge overwrites only API surface fields.
-        config.clone()
+        // 凭据不落 shared_configs（key 只存 api_profiles 表）。
+        // auth.json 的 credential_pool 是独立文件、从不进 shared；这里剥离
+        // config.yaml custom_providers 里的 api_key。merge 时从磁盘补回。
+        let mut shared = config.clone();
+        strip_credentials(&mut shared);
+        shared
     }
 
     fn merge_config(
@@ -295,7 +368,12 @@ impl ConfigAdapter for HermesAdapter {
         api_profile: &ApiProfile,
         shared_config: &serde_json::Value,
     ) -> serde_json::Value {
-        Self::apply_profile_to_config(shared_config, api_profile)
+        let mut config = shared_config.clone();
+        // shared 已剥离凭据：从磁盘补回其他 provider 的 key（多 provider 共存）
+        if let Ok(disk) = self.read_config() {
+            restore_credentials(&mut config, &disk);
+        }
+        Self::apply_profile_to_config(&config, api_profile)
     }
 
     fn write_config(&self, config: &serde_json::Value) -> Result<()> {
@@ -307,45 +385,18 @@ impl ConfigAdapter for HermesAdapter {
         if !path.exists() {
             anyhow::bail!("Config file does not exist");
         }
-        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-        let backup_path = self
-            .config_dir
-            .join(format!("config.backup.{}.yaml", timestamp));
-        copy_private(&path, &backup_path).context("Failed to backup Hermes config.yaml")?;
+        let backup_path = backup::backup_required(&self.config_dir, &path, "config")?;
 
-        let auth = self.auth_path();
-        if auth.exists() {
-            let auth_backup = self
-                .config_dir
-                .join(format!("auth.backup.{}.json", timestamp));
-            let _ = copy_private(&auth, &auth_backup);
-        }
+        // auth.json 备份失败不中断主备份
+        let _ = backup::backup_one(&self.config_dir, &self.auth_path(), "auth")?;
 
         self.cleanup_old_backups(10)?;
         Ok(backup_path)
     }
 
     fn cleanup_old_backups(&self, keep: usize) -> Result<()> {
-        if !self.config_dir.exists() {
-            return Ok(());
-        }
-        let mut backups: Vec<_> = fs::read_dir(&self.config_dir)?
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                let name = e.file_name().to_string_lossy().to_string();
-                name.starts_with("config.backup.") && name.ends_with(".yaml")
-            })
-            .collect();
-        backups.sort_by_key(|e| {
-            e.metadata()
-                .and_then(|m| m.modified())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-        });
-        backups.reverse();
-        for entry in backups.iter().skip(keep) {
-            let _ = fs::remove_file(entry.path());
-        }
-        Ok(())
+        backup::cleanup_prefix(&self.config_dir, "config.backup.", keep)?;
+        backup::cleanup_prefix(&self.config_dir, "auth.backup.", keep)
     }
 
     fn managed_paths(&self) -> Vec<PathBuf> {

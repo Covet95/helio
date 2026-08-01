@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Seek};
 use std::path::{Component, Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -216,27 +216,27 @@ impl SessionReader for CodexSessionReader {
             if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                 continue;
             }
-            // 文件名包含 id，或首行 session_meta.id == id
+            // 精确匹配文件名（fallback id），退化时读首行 session_meta.id。
+            // 禁止 contains 子串匹配：id="a" 会误命中 "abc"。
             let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-            let mut matched = name.contains(id);
-            if !matched {
-                if let Ok(file) = File::open(path) {
-                    let mut first = String::new();
-                    if BufReader::new(file).read_line(&mut first).is_ok() {
-                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&first) {
-                            if v.pointer("/payload/id").and_then(|x| x.as_str()) == Some(id) {
-                                matched = true;
-                            }
-                        }
-                    }
-                }
-            }
+            let matched = name == id || first_session_meta_id(path).as_deref() == Some(id);
             if matched && is_within_root(&self.root(), path) {
                 return Some(path.to_path_buf());
             }
         }
         None
     }
+}
+
+/// 读 jsonl 首行的 session_meta.payload.id（Codex 格式）。
+fn first_session_meta_id(path: &Path) -> Option<String> {
+    let file = File::open(path).ok()?;
+    let mut first = String::new();
+    BufReader::new(file).read_line(&mut first).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&first).ok()?;
+    v.pointer("/payload/id")
+        .and_then(|x| x.as_str())
+        .map(str::to_string)
 }
 
 pub struct ClaudeSessionReader {
@@ -506,11 +506,34 @@ fn delete_one_with(
     }
 }
 
-/// 数 jsonl 行数（消息数估算）
+/// 估算 jsonl 行数（消息数）。采样前 SAMPLE_ROWS 行后按文件大小比例外推，
+/// 避免大文件全量逐行读取。
 fn count_lines(path: &Path) -> usize {
-    File::open(path)
-        .map(|f| BufReader::new(f).lines().count())
-        .unwrap_or(0)
+    const SAMPLE_ROWS: usize = 500;
+    let Ok(file) = File::open(path) else {
+        return 0;
+    };
+    let total = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut reader = BufReader::new(file);
+    let mut rows = 0usize;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => rows += 1,
+            Err(_) => break,
+        }
+        if rows >= SAMPLE_ROWS {
+            break;
+        }
+    }
+    // 只读到采样上限（文件未读完）：按字节比例外推
+    let consumed = reader.stream_position().unwrap_or(0);
+    if consumed > 0 && consumed < total {
+        rows = (rows as u128 * total as u128 / consumed as u128) as usize;
+    }
+    rows
 }
 
 /// 从 message.payload 的 content 数组提取文本，按 max_chars 截断
@@ -880,5 +903,51 @@ mod tests {
         assert_eq!(decode_project_dir("-u"), "/u");
         assert_eq!(decode_project_dir(""), "");
         assert_eq!(decode_project_dir("-"), "/");
+    }
+
+    #[test]
+    fn test_resolve_path_no_substring_mismatch() {
+        let root = temp_dir("resolve-exact");
+        let day = root.join("2026/06/03");
+        fs::create_dir_all(&day).unwrap();
+        // id "ab" 与 "abc" 前缀相同：必须精确命中，禁止 contains 子串匹配
+        fs::write(
+            day.join("rollout-abc-1.jsonl"),
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"abc\",\"cwd\":\"/p\"}}\n",
+        )
+        .unwrap();
+        fs::write(
+            day.join("rollout-ab-2.jsonl"),
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"ab\",\"cwd\":\"/p\"}}\n",
+        )
+        .unwrap();
+
+        let reader = CodexSessionReader {
+            sessions_dir: root.clone(),
+        };
+        let p = reader.resolve_path("abc").unwrap();
+        assert!(p.to_string_lossy().ends_with("rollout-abc-1.jsonl"));
+        // id "ab" 应精确命中 ab 文件，而不是误命中 abc 文件
+        let p2 = reader.resolve_path("ab").unwrap();
+        assert!(p2.to_string_lossy().ends_with("rollout-ab-2.jsonl"));
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn test_count_lines_sampling_large_file() {
+        let root = temp_dir("count-sampling");
+        fs::create_dir_all(&root).unwrap();
+        let f = root.join("big.jsonl");
+        // 2500 行 * ~1KB 每行 > 采样上限
+        let mut content = String::new();
+        for _ in 0..2500 {
+            content.push_str(&"x".repeat(1024));
+            content.push('\n');
+        }
+        fs::write(&f, &content).unwrap();
+        let n = count_lines(&f);
+        assert!((2000..=3200).contains(&n), "外推估算应在合理范围，实际 {n}");
+        fs::remove_dir_all(&root).ok();
     }
 }

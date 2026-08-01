@@ -1,6 +1,6 @@
-use super::ConfigAdapter;
+use super::{backup, ConfigAdapter};
 use crate::models::ApiProfile;
-use crate::utils::secure_fs::{atomic_write_private, copy_private};
+use crate::utils::secure_fs::atomic_write_private;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -360,31 +360,60 @@ impl OpenClawAdapter {
         providers_obj.insert(provider, entry);
         Self::write_json_pretty(&path, &data)
     }
-
-    fn cleanup_backup_prefix(&self, prefix: &str, keep: usize) -> Result<()> {
-        let mut backups: Vec<_> = fs::read_dir(&self.config_dir)?
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                let name = e.file_name().to_string_lossy().to_string();
-                name.starts_with(prefix) && name.ends_with(".json")
-            })
-            .collect();
-        backups.sort_by_key(|e| {
-            e.metadata()
-                .and_then(|m| m.modified())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-        });
-        backups.reverse();
-        for entry in backups.iter().skip(keep) {
-            let _ = fs::remove_file(entry.path());
-        }
-        Ok(())
-    }
 }
 
 impl Default for OpenClawAdapter {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// 剥离 models.providers.<id>.apiKey。
+fn strip_credentials(config: &mut serde_json::Value) {
+    if let Some(providers) = config
+        .get_mut("models")
+        .and_then(|v| v.get_mut("providers"))
+        .and_then(|v| v.as_object_mut())
+    {
+        for p in providers.values_mut() {
+            if let Some(obj) = p.as_object_mut() {
+                obj.remove("apiKey");
+            }
+        }
+    }
+}
+
+/// 把磁盘配置中其他 provider 的 apiKey 补回 shared（shared 已剥离）。
+/// 当前 provider 的 key 随后会被 merge 用 profile 的值覆盖。
+fn restore_credentials(config: &mut serde_json::Value, disk: &serde_json::Value) {
+    let Some(shared_providers) = config
+        .get_mut("models")
+        .and_then(|v| v.get_mut("providers"))
+        .and_then(|v| v.as_object_mut())
+    else {
+        return;
+    };
+    let Some(disk_providers) = disk
+        .get("models")
+        .and_then(|v| v.get("providers"))
+        .and_then(|v| v.as_object())
+    else {
+        return;
+    };
+    for (id, shared_p) in shared_providers.iter_mut() {
+        let Some(sobj) = shared_p.as_object_mut() else {
+            continue;
+        };
+        if sobj.contains_key("apiKey") {
+            continue;
+        }
+        if let Some(key) = disk_providers
+            .get(id)
+            .and_then(|v| v.get("apiKey"))
+            .and_then(|v| v.as_str())
+        {
+            sobj.insert("apiKey".into(), serde_json::Value::String(key.to_string()));
+        }
     }
 }
 
@@ -403,7 +432,11 @@ impl ConfigAdapter for OpenClawAdapter {
     }
 
     fn extract_shared_config(&self, config: &serde_json::Value) -> serde_json::Value {
-        config.clone()
+        // 凭据不落 shared_configs（key 只存 api_profiles 表）。
+        // merge 时从磁盘补回其他 provider 的 key，共存语义不受影响。
+        let mut shared = config.clone();
+        strip_credentials(&mut shared);
+        shared
     }
 
     fn merge_config(
@@ -411,7 +444,12 @@ impl ConfigAdapter for OpenClawAdapter {
         api_profile: &ApiProfile,
         shared_config: &serde_json::Value,
     ) -> serde_json::Value {
-        Self::apply_profile_to_config(shared_config, api_profile)
+        let mut config = shared_config.clone();
+        // shared 已剥离凭据：从磁盘补回其他 provider 的 key（多 provider 共存）
+        if let Ok(disk) = self.read_config() {
+            restore_credentials(&mut config, &disk);
+        }
+        Self::apply_profile_to_config(&config, api_profile)
     }
 
     fn write_config(&self, config: &serde_json::Value) -> Result<()> {
@@ -423,33 +461,19 @@ impl ConfigAdapter for OpenClawAdapter {
         if !path.exists() {
             anyhow::bail!("Config file does not exist");
         }
-        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-        let backup_path = self
-            .config_dir
-            .join(format!("openclaw.backup.{}.json", timestamp));
-        copy_private(&path, &backup_path).context("Failed to backup openclaw.json")?;
+        let backup_path = backup::backup_required(&self.config_dir, &path, "openclaw")?;
 
-        let agent_models = self.agent_models_path();
-        if agent_models.exists() {
-            let bak = self
-                .config_dir
-                .join(format!("models.backup.{}.json", timestamp));
-            // store under config_dir root for simple cleanup
-            let _ = copy_private(&agent_models, &bak);
-        }
+        // agent_models.json 备份失败不中断主备份
+        let _ = backup::backup_one(&self.config_dir, &self.agent_models_path(), "models")?;
 
         self.cleanup_old_backups(10)?;
         Ok(backup_path)
     }
 
     fn cleanup_old_backups(&self, keep: usize) -> Result<()> {
-        if !self.config_dir.exists() {
-            return Ok(());
-        }
         // openclaw.json backups + agent models.json backups written to config_dir root
-        self.cleanup_backup_prefix("openclaw.backup.", keep)?;
-        self.cleanup_backup_prefix("models.backup.", keep)?;
-        Ok(())
+        backup::cleanup_prefix(&self.config_dir, "openclaw.backup.", keep)?;
+        backup::cleanup_prefix(&self.config_dir, "models.backup.", keep)
     }
 
     fn managed_paths(&self) -> Vec<PathBuf> {

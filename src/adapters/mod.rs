@@ -169,6 +169,7 @@ pub fn backfill_missing_top_level(live: &mut serde_json::Value, previous: &serde
     }
 }
 
+pub mod backup;
 pub mod claude_code;
 pub mod codex;
 pub mod hermes;

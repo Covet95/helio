@@ -3,7 +3,7 @@ members = [".", "src-tauri"]
 
 [package]
 name = "switch-api"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2021"
 authors = ["Switch API Team"]
 description = "智能 AI CLI 工具 API 配置切换器"
@@ -41,7 +41,6 @@ dirs = "5.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 colored = "2.1"
-indicatif = "0.17"
 
 # HTTP (probe / failover)
 reqwest = { version = "0.12", features = ["json"] }
@@ -51,8 +50,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 uuid = { version = "1.10", features = ["v4", "serde"] }
 
 [dev-dependencies]
-assert_fs = "1.1"
-predicates = "3.1"
 tempfile = "3.10"
 
 [features]

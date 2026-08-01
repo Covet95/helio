@@ -127,12 +127,22 @@ fn is_local_url(api_url: &str) -> bool {
     lower.contains("127.0.0.1") || lower.contains("localhost") || lower.contains("0.0.0.0")
 }
 
-fn http_client(api_url: &str) -> Result<reqwest::Client, String> {
-    let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(15));
-    if is_local_url(api_url) {
-        builder = builder.no_proxy();
-    }
-    builder.build().map_err(|e| e.to_string())
+/// 复用连接池：本地地址用 no_proxy client（避免本地代理环路），其余用默认 client。
+/// 探测/批量/并发场景共享，避免每请求新建 Client 丢失 TCP/TLS 连接复用。
+fn http_client(api_url: &str) -> Result<&'static reqwest::Client, String> {
+    static LOCAL: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    static DEFAULT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let client = if is_local_url(api_url) {
+        LOCAL.get_or_init(|| {
+            reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .expect("build local http client")
+        })
+    } else {
+        DEFAULT.get_or_init(reqwest::Client::new)
+    };
+    Ok(client)
 }
 
 fn trim_base(api_url: &str) -> String {
@@ -328,13 +338,13 @@ fn resolve_probe_plan(
                 && !mode.contains("response")
                 && wire != "responses"
             {
-                let mut endpoint = gemini_generate_url(api_url, model);
-                let sep = if endpoint.contains('?') { "&" } else { "?" };
-                endpoint = format!("{}{}key={}", endpoint, sep, urlencoding_minimal(key));
+                // key 走 x-goog-api-key header，绝不进 URL query（避免错误消息/日志泄漏）
+                let mut headers = vec![("Content-Type".into(), "application/json".into())];
+                headers.push(("x-goog-api-key".into(), key.to_string()));
                 Ok(ProbePlan {
                     protocol: ProbeProtocol::GeminiGenerate,
-                    endpoint,
-                    headers: vec![("Content-Type".into(), "application/json".into())],
+                    endpoint: gemini_generate_url(api_url, model),
+                    headers,
                     body: gemini_body(),
                     success: SuccessCheck::GeminiCandidates,
                 })
@@ -405,39 +415,54 @@ fn resolve_probe_plan(
     }
 }
 
-/// 极简 query escape（key 通常为 sk- 字符集）
-fn urlencoding_minimal(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
+/// 脱敏 endpoint 中的凭据类 query 参数（防御性：万一凭据进 URL，错误消息不泄漏）。
+/// 匹配 key / api_key / apikey 等常见键名，值替换为 ***。
+fn sanitize_endpoint(endpoint: &str) -> String {
+    let Some((base, query)) = endpoint.split_once('?') else {
+        return endpoint.to_string();
+    };
+    let mut pairs: Vec<String> = Vec::new();
+    for seg in query.split('&') {
+        if let Some((k, _)) = seg.split_once('=') {
+            let k = k.trim();
+            if k.eq_ignore_ascii_case("key")
+                || k.eq_ignore_ascii_case("api_key")
+                || k.eq_ignore_ascii_case("apikey")
+            {
+                pairs.push(format!("{k}=***"));
+                continue;
             }
-            _ => out.push_str(&format!("%{:02X}", b)),
         }
+        pairs.push(seg.to_string());
     }
-    out
+    format!("{base}?{}", pairs.join("&"))
 }
 
 fn validate_success(plan: &ProbePlan, text: &str) -> Result<(), String> {
     match plan.success {
         SuccessCheck::ChatChoices => {
             let parsed: ChatCompletionResponse = serde_json::from_str(text)
-                .map_err(|e| format!("{} 解析失败: {}", plan.endpoint, e))?;
+                .map_err(|e| format!("{} 解析失败: {}", sanitize_endpoint(&plan.endpoint), e))?;
             if parsed.choices.is_empty() {
-                return Err(format!("{} 没有返回 completion choice", plan.endpoint));
+                return Err(format!(
+                    "{} 没有返回 completion choice",
+                    sanitize_endpoint(&plan.endpoint)
+                ));
             }
         }
         SuccessCheck::ResponsesOutputOrStatus => {
             let parsed: ResponsesResponse = serde_json::from_str(text)
-                .map_err(|e| format!("{} 解析失败: {}", plan.endpoint, e))?;
+                .map_err(|e| format!("{} 解析失败: {}", sanitize_endpoint(&plan.endpoint), e))?;
             if parsed.output.is_none() && parsed.status.is_none() {
-                return Err(format!("{} 未返回有效 responses 结构", plan.endpoint));
+                return Err(format!(
+                    "{} 未返回有效 responses 结构",
+                    sanitize_endpoint(&plan.endpoint)
+                ));
             }
         }
         SuccessCheck::AnthropicContent => {
             let parsed: AnthropicMessagesResponse = serde_json::from_str(text)
-                .map_err(|e| format!("{} 解析失败: {}", plan.endpoint, e))?;
+                .map_err(|e| format!("{} 解析失败: {}", sanitize_endpoint(&plan.endpoint), e))?;
             // 成功响应通常有 content 数组或 type=message
             let has_content = parsed
                 .content
@@ -448,20 +473,29 @@ fn validate_success(plan: &ProbePlan, text: &str) -> Result<(), String> {
             if !has_content && !has_type {
                 // 部分中转只回 id/model；若 JSON 对象且 2xx，放宽：只要不是 error 形
                 if text.contains("\"error\"") {
-                    return Err(format!("{} 返回 error 结构", plan.endpoint));
+                    return Err(format!(
+                        "{} 返回 error 结构",
+                        sanitize_endpoint(&plan.endpoint)
+                    ));
                 }
                 // 仍要求可解析为对象（上面已成功）
             }
         }
         SuccessCheck::GeminiCandidates => {
             let parsed: GeminiGenerateResponse = serde_json::from_str(text)
-                .map_err(|e| format!("{} 解析失败: {}", plan.endpoint, e))?;
+                .map_err(|e| format!("{} 解析失败: {}", sanitize_endpoint(&plan.endpoint), e))?;
             if parsed.candidates.is_empty() && text.contains("\"error\"") {
-                return Err(format!("{} 返回 error 结构", plan.endpoint));
+                return Err(format!(
+                    "{} 返回 error 结构",
+                    sanitize_endpoint(&plan.endpoint)
+                ));
             }
             // 部分账号安全过滤可能空 candidates 但仍 2xx；有 error 才失败
             if parsed.candidates.is_empty() && !text.contains("candidates") {
-                return Err(format!("{} 未返回 candidates", plan.endpoint));
+                return Err(format!(
+                    "{} 未返回 candidates",
+                    sanitize_endpoint(&plan.endpoint)
+                ));
             }
         }
     }
@@ -471,7 +505,10 @@ fn validate_success(plan: &ProbePlan, text: &str) -> Result<(), String> {
 /// 执行已解析的探活计划（供 test_model / failover / 批量探活复用）
 async fn execute_probe_plan(api_url: &str, plan: &ProbePlan) -> Result<(), String> {
     let client = http_client(api_url)?;
-    let mut req = client.post(&plan.endpoint).json(&plan.body);
+    let mut req = client
+        .post(sanitize_endpoint(&plan.endpoint))
+        .timeout(std::time::Duration::from_secs(15))
+        .json(&plan.body);
     for (k, v) in &plan.headers {
         req = req.header(k, v);
     }
@@ -479,19 +516,30 @@ async fn execute_probe_plan(api_url: &str, plan: &ProbePlan) -> Result<(), Strin
     let response = req
         .send()
         .await
-        .map_err(|e| format!("{} 请求失败: {}", plan.endpoint, e))?;
+        .map_err(|e| format!("{} 请求失败: {}", sanitize_endpoint(&plan.endpoint), e))?;
 
     let status = response.status();
     let text = response
         .text()
         .await
-        .map_err(|e| format!("{} 读取响应失败: {}", plan.endpoint, e))?;
+        .map_err(|e| format!("{} 读取响应失败: {}", sanitize_endpoint(&plan.endpoint), e))?;
     if !status.is_success() {
         let detail = text.trim();
+        // 截断响应体：远端/代理可能回显请求细节，避免超长或敏感内容进错误消息
+        let detail = &detail[..detail.len().min(300)];
         if detail.is_empty() {
-            return Err(format!("{} 返回 {}", plan.endpoint, status));
+            return Err(format!(
+                "{} 返回 {}",
+                sanitize_endpoint(&plan.endpoint),
+                status
+            ));
         }
-        return Err(format!("{} 返回 {}: {}", plan.endpoint, status, detail));
+        return Err(format!(
+            "{} 返回 {}: {}",
+            sanitize_endpoint(&plan.endpoint),
+            status,
+            detail
+        ));
     }
 
     validate_success(plan, &text)
@@ -511,7 +559,7 @@ pub async fn probe_with_params(request: ProbeRequest<'_>) -> Result<ModelTestRes
     execute_probe_plan(request.api_url, &plan).await?;
     Ok(ModelTestResult {
         model: request.model.trim().to_string(),
-        endpoint: plan.endpoint,
+        endpoint: sanitize_endpoint(&plan.endpoint),
         protocol: plan.protocol.as_str().to_string(),
         key_label: request.key_label,
     })
@@ -607,6 +655,7 @@ pub async fn probe_reachability(api_url: &str, config: &ReachabilityConfig) -> R
 
     for attempt in 0..=config.max_retries {
         let start = std::time::Instant::now();
+        // 复用共享连接池（http_client 内部按 本地/远程 分流 no_proxy）
         let client = match http_client(&endpoint) {
             Ok(c) => c,
             Err(e) => {
@@ -623,17 +672,11 @@ pub async fn probe_reachability(api_url: &str, config: &ReachabilityConfig) -> R
             }
         };
 
-        // 覆盖默认 15s client timeout，用可达性专用短超时
-        let mut builder = reqwest::Client::builder().timeout(timeout);
-        if is_local_url(&endpoint) {
-            builder = builder.no_proxy();
-        }
-        let client = builder.build().unwrap_or(client);
-
         let result = client
             .get(&endpoint)
             .header("accept", "*/*")
             .header("accept-encoding", "identity")
+            .timeout(timeout)
             .send()
             .await;
 
@@ -884,7 +927,12 @@ mod tests {
         assert!(plan
             .endpoint
             .contains("/v1beta/models/gemini-2.0-flash:generateContent"));
-        assert!(plan.endpoint.contains("key=AIzaSyTest"));
+        // key 走 header，不进 URL
+        assert!(!plan.endpoint.contains("key="), "key 不得进 URL query");
+        assert!(plan
+            .headers
+            .iter()
+            .any(|(k, v)| k == "x-goog-api-key" && v == "AIzaSyTest"));
     }
 
     #[test]

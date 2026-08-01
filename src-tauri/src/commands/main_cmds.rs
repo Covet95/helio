@@ -14,6 +14,10 @@ use crate::commands::helpers::{
 
 pub struct AppState {
     pub db: Mutex<Database>,
+    /// 全局配置写锁：所有磁盘写路径（切换/更新/failover 重切/托盘切换/raw 编辑）
+    /// 互斥执行，避免并发写同一配置文件导致 DB 与磁盘状态分裂。
+    /// 临界区只有同步 IO（不跨 await），std::sync::Mutex 足够。
+    pub config_lock: Mutex<()>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -136,17 +140,17 @@ pub async fn copy_text(text: String) -> Result<(), String> {
 fn copy_text_native(text: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        return copy_text_with_pbcopy(text);
+        copy_text_with_pbcopy(text)
     }
 
     #[cfg(target_os = "windows")]
     {
-        return copy_text_with_powershell(text);
+        copy_text_with_powershell(text)
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        return copy_text_with_linux_clipboard(text);
+        copy_text_with_linux_clipboard(text)
     }
 
     #[cfg(not(any(
@@ -241,8 +245,10 @@ fn copy_text_with_powershell(text: &str) -> Result<(), String> {
 fn copy_text_with_linux_clipboard(text: &str) -> Result<(), String> {
     let mut last_err = String::from("no clipboard backend found (tried wl-copy, xclip)");
 
-    for (bin, args) in [("wl-copy", vec![] as Vec<&str>), ("xclip", vec!["-selection", "clipboard"])]
-    {
+    for (bin, args) in [
+        ("wl-copy", vec![] as Vec<&str>),
+        ("xclip", vec!["-selection", "clipboard"]),
+    ] {
         match Command::new(bin)
             .args(&args)
             .stdin(Stdio::piped())
@@ -477,6 +483,8 @@ pub async fn update_profile(profile: ApiProfile, state: State<'_, AppState>) -> 
         active_profiles
     };
 
+    // 全局写锁：与其他切换/写盘命令互斥，避免并发写配置
+    let _write_guard = state.config_lock.lock().map_err(|e| e.to_string())?;
     for (target, api_profile, persisted_shared_config) in active_profiles {
         let shared_config = apply_profile_config(target, &api_profile, persisted_shared_config)?;
         state
@@ -546,6 +554,8 @@ pub async fn switch_profile(
         (api_profile, persisted_shared_config)
     };
     api_profile.normalize_keys();
+    // 全局写锁：与其他切换/写盘命令互斥
+    let _write_guard = state.config_lock.lock().map_err(|e| e.to_string())?;
     let shared_config = apply_profile_config(target, &api_profile, persisted_shared_config)?;
     let profile_id = api_profile
         .id
@@ -653,6 +663,9 @@ pub async fn save_codex_config_raw(
     // 先校验语法：非法 TOML 直接返回，绝不触碰磁盘（不备份、不写入）。
     toml::from_str::<toml::Value>(&content).map_err(|e| format!("TOML 语法错误，未保存：{}", e))?;
 
+    // 全局写锁：与切换等写盘命令互斥
+    let _write_guard = state.config_lock.lock().map_err(|e| e.to_string())?;
+
     // 校验通过后，写前备份当前配置（config.toml + auth.json）。
     if path.exists() {
         adapter
@@ -736,6 +749,9 @@ pub async fn update_codex_fields(
         toml::Value::try_from(&config).map_err(|e| format!("转换为 TOML 失败：{}", e))?;
     let content =
         toml::to_string_pretty(&toml_value).map_err(|e| format!("序列化 TOML 失败：{}", e))?;
+
+    // 全局写锁：与切换等写盘命令互斥
+    let _write_guard = state.config_lock.lock().map_err(|e| e.to_string())?;
 
     // 写前备份当前配置（config.toml + auth.json）。
     if path.exists() {
@@ -1319,11 +1335,8 @@ pub async fn get_status(state: State<'_, AppState>) -> Result<StatusInfo, String
     })
 }
 
-fn profile_protocol_fields(
-    profile: &ApiProfile,
-) -> (Option<String>, Option<String>, Option<String>) {
-    let wire = None;
-    let mode = match profile.target_app {
+fn profile_protocol_fields(profile: &ApiProfile) -> Option<String> {
+    match profile.target_app {
         Some(TargetApp::Hermes) => profile.hermes.api_mode.clone(),
         Some(TargetApp::OpenClaw) => profile.openclaw.api_mode.clone(),
         _ => profile
@@ -1331,9 +1344,7 @@ fn profile_protocol_fields(
             .api_mode
             .clone()
             .or_else(|| profile.openclaw.api_mode.clone()),
-    };
-    let exp = None;
-    (wire, mode, exp)
+    }
 }
 
 fn model_for_probe(profile: &ApiProfile) -> String {
@@ -1381,7 +1392,7 @@ async fn run_failover(
     if model.is_empty() {
         return Err("先为该 Profile 填写默认模型再 failover".into());
     }
-    let (wire, mode, exp) = profile_protocol_fields(&profile);
+    let mode = profile_protocol_fields(&profile);
     let app_str = target.as_str().to_string();
 
     let mut keys = profile.api_keys.clone().unwrap_or_default();
@@ -1395,27 +1406,51 @@ async fn run_failover(
 
     keys.sort_by_key(|e| if e.is_active { 0 } else { 1 });
 
+    let now = chrono::Utc::now().timestamp();
+    let probe_timeout = std::time::Duration::from_secs(20);
+    // 并发探测所有 key（串行 N×15s 太慢）；结果按 keys 原顺序收集，
+    // 仍按「active 优先、列表顺序优先」选择第一个成功者。
+    let probes: Vec<_> = keys
+        .iter()
+        .map(|entry| {
+            let app_str = app_str.clone();
+            let api_url = profile.api_url.clone();
+            let model = model.clone();
+            let mode = mode.clone();
+            async move {
+                (
+                    entry.id.clone(),
+                    entry.label.clone(),
+                    tokio::time::timeout(
+                        probe_timeout,
+                        probe_with_params(switch_api::probe::ProbeRequest {
+                            target_app: &app_str,
+                            api_url: &api_url,
+                            api_key: &entry.key,
+                            model: &model,
+                            wire_api: None,
+                            api_mode: mode.as_deref(),
+                            experimental_bearer_token: None,
+                            key_label: Some(entry.label.clone()),
+                        }),
+                    )
+                    .await,
+                )
+            }
+        })
+        .collect::<Vec<_>>();
+    // tokio 无 futures 时需 join_all；这里用 futures crate
+    let probe_results: Vec<(String, String, Result<Result<_, String>, _>)> =
+        futures::future::join_all(probes).await;
+
     let mut tried: Vec<KeyProbeResult> = Vec::new();
     let mut winner: Option<(String, String)> = None;
-    let now = chrono::Utc::now().timestamp();
-
-    for entry in keys.iter() {
-        let res = probe_with_params(switch_api::probe::ProbeRequest {
-            target_app: &app_str,
-            api_url: &profile.api_url,
-            api_key: &entry.key,
-            model: &model,
-            wire_api: wire.as_deref(),
-            api_mode: mode.as_deref(),
-            experimental_bearer_token: exp.as_deref(),
-            key_label: Some(entry.label.clone()),
-        })
-        .await;
+    for (entry, (id, label, res)) in keys.iter().zip(probe_results) {
         match res {
-            Ok(ok) => {
+            Ok(Ok(ok)) => {
                 tried.push(KeyProbeResult {
-                    key_id: entry.id.clone(),
-                    label: entry.label.clone(),
+                    key_id: id.clone(),
+                    label: label.clone(),
                     ok: true,
                     error: None,
                     endpoint: Some(ok.endpoint),
@@ -1429,15 +1464,37 @@ async fn run_failover(
                         }
                     }
                 }
-                winner = Some((entry.id.clone(), entry.label.clone()));
+                winner = Some((id.clone(), label.clone()));
                 break;
             }
-            Err(err) => {
+            Ok(Err(err)) => {
                 tried.push(KeyProbeResult {
-                    key_id: entry.id.clone(),
-                    label: entry.label.clone(),
+                    key_id: id.clone(),
+                    label: label.clone(),
                     ok: false,
                     error: Some(err),
+                    endpoint: None,
+                    protocol: None,
+                });
+                if let Some(list) = profile.api_keys.as_mut() {
+                    for e in list.iter_mut() {
+                        if e.id == entry.id {
+                            e.last_probe_ok = Some(false);
+                            e.last_probed_at = Some(now);
+                        }
+                    }
+                }
+            }
+            Err(_elapsed) => {
+                tried.push(KeyProbeResult {
+                    key_id: id.clone(),
+                    label: label.clone(),
+                    ok: false,
+                    error: Some(format!(
+                        "{} 探活超时（{}s）",
+                        label,
+                        probe_timeout.as_secs()
+                    )),
                     endpoint: None,
                     protocol: None,
                 });
@@ -1475,6 +1532,8 @@ async fn run_failover(
 
     let mut re_switched = false;
     if let Some(persisted_shared_config) = persisted_shared_config {
+        // 全局写锁：与其他切换/写盘命令互斥
+        let _write_guard = state.config_lock.lock().map_err(|e| e.to_string())?;
         let shared_config = apply_profile_config(target, &profile, persisted_shared_config)?;
         let db = state.db.lock().map_err(|e| e.to_string())?;
         db.save_shared_config(target, shared_config)
@@ -1561,63 +1620,67 @@ pub async fn probe_active_profiles(
     };
 
     let cfg = ReachabilityConfig::default();
-    let mut results = Vec::new();
-    for (target, profile) in snapshots {
-        let app = target.as_str().to_string();
-        let Some(profile) = profile else {
-            results.push(ToolProbeResult {
-                target_app: app,
-                configured: false,
-                ok: false,
-                status: None,
-                profile_name: None,
-                error: None,
-                protocol: None,
-                endpoint: None,
-                latency_ms: None,
-                http_status: None,
-                probed_at: chrono::Utc::now().timestamp(),
-            });
-            continue;
-        };
-        let url = profile.api_url.trim();
-        if url.is_empty() {
-            results.push(ToolProbeResult {
-                target_app: app,
-                configured: true,
-                ok: false,
-                status: Some("failed".into()),
-                profile_name: Some(profile.name),
-                error: Some("API URL 为空".into()),
-                protocol: Some("reachability".into()),
-                endpoint: None,
-                latency_ms: None,
-                http_status: None,
-                probed_at: chrono::Utc::now().timestamp(),
-            });
-            continue;
-        }
-        let r = probe_reachability(url, &cfg).await;
-        let status_str = match r.status {
-            switch_api::probe::ReachabilityStatus::Operational => "operational",
-            switch_api::probe::ReachabilityStatus::Degraded => "degraded",
-            switch_api::probe::ReachabilityStatus::Failed => "failed",
-        };
-        results.push(ToolProbeResult {
-            target_app: app,
-            configured: true,
-            ok: r.success,
-            status: Some(status_str.into()),
-            profile_name: Some(profile.name),
-            error: if r.success { None } else { Some(r.message) },
-            protocol: Some("reachability".into()),
-            endpoint: Some(r.endpoint),
-            latency_ms: r.response_time_ms,
-            http_status: r.http_status,
-            probed_at: r.tested_at,
-        });
-    }
-    Ok(results)
+    // 并发探测 6 个工具（每个可能超时 8s+），串行最坏 ~48s → 并行一次超时
+    let futures: Vec<_> = snapshots
+        .into_iter()
+        .map(|(target, profile)| {
+            let app = target.as_str().to_string();
+            let cfg = cfg.clone();
+            async move {
+                let Some(profile) = profile else {
+                    return ToolProbeResult {
+                        target_app: app,
+                        configured: false,
+                        ok: false,
+                        status: None,
+                        profile_name: None,
+                        error: None,
+                        protocol: None,
+                        endpoint: None,
+                        latency_ms: None,
+                        http_status: None,
+                        probed_at: chrono::Utc::now().timestamp(),
+                    };
+                };
+                let url = profile.api_url.trim();
+                if url.is_empty() {
+                    return ToolProbeResult {
+                        target_app: app,
+                        configured: true,
+                        ok: false,
+                        status: Some("failed".into()),
+                        profile_name: Some(profile.name),
+                        error: Some("API URL 为空".into()),
+                        protocol: Some("reachability".into()),
+                        endpoint: None,
+                        latency_ms: None,
+                        http_status: None,
+                        probed_at: chrono::Utc::now().timestamp(),
+                    };
+                }
+                let r = probe_reachability(url, &cfg).await;
+                let status_str = match r.status {
+                    switch_api::probe::ReachabilityStatus::Operational => "operational",
+                    switch_api::probe::ReachabilityStatus::Degraded => "degraded",
+                    switch_api::probe::ReachabilityStatus::Failed => "failed",
+                };
+                ToolProbeResult {
+                    target_app: app,
+                    configured: true,
+                    ok: r.success,
+                    status: Some(status_str.into()),
+                    profile_name: Some(profile.name),
+                    error: if r.success { None } else { Some(r.message) },
+                    protocol: Some("reachability".into()),
+                    endpoint: Some(r.endpoint),
+                    latency_ms: r.response_time_ms,
+                    http_status: r.http_status,
+                    probed_at: r.tested_at,
+                }
+            }
+        })
+        .collect();
+    Ok(futures::future::join_all(futures).await)
 }
 
 /// 扫描给定目录列表里的 skill 子目录名，按出现顺序去重。

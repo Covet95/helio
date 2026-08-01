@@ -26,7 +26,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
-        .manage(AppState { db: Mutex::new(db) })
+        .manage(AppState {
+            db: Mutex::new(db),
+            config_lock: Mutex::new(()),
+        })
         .setup(|app| {
             tray::build_tray(app.handle())?;
             Ok(())

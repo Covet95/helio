@@ -1,6 +1,6 @@
-use super::ConfigAdapter;
+use super::{backup, ConfigAdapter};
 use crate::models::ApiProfile;
-use crate::utils::secure_fs::{atomic_write_private, copy_private};
+use crate::utils::secure_fs::atomic_write_private;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
@@ -285,6 +285,43 @@ impl Default for OpenCodeAdapter {
     }
 }
 
+/// 剥离所有 provider 的 options.apiKey。
+fn strip_credentials(config: &mut serde_json::Value) {
+    if let Some(providers) = config.get_mut("provider").and_then(|v| v.as_object_mut()) {
+        for p in providers.values_mut() {
+            if let Some(options) = p.get_mut("options").and_then(|v| v.as_object_mut()) {
+                options.remove("apiKey");
+            }
+        }
+    }
+}
+
+/// 把磁盘配置中其他 provider 的 key 补回 shared（shared 已剥离）。
+/// 当前 provider 的 key 随后会被 merge 用 profile 的值覆盖。
+fn restore_credentials(config: &mut serde_json::Value, disk: &serde_json::Value) {
+    let Some(shared_providers) = config.get_mut("provider").and_then(|v| v.as_object_mut()) else {
+        return;
+    };
+    let Some(disk_providers) = disk.get("provider").and_then(|v| v.as_object()) else {
+        return;
+    };
+    for (id, shared_p) in shared_providers.iter_mut() {
+        let Some(disk_p) = disk_providers.get(id) else {
+            continue;
+        };
+        let Some(shared_options) = shared_p.get_mut("options").and_then(|v| v.as_object_mut())
+        else {
+            continue;
+        };
+        if shared_options.contains_key("apiKey") {
+            continue;
+        }
+        if let Some(key) = disk_p.pointer("/options/apiKey") {
+            shared_options.insert("apiKey".into(), key.clone());
+        }
+    }
+}
+
 impl ConfigAdapter for OpenCodeAdapter {
     fn config_path(&self) -> PathBuf {
         self.config_file_path()
@@ -303,10 +340,11 @@ impl ConfigAdapter for OpenCodeAdapter {
     }
 
     fn extract_shared_config(&self, config: &serde_json::Value) -> serde_json::Value {
-        // OpenCode 多 provider 共存：保留所有 provider（含各自凭据），
-        // 这样切换某个 provider 时，其他 provider 仍然可用。
-        // 切换逻辑只在 merge_config 里更新「当前 provider」的凭据 + 顶层默认 model。
-        config.clone()
+        // 凭据不落 shared_configs（key 只存 api_profiles 表，避免明文冗余 + 回传前端）。
+        // merge_config 时会从磁盘补回其他 provider 的 key，共存语义不受影响。
+        let mut shared = config.clone();
+        strip_credentials(&mut shared);
+        shared
     }
 
     fn merge_config(
@@ -315,6 +353,10 @@ impl ConfigAdapter for OpenCodeAdapter {
         shared_config: &serde_json::Value,
     ) -> serde_json::Value {
         let mut config = shared_config.clone();
+        // shared 已剥离凭据：从磁盘补回其他 provider 的 key（多 provider 共存）
+        if let Ok(disk) = self.read_config() {
+            restore_credentials(&mut config, &disk);
+        }
         let provider_id = Self::provider_id(api_profile);
 
         if config.get("provider").is_none() {
@@ -442,17 +484,11 @@ impl ConfigAdapter for OpenCodeAdapter {
 
     fn backup_config(&self) -> Result<PathBuf> {
         let path = self.config_path();
-
         if !path.exists() {
             anyhow::bail!("Config file does not exist");
         }
 
-        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-        let backup_path = self
-            .config_dir
-            .join(format!("opencode.backup.{}.json", timestamp));
-
-        copy_private(&path, &backup_path).context("Failed to backup config")?;
+        let backup_path = backup::backup_required(&self.config_dir, &path, "opencode")?;
 
         self.cleanup_old_backups(10)?;
 
@@ -460,29 +496,7 @@ impl ConfigAdapter for OpenCodeAdapter {
     }
 
     fn cleanup_old_backups(&self, keep: usize) -> Result<()> {
-        let mut backups: Vec<_> = fs::read_dir(&self.config_dir)?
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("opencode.backup.")
-            })
-            .collect();
-
-        backups.sort_by_key(|entry| {
-            entry
-                .metadata()
-                .and_then(|m| m.modified())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-        });
-        backups.reverse();
-
-        for entry in backups.iter().skip(keep) {
-            let _ = fs::remove_file(entry.path());
-        }
-
-        Ok(())
+        backup::cleanup_prefix(&self.config_dir, "opencode.backup.", keep)
     }
 }
 
@@ -599,9 +613,8 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_shared_preserves_provider_creds() {
-        // 方向 B（多 provider 共存）：extract 保留所有 provider 的凭据，
-        // 否则共存的其他 provider 会变成空凭据的坏 provider。
+    fn test_extract_shared_strips_credentials() {
+        // key 不落 shared_configs；其他配置原样保留。
         let adapter = OpenCodeAdapter::new();
         let config = serde_json::json!({
             "provider": {
@@ -620,20 +633,48 @@ mod tests {
 
         let shared = adapter.extract_shared_config(&config);
 
-        // 凭据被保留（共存 provider 仍可用）
-        assert_eq!(
-            shared["provider"]["anthropic"]["options"]["apiKey"],
-            "sk-secret"
+        // apiKey 被剥离
+        assert!(
+            shared["provider"]["anthropic"]["options"]
+                .get("apiKey")
+                .is_none(),
+            "apiKey 不应进 shared config"
         );
+        // 其余配置原样保留
         assert_eq!(
             shared["provider"]["anthropic"]["options"]["baseURL"],
             "https://api.com"
         );
         assert_eq!(shared["provider"]["anthropic"]["options"]["timeout"], 30000);
-        // 其余配置原样保留
         assert_eq!(shared["provider"]["anthropic"]["name"], "Anthropic");
         assert_eq!(shared["mcp"]["fs"]["type"], "local");
         assert_eq!(shared["permission"]["edit"], "ask");
+    }
+
+    #[test]
+    fn test_restore_credentials_from_disk() {
+        // merge 时从磁盘补回其他 provider 的 key（共存可用），当前 provider 被 profile 覆盖
+        let config = serde_json::json!({
+            "provider": {
+                "cpa": {
+                    "name": "cpa",
+                    "options": { "apiKey": "sk-disk" }
+                }
+            }
+        });
+        let shared = serde_json::json!({
+            "provider": {
+                "cpa": { "name": "cpa", "options": { "baseURL": "http://127.0.0.1:8317/v1" } }
+            }
+        });
+        let mut merged = shared.clone();
+        restore_credentials(&mut merged, &config);
+        assert_eq!(merged["provider"]["cpa"]["options"]["apiKey"], "sk-disk");
+        // 已带 key 的不覆盖
+        let mut has_key = shared.clone();
+        has_key["provider"]["cpa"]["options"]["apiKey"] = serde_json::json!("sk-keep");
+        restore_credentials(&mut has_key, &config);
+        assert_eq!(has_key["provider"]["cpa"]["options"]["apiKey"], "sk-keep");
     }
 
     #[test]

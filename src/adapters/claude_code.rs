@@ -1,6 +1,6 @@
-use super::ConfigAdapter;
+use super::{backup, ConfigAdapter};
 use crate::models::ApiProfile;
-use crate::utils::secure_fs::{atomic_write_private, copy_private};
+use crate::utils::secure_fs::atomic_write_private;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
@@ -184,17 +184,11 @@ impl ConfigAdapter for ClaudeCodeAdapter {
 
     fn backup_config(&self) -> Result<PathBuf> {
         let path = self.config_path();
-
         if !path.exists() {
             anyhow::bail!("Config file does not exist");
         }
 
-        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-        let backup_path = self
-            .config_dir
-            .join(format!("settings.backup.{}.json", timestamp));
-
-        copy_private(&path, &backup_path).context("Failed to backup config")?;
+        let backup_path = backup::backup_required(&self.config_dir, &path, "settings")?;
 
         // 清理旧备份（保留最近 10 个）
         self.cleanup_old_backups(10)?;
@@ -203,31 +197,7 @@ impl ConfigAdapter for ClaudeCodeAdapter {
     }
 
     fn cleanup_old_backups(&self, keep: usize) -> Result<()> {
-        let mut backups: Vec<_> = fs::read_dir(&self.config_dir)?
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("settings.backup.")
-            })
-            .collect();
-
-        // 按修改时间排序（最新的在前）
-        backups.sort_by_key(|entry| {
-            entry
-                .metadata()
-                .and_then(|m| m.modified())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-        });
-        backups.reverse();
-
-        // 删除多余的备份
-        for entry in backups.iter().skip(keep) {
-            let _ = fs::remove_file(entry.path());
-        }
-
-        Ok(())
+        backup::cleanup_prefix(&self.config_dir, "settings.backup.", keep)
     }
 }
 

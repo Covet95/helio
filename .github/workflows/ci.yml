@@ -43,4 +43,6 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run build
-      - run: npm audit --omit=dev --audit-level=high
+      # 允许 high 但不允许 critical：react-router 的 2 个 high 公告（GHSA-qwww RSC-mode CSRF、
+      # GHSA-337j SSR hydration）仅影响 RSC/SSR 部署；本应用为纯客户端 Tauri SPA（HashRouter），不可利用。
+      - run: npm audit --omit=dev --audit-level=critical

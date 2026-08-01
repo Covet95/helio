@@ -1,6 +1,6 @@
-use super::ConfigAdapter;
+use super::{backup, ConfigAdapter};
 use crate::models::{ApiProfile, CodexCatalogModel};
-use crate::utils::secure_fs::{atomic_write_private, copy_private, ensure_private_dir};
+use crate::utils::secure_fs::{atomic_write_private, ensure_private_dir};
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
@@ -32,30 +32,6 @@ impl CodexAdapter {
 
     fn model_catalog_path(&self) -> PathBuf {
         self.config_dir.join("model_catalog.json")
-    }
-
-    /// 清理指定前缀的备份文件，保留最新的 `keep` 个。失败容错（不中断主流程）。
-    fn cleanup_backups_with_prefix(&self, prefix: &str, keep: usize) {
-        let entries = match fs::read_dir(&self.config_dir) {
-            Ok(e) => e,
-            Err(_) => return,
-        };
-        let mut backups: Vec<_> = entries
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| entry.file_name().to_string_lossy().starts_with(prefix))
-            .collect();
-
-        backups.sort_by_key(|entry| {
-            entry
-                .metadata()
-                .and_then(|m| m.modified())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-        });
-        backups.reverse();
-
-        for entry in backups.iter().skip(keep) {
-            let _ = fs::remove_file(entry.path());
-        }
     }
 
     /// 有效 catalog 列表：过滤空 slug、按首次出现去重，默认 model 不在列表时 prepend。
@@ -572,31 +548,18 @@ impl ConfigAdapter for CodexAdapter {
             anyhow::bail!("Config file does not exist");
         }
 
-        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-        let backup_path = self
-            .config_dir
-            .join(format!("config.backup.{}.toml", timestamp));
-
-        copy_private(&path, &backup_path).context("Failed to backup config")?;
+        let backup_path = backup::backup_required(&self.config_dir, &path, "config")?;
 
         // 同时备份 auth.json（如果存在）—— API key + 登录态（tokens.refresh 等）都在这里，
         // 仅备份 config.toml 不足以在误操作后完整恢复。备份失败不中断主备份。
-        let auth_path = self.auth_file_path();
-        if auth_path.exists() {
-            let auth_backup = self
-                .config_dir
-                .join(format!("auth.backup.{}.json", timestamp));
-            let _ = copy_private(&auth_path, &auth_backup);
-        }
+        let _ = backup::backup_one(&self.config_dir, &self.auth_file_path(), "auth")?;
 
         // 备份 model_catalog.json（切换可能整表覆盖）
-        let catalog_path = self.model_catalog_path();
-        if catalog_path.exists() {
-            let catalog_backup = self
-                .config_dir
-                .join(format!("model_catalog.backup.{}.json", timestamp));
-            let _ = copy_private(&catalog_path, &catalog_backup);
-        }
+        let _ = backup::backup_one(
+            &self.config_dir,
+            &self.model_catalog_path(),
+            "model_catalog",
+        )?;
 
         self.cleanup_old_backups(10)?;
 
@@ -605,10 +568,9 @@ impl ConfigAdapter for CodexAdapter {
 
     fn cleanup_old_backups(&self, keep: usize) -> Result<()> {
         // config.backup.* 与 auth.backup.* / catalog 各自独立计数，互不挤占。
-        self.cleanup_backups_with_prefix("config.backup.", keep);
-        self.cleanup_backups_with_prefix("auth.backup.", keep);
-        self.cleanup_backups_with_prefix("model_catalog.backup.", keep);
-        Ok(())
+        backup::cleanup_prefix(&self.config_dir, "config.backup.", keep)?;
+        backup::cleanup_prefix(&self.config_dir, "auth.backup.", keep)?;
+        backup::cleanup_prefix(&self.config_dir, "model_catalog.backup.", keep)
     }
 
     fn managed_paths(&self) -> Vec<PathBuf> {

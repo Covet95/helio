@@ -393,8 +393,12 @@ impl ApiProfile {
 
     pub fn masked_key(&self) -> String {
         let key = &self.api_key;
-        if key.len() > 15 {
-            format!("{}...{}", &key[..10], &key[key.len() - 5..])
+        // 按字符切片（key 可能是多字节 UTF-8），字节切片会越界 panic
+        let chars: Vec<char> = key.chars().collect();
+        if chars.len() > 15 {
+            let head: String = chars[..10].iter().collect();
+            let tail: String = chars[chars.len() - 5..].iter().collect();
+            format!("{head}...{tail}")
         } else {
             "***".to_string()
         }

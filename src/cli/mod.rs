@@ -943,10 +943,16 @@ fn cmd_profile_key_list(db: &Database, name: String, target_app: Option<String>)
     println!("\n{} {} 的 keys:\n", "Profile".bold(), name.cyan());
     for e in keys {
         let mark = if e.is_active { "●" } else { "○" };
-        let masked = if e.key.len() > 15 {
-            format!("{}...{}", &e.key[..10], &e.key[e.key.len() - 5..])
-        } else {
-            "***".into()
+        // 按字符切片（key 可能是多字节 UTF-8，字节切片会 panic）
+        let masked = {
+            let chars: Vec<char> = e.key.chars().collect();
+            if chars.len() > 15 {
+                let head: String = chars[..10].iter().collect();
+                let tail: String = chars[chars.len() - 5..].iter().collect();
+                format!("{head}...{tail}")
+            } else {
+                "***".into()
+            }
         };
         println!(
             "  {} {}  {}  {}",

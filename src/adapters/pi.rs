@@ -1,6 +1,6 @@
-use super::ConfigAdapter;
+use super::{backup, ConfigAdapter};
 use crate::models::ApiProfile;
-use crate::utils::secure_fs::{atomic_write_private, copy_private};
+use crate::utils::secure_fs::atomic_write_private;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -108,7 +108,9 @@ impl PiAdapter {
             .trim()
             .to_lowercase();
 
-        if mode.contains("anthropic") || mode == "anthropic_messages" || mode == "anthropic-messages"
+        if mode.contains("anthropic")
+            || mode == "anthropic_messages"
+            || mode == "anthropic-messages"
         {
             return "anthropic-messages".into();
         }
@@ -203,7 +205,10 @@ impl PiAdapter {
             *providers = serde_json::json!({});
         }
 
-        let existing = providers.get(provider_id).cloned().unwrap_or(serde_json::json!({}));
+        let existing = providers
+            .get(provider_id)
+            .cloned()
+            .unwrap_or(serde_json::json!({}));
         let mut prov = if existing.is_object() {
             existing
         } else {
@@ -271,16 +276,6 @@ impl PiAdapter {
         }
         out
     }
-
-    fn backup_one(path: &Path, config_dir: &Path, stamp: &str, label: &str) -> Result<()> {
-        if !path.exists() {
-            return Ok(());
-        }
-        let backup = config_dir.join(format!("{label}.backup.{stamp}.json"));
-        copy_private(path, &backup)
-            .with_context(|| format!("Failed to backup {}", path.display()))?;
-        Ok(())
-    }
 }
 
 impl Default for PiAdapter {
@@ -317,54 +312,26 @@ impl ConfigAdapter for PiAdapter {
     }
 
     fn backup_config(&self) -> Result<PathBuf> {
-        let stamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
         fs::create_dir_all(&self.config_dir).ok();
-        Self::backup_one(&self.settings_path(), &self.config_dir, &stamp, "settings")?;
-        Self::backup_one(&self.auth_path(), &self.config_dir, &stamp, "auth")?;
-        Self::backup_one(&self.models_path(), &self.config_dir, &stamp, "models")?;
+        let settings = backup::backup_one(&self.config_dir, &self.settings_path(), "settings")?;
+        let auth = backup::backup_one(&self.config_dir, &self.auth_path(), "auth")?;
+        let _ = backup::backup_one(&self.config_dir, &self.models_path(), "models")?;
         self.cleanup_old_backups(10)?;
         // Return primary backup path (settings if existed, else auth)
-        let settings_backup = self
+        let fallback = self
             .config_dir
-            .join(format!("settings.backup.{stamp}.json"));
-        if settings_backup.exists() {
-            Ok(settings_backup)
-        } else {
-            Ok(self.config_dir.join(format!("auth.backup.{stamp}.json")))
-        }
+            .join(format!("auth.backup.{}.json", backup::stamp()));
+        Ok(settings.or(auth).unwrap_or(fallback))
     }
 
     fn cleanup_old_backups(&self, keep: usize) -> Result<()> {
-        if !self.config_dir.exists() {
-            return Ok(());
-        }
-        let mut backups: Vec<_> = fs::read_dir(&self.config_dir)?
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                let name = e.file_name().to_string_lossy().to_string();
-                name.starts_with("settings.backup.")
-                    || name.starts_with("auth.backup.")
-                    || name.starts_with("models.backup.")
-            })
-            .collect();
-        backups.sort_by_key(|e| {
-            e.metadata()
-                .and_then(|m| m.modified())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-        });
-        backups.reverse();
-        for entry in backups.iter().skip(keep) {
-            let _ = fs::remove_file(entry.path());
-        }
-        Ok(())
+        backup::cleanup_prefix(&self.config_dir, "settings.backup.", keep)?;
+        backup::cleanup_prefix(&self.config_dir, "auth.backup.", keep)?;
+        backup::cleanup_prefix(&self.config_dir, "models.backup.", keep)
     }
 
     fn managed_paths(&self) -> Vec<PathBuf> {
-        vec![
-            self.settings_path(),
-            self.auth_path(),
-            self.models_path(),
-        ]
+        vec![self.settings_path(), self.auth_path(), self.models_path()]
     }
 
     fn apply_api_credentials(&self, api_profile: &ApiProfile) -> Result<()> {
@@ -524,14 +491,17 @@ mod tests {
         assert_eq!(settings["theme"], "light");
         assert_eq!(settings["defaultProvider"], "anthropic");
         // official → no models.json required
-        assert!(!dir.join("models.json").exists() || {
-            let m: serde_json::Value =
-                serde_json::from_str(&fs::read_to_string(dir.join("models.json")).unwrap_or_default())
-                    .unwrap_or(serde_json::json!({}));
-            m.get("providers")
-                .and_then(|p| p.get("anthropic"))
-                .is_none()
-        });
+        assert!(
+            !dir.join("models.json").exists() || {
+                let m: serde_json::Value = serde_json::from_str(
+                    &fs::read_to_string(dir.join("models.json")).unwrap_or_default(),
+                )
+                .unwrap_or(serde_json::json!({}));
+                m.get("providers")
+                    .and_then(|p| p.get("anthropic"))
+                    .is_none()
+            }
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -566,12 +536,12 @@ mod tests {
         adapter.apply_api_credentials(&profile).unwrap();
         let models: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(dir.join("models.json")).unwrap()).unwrap();
-        assert_eq!(models["providers"]["corp"]["baseUrl"], "https://proxy.corp/v1");
-        assert_eq!(models["providers"]["corp"]["models"][0]["id"], "m1");
         assert_eq!(
-            models["providers"]["ollama"]["models"][0]["id"],
-            "x"
+            models["providers"]["corp"]["baseUrl"],
+            "https://proxy.corp/v1"
         );
+        assert_eq!(models["providers"]["corp"]["models"][0]["id"], "m1");
+        assert_eq!(models["providers"]["ollama"]["models"][0]["id"], "x");
         let _ = fs::remove_dir_all(&dir);
     }
 }

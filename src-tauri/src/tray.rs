@@ -201,6 +201,8 @@ fn do_switch(app: &AppHandle, tool: TargetApp, profile_name: &str) {
                 .map(|config| config.config);
             (profile, persisted_shared_config)
         };
+        // 全局写锁：与 GUI 切换等写盘命令互斥
+        let _write_guard = state.config_lock.lock().map_err(|e| e.to_string())?;
         let shared_config = crate::commands::main_cmds::apply_profile_config(
             tool,
             &profile,
@@ -252,6 +254,7 @@ fn do_switch(app: &AppHandle, tool: TargetApp, profile_name: &str) {
 /// 生成托盘用的「太阳」图标（实心圆芯 + 8 道细长光芒）。
 /// - macOS：纯黑 + 透明，配合 icon_as_template(true) 按主题自动反色。
 /// - Windows / Linux：金橙色实心，任务栏/系统托盘上可辨识（模板图标在这些平台无效）。
+///
 /// 代码生成，不依赖图片文件。参数与设计原型一致（变体 B）。
 fn sun_icon() -> tauri::image::Image<'static> {
     const S: u32 = 44;
@@ -334,9 +337,14 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 }
                 other => {
                     if let Some((tool, name)) = parse_switch_id(other) {
-                        do_switch(app, tool, &name);
-                        // 切换后重建菜单：勾选移到新 profile
-                        rebuild_tray_menu(app);
+                        // 切到后台线程执行：写盘可能在窗口/菜单事件线程上阻塞 UI
+                        let app = app.clone();
+                        let name = name.to_string();
+                        tauri::async_runtime::spawn(async move {
+                            do_switch(&app, tool, &name);
+                            // 切换后重建菜单：勾选移到新 profile
+                            rebuild_tray_menu(&app);
+                        });
                     }
                     // 其它(占位项 empty::* / 子菜单容器 tool::* 等)忽略
                 }

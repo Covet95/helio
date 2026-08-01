@@ -14,6 +14,31 @@ pub struct Database {
     conn: Connection,
 }
 
+/// 迁移期间的 FK 开关 guard：`PRAGMA foreign_keys` 在事务内是 no-op，
+/// 按 SQLite 官方重建表流程必须在 BEGIN 前 OFF、COMMIT 后 ON。
+/// Drop 时先回滚残留事务再恢复 FK——避免迁移中途失败后连接残留
+/// 「未提交事务 + FK 关闭」的僵尸状态（后续写入进入僵尸事务、静默丢失）。
+struct ForeignKeysGuard<'a> {
+    conn: &'a Connection,
+}
+
+impl<'a> ForeignKeysGuard<'a> {
+    fn off(conn: &'a Connection) -> Result<Self> {
+        conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
+        Ok(Self { conn })
+    }
+}
+
+impl Drop for ForeignKeysGuard<'_> {
+    fn drop(&mut self) {
+        // 迁移事务中途失败时残留的未提交事务必须先回滚，
+        // 否则事务内的 PRAGMA foreign_keys=ON 是 no-op（恢复失败）。
+        // 无活动事务时 ROLLBACK 返回 Err，忽略。
+        let _ = self.conn.execute_batch("ROLLBACK;");
+        let _ = self.conn.execute_batch("PRAGMA foreign_keys=ON;");
+    }
+}
+
 impl Database {
     /// 打开或创建数据库
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
@@ -26,6 +51,13 @@ impl Database {
         let conn = Connection::open(path)?;
         if path != Path::new(":memory:") {
             ensure_private_file(path)?;
+            // CLI 与 GUI 可能同时打开同一库：WAL + busy_timeout 避免 SQLITE_BUSY。
+            // busy_timeout 让并发写等待而非直接报错。
+            conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+            conn.busy_timeout(std::time::Duration::from_secs(5))?;
+            // SQLite 默认 FK 关闭；迁移流程依赖临时 OFF/ON，日常连接统一开启，
+            // 使 active_profiles 的 ON DELETE CASCADE 真正生效。
+            conn.execute_batch("PRAGMA foreign_keys=ON;")?;
         }
         let db = Self { conn };
         db.init_schema()?;
@@ -118,10 +150,8 @@ impl Database {
             "DELETE FROM active_profiles WHERE target_app = 'gemini'",
             [],
         )?;
-        self.conn.execute(
-            "DELETE FROM shared_configs WHERE target_app = 'gemini'",
-            [],
-        )?;
+        self.conn
+            .execute("DELETE FROM shared_configs WHERE target_app = 'gemini'", [])?;
         self.conn
             .execute("DELETE FROM api_profiles WHERE target_app = 'gemini'", [])?;
         self.record_migration(id)?;
@@ -175,7 +205,8 @@ impl Database {
         if !cols.iter().any(|c| c == "model_effort_level") {
             return Ok(());
         }
-        self.conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
+        // guard 负责失败时回滚残留事务并恢复 foreign_keys=ON。
+        let _guard = ForeignKeysGuard::off(&self.conn)?;
         self.conn.execute_batch(r#"
             BEGIN;
             CREATE TABLE api_profiles_no_effort (
@@ -204,7 +235,6 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_profiles_name ON api_profiles(name);
             COMMIT;
         "#)?;
-        self.conn.execute_batch("PRAGMA foreign_keys=ON;")?;
         Ok(())
     }
 
@@ -243,7 +273,8 @@ impl Database {
         // `DROP TABLE api_profiles` 会触发 FOREIGN KEY constraint failed 导致整个事务回滚。
         // 按 SQLite 官方安全重建表流程,重建期间必须关闭外键检查;
         // 而 `PRAGMA foreign_keys` 在事务内是 no-op,必须在 BEGIN 之前设置、COMMIT 之后恢复。
-        self.conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
+        // guard 负责失败时回滚残留事务并恢复 foreign_keys=ON。
+        let _guard = ForeignKeysGuard::off(&self.conn)?;
         self.conn.execute_batch(
             r#"
             BEGIN;
@@ -298,7 +329,6 @@ impl Database {
             COMMIT;
             "#,
         )?;
-        self.conn.execute_batch("PRAGMA foreign_keys=ON;")?;
 
         Ok(())
     }
