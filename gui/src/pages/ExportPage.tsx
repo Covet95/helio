@@ -3,6 +3,7 @@ import { Button } from '../components/common/Button';
 import { PageHeader } from '../components/common/PageHeader';
 import { Download, Upload } from 'lucide-react';
 import { ConfirmDialog } from '../components/common/Modal';
+import { humanizeError } from '../lib/utils';
 
 type Feedback = { text: string; kind: 'success' | 'error' | 'info' };
 
@@ -26,7 +27,7 @@ export default function ExportPage() {
       await tauriApi.exportDatabase(filePath);
       setFeedback({ text: '数据库导出成功', kind: 'success' });
     } catch (err) {
-      setFeedback({ text: '导出失败: ' + err, kind: 'error' });
+      setFeedback({ text: `导出失败: ${humanizeError(err)}`, kind: 'error' });
     } finally {
       setExporting(false);
     }
@@ -55,7 +56,7 @@ export default function ExportPage() {
         window.location.reload();
       }
     } catch (err) {
-      setFeedback({ text: '导入失败: ' + err, kind: 'error' });
+      setFeedback({ text: `导入失败: ${humanizeError(err)}`, kind: 'error' });
     } finally {
       setImporting(false);
     }

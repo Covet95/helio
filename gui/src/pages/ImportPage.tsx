@@ -10,7 +10,7 @@ import {
 import { SUPPORTED_TOOLS } from '../types';
 import type { TargetApp } from '../types';
 import type { CcSwitchProvider } from '../lib/tauri';
-import { cn, maskApiKey } from '../lib/utils';
+import { cn, humanizeError, maskApiKey } from '../lib/utils';
 
 interface Scanned {
   found: boolean;
@@ -63,7 +63,7 @@ export default function ImportPage() {
       setCcProviders(list);
       setCcSelected(new Set(list.map((_, i) => i)));
     } catch (e) {
-      setFeedback({ text: 'cc-switch 扫描失败: ' + e, kind: 'error' });
+      setFeedback({ text: `cc-switch 扫描失败: ${humanizeError(e)}`, kind: 'error' });
     } finally {
       setCcScanning(false);
     }
@@ -79,7 +79,7 @@ export default function ImportPage() {
       setFeedback({ text: `已从 cc-switch 导入 ${n} 个配置档案`, kind: 'success' });
       setCcProviders(null);
     } catch (e) {
-      setFeedback({ text: 'cc-switch 导入失败: ' + e, kind: 'error' });
+      setFeedback({ text: `cc-switch 导入失败: ${humanizeError(e)}`, kind: 'error' });
     }
   };
 
@@ -94,7 +94,7 @@ export default function ImportPage() {
       setApi(a); setInfo(i);
       setName(`${tool}-local`);
     } catch (e) {
-      setFeedback({ text: '扫描失败: ' + e, kind: 'error' });
+      setFeedback({ text: `扫描失败: ${humanizeError(e)}`, kind: 'error' });
     } finally {
       setScanning(false);
     }
@@ -124,7 +124,7 @@ export default function ImportPage() {
       const msg = String(e);
       const friendly = /UNIQUE constraint failed/i.test(msg)
         ? `已存在同名档案「${name.trim()}」，请改个名字再导入`
-        : '导入失败: ' + msg;
+        : `导入失败: ${humanizeError(e)}`;
       setFeedback({ text: friendly, kind: 'error' });
     }
   };
@@ -136,7 +136,7 @@ export default function ImportPage() {
       setImportedShared(true);
       setFeedback({ text: `已导入 ${meta.displayName} 的共享配置`, kind: 'success' });
     } catch (e) {
-      setFeedback({ text: '导入共享配置失败: ' + e, kind: 'error' });
+      setFeedback({ text: `导入共享配置失败: ${humanizeError(e)}`, kind: 'error' });
     }
   };
 

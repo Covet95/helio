@@ -23,6 +23,10 @@ interface AppStore {
   toggleSidebar: () => void;
 }
 
+/** 请求序号：fetch 响应只接受最新一次（后发先至的过期响应丢弃） */
+let profilesSeq = 0;
+let statusSeq = 0;
+
 export const useStore = create<AppStore>((set, get) => ({
   profiles: [],
   loadingProfiles: false,
@@ -34,15 +38,20 @@ export const useStore = create<AppStore>((set, get) => ({
   clearError: () => set({ lastError: null }),
 
   fetchProfiles: async () => {
+    // 序号守卫：只接受最新一次请求的响应，过期响应（后发先至）直接丢弃，
+    // 避免快速连续操作时 UI 显示过期状态
+    const seq = ++profilesSeq;
     set({ loadingProfiles: true });
     try {
       const profiles = await tauriApi.listProfiles();
+      if (seq !== profilesSeq) return;
       set({ profiles, lastError: null });
     } catch (error) {
+      if (seq !== profilesSeq) return;
       console.error('Failed to fetch profiles:', error);
       set({ lastError: `加载档案失败：${humanizeError(error)}` });
     } finally {
-      set({ loadingProfiles: false });
+      if (seq === profilesSeq) set({ loadingProfiles: false });
     }
   },
 
@@ -95,15 +104,18 @@ export const useStore = create<AppStore>((set, get) => ({
   },
 
   fetchStatus: async () => {
+    const seq = ++statusSeq;
     set({ loadingStatus: true });
     try {
       const status = await tauriApi.getStatus();
+      if (seq !== statusSeq) return;
       set({ status, lastError: null });
     } catch (error) {
+      if (seq !== statusSeq) return;
       console.error('Failed to fetch status:', error);
       set({ lastError: `加载状态失败：${humanizeError(error)}` });
     } finally {
-      set({ loadingStatus: false });
+      if (seq === statusSeq) set({ loadingStatus: false });
     }
   },
 

@@ -136,7 +136,7 @@ export function ProfileModal({
         text: `模型 ${result.model} 可用${proto}`,
       });
     } catch (error) {
-      setApiHealth({ kind: 'error', text: error instanceof Error ? error.message : String(error) });
+      setApiHealth({ kind: 'error', text: humanizeError(error) });
     } finally {
       setCheckingApi(false);
     }
@@ -162,7 +162,7 @@ export function ProfileModal({
       } catch (e) {
         anyFail = true;
         if (k.id === activeId) activeFailed = true;
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg = humanizeError(e);
         lines.push(`✗ ${k.label || k.id} · ${msg.slice(0, 80)}`);
       }
     }
@@ -200,7 +200,7 @@ export function ProfileModal({
         });
       }
     } catch (e) {
-      setApiHealth({ kind: 'error', text: e instanceof Error ? e.message : String(e) });
+      setApiHealth({ kind: 'error', text: humanizeError(e) });
     } finally {
       setCheckingApi(false);
     }

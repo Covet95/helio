@@ -16,7 +16,6 @@ import { ProfileModal } from './profiles/ProfileFormModal';
 import {
   EmptyState,
   activeProfileFor,
-  humanizeCopyError,
   AppSelector,
 } from './profiles/helpers';
 
@@ -118,7 +117,7 @@ export default function ProfilesPage() {
       await copyText(text);
       setFeedback({ kind: 'success', text: `已复制${label}` });
     } catch (error) {
-      setFeedback({ kind: 'error', text: `复制${label}失败：${humanizeCopyError(error)}` });
+      setFeedback({ kind: 'error', text: `复制${label}失败：${humanizeError(error, '剪贴板不可用')}` });
     }
   };
 

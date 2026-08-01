@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { emptyProfileForTool, humanizeCopyError, providerTint } from './helpers';
+import { emptyProfileForTool, providerTint } from './helpers';
+import { humanizeError } from '../../lib/utils';
 
 describe('profile helpers', () => {
   it('creates tool-specific defaults', () => {
@@ -18,6 +19,9 @@ describe('profile helpers', () => {
 
   it('normalizes presentation helpers', () => {
     expect(providerTint('OpenAI compatible')).toBe('#10B981');
-    expect(humanizeCopyError(new Error('TypeError: unavailable'))).toBe('unavailable');
+    expect(humanizeError(new Error('TypeError: unavailable'))).toBe('unavailable');
+    expect(humanizeError(new Error('TypeError: unavailable'), '剪贴板不可用')).toBe('unavailable');
+    expect(humanizeError('TypeError: nothing')).toBe('nothing');
+    expect(humanizeError('')).toBe('发生未知错误');
   });
 });

@@ -66,7 +66,8 @@ export default function HistoryPage() {
       title: '删除会话',
       message: `删除 ${m.tool} · ${m.cwd || m.id}？将移到系统垃圾桶（可恢复）。`,
       onConfirm: async () => {
-        await tauriApi.deleteSession(m.tool, m.id);
+        const r = await tauriApi.deleteSession(m.tool, m.id);
+        if (!r.ok) setError(`删除失败：${r.error || '未知错误'}`);
         await load();
       },
     });
@@ -79,7 +80,11 @@ export default function HistoryPage() {
       title: '批量删除会话',
       message: `批量删除 ${items.length} 个会话？将移到系统垃圾桶（可恢复）。`,
       onConfirm: async () => {
-        await tauriApi.deleteSessions(items);
+        const results = await tauriApi.deleteSessions(items);
+        const failed = results.filter((r) => !r.ok);
+        if (failed.length) {
+          setError(`批量删除失败 ${failed.length}/${results.length} 个：${failed.map((f) => f.error || '未知错误').join('；')}`);
+        }
         await load();
       },
     });
@@ -96,7 +101,11 @@ export default function HistoryPage() {
       title: '快捷清理',
       message: `清理 ${days} 天前的会话？将移到系统垃圾桶（可恢复）。`,
       onConfirm: async () => {
-        await tauriApi.cleanupSessions(tool || undefined, days);
+        const results = await tauriApi.cleanupSessions(tool || undefined, days);
+        const failed = results.filter((r) => !r.ok);
+        if (failed.length) {
+          setError(`清理失败 ${failed.length}/${results.length} 个：${failed.map((f) => f.error || '未知错误').join('；')}`);
+        }
         await load();
       },
     });

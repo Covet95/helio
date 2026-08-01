@@ -25,7 +25,7 @@ export function maskApiKey(key: string): string {
  * - 在浏览器里跑(非 Tauri 容器)时 `invoke` 不存在,识别为「桌面环境不可用」
  * - 其余情况尽量提取可读信息,实在没有再退回原始字符串
  */
-export function humanizeError(err: unknown): string {
+export function humanizeError(err: unknown, fallback = '发生未知错误'): string {
   const raw = err instanceof Error ? err.message : String(err);
 
   // 没有 Tauri runtime —— 通常是在普通浏览器里打开了前端
@@ -39,5 +39,5 @@ export function humanizeError(err: unknown): string {
     return '权限不足,无法访问该资源';
   }
   // 退回:去掉冗长的 "TypeError:/Error:" 前缀,保留核心信息
-  return raw.replace(/^\s*(TypeError|Error):\s*/i, '').trim() || '发生未知错误';
+  return raw.replace(/^\s*(TypeError|Error):\s*/i, '').trim() || fallback;
 }

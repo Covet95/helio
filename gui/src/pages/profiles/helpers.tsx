@@ -67,11 +67,6 @@ export function providerTint(provider: string): string {
   return '#4B5563';
 }
 
-export function humanizeCopyError(error: unknown): string {
-  const raw = error instanceof Error ? error.message : String(error);
-  return raw.replace(/^\s*(TypeError|Error):\s*/i, '').trim() || '剪贴板不可用';
-}
-
 export function activeProfileFor(status: StatusInfo | null, targetApp: TargetApp): ApiProfile | undefined {
   if (!status) return undefined;
   const key = statusKeyFor(targetApp) as keyof StatusInfo;
