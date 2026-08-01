@@ -26,7 +26,6 @@ pub trait ConfigAdapter {
     fn read_config(&self) -> Result<serde_json::Value>;
 
     /// 读取 MCP servers 的原始 JSON（mcpServers / mcp_servers / mcp）。
-    #[cfg(feature = "tauri-gui")]
     fn read_mcp_servers_raw(&self) -> Result<Option<serde_json::Value>> {
         let config = self.read_config()?;
         Ok(config
@@ -45,6 +44,12 @@ pub trait ConfigAdapter {
         api_profile: &ApiProfile,
         shared_config: &serde_json::Value,
     ) -> serde_json::Value;
+
+    /// 写入主配置文件之外的辅助文件（如 Claude 的 ~/.claude.json 里的 MCP）。
+    /// 默认无操作；实现出错时整个切换事务回滚。
+    fn apply_auxiliary_config(&self, _shared_config: &serde_json::Value) -> Result<()> {
+        Ok(())
+    }
 
     /// 原子写入配置
     fn write_config(&self, config: &serde_json::Value) -> Result<()>;
@@ -110,6 +115,7 @@ pub fn apply_profile_transaction(
     if let Err(error) = adapter
         .write_config(&merged)
         .and_then(|_| adapter.apply_api_credentials(api_profile))
+        .and_then(|_| adapter.apply_auxiliary_config(shared_config))
     {
         if let Err(restore_error) = adapter.restore_files(&snapshots) {
             anyhow::bail!("{error}; rollback failed: {restore_error}");
@@ -135,6 +141,7 @@ pub fn resolve_shared_config(
 
     if let Some(previous) = persisted_shared_config {
         backfill_missing_top_level(&mut shared_config, &previous);
+        backfill_mcp_entries(&mut shared_config, &previous);
     }
     Ok(shared_config)
 }
@@ -164,6 +171,55 @@ pub fn backfill_missing_top_level(live: &mut serde_json::Value, previous: &serde
         for (key, value) in previous_object {
             if !live_object.contains_key(key) {
                 live_object.insert(key.clone(), value.clone());
+            }
+        }
+    }
+}
+
+/// 对 MCP 键做条目级补缺:previous(数据库)有而 live(磁盘)缺失的 MCP 条目补入 live,
+/// live 已有条目以 live 为准(磁盘优先)。openclaw 的 `mcp.servers` 嵌套层同样处理。
+fn backfill_mcp_entries(live: &mut serde_json::Value, previous: &serde_json::Value) {
+    const MCP_KEYS: &[&str] = &["mcpServers", "mcp_servers", "mcp"];
+    let (Some(previous_object), Some(live_object)) = (previous.as_object(), live.as_object_mut())
+    else {
+        return;
+    };
+
+    for key in MCP_KEYS {
+        let Some(previous_value) = previous_object.get(*key) else {
+            continue;
+        };
+        let Some(previous_map) = previous_value.as_object() else {
+            continue;
+        };
+
+        let live_value = live_object
+            .entry((*key).to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(live_map) = live_value.as_object_mut() {
+            for (name, value) in previous_map {
+                if !live_map.contains_key(name) {
+                    live_map.insert(name.clone(), value.clone());
+                }
+            }
+        }
+
+        // openclaw: mcp.servers 深一层补缺
+        if *key == "mcp" {
+            if let Some(previous_servers) = previous_value
+                .get("servers")
+                .and_then(|v| v.as_object())
+            {
+                if let Some(live_servers) = live_value
+                    .get_mut("servers")
+                    .and_then(|v| v.as_object_mut())
+                {
+                    for (name, value) in previous_servers {
+                        if !live_servers.contains_key(name) {
+                            live_servers.insert(name.clone(), value.clone());
+                        }
+                    }
+                }
             }
         }
     }
@@ -252,6 +308,63 @@ mod tests {
         assert_eq!(fs::read(&adapter.credentials).unwrap(), b"old secret");
     }
 
+    struct FailingAuxAdapter {
+        config: PathBuf,
+        aux: PathBuf,
+    }
+
+    impl ConfigAdapter for FailingAuxAdapter {
+        fn config_path(&self) -> PathBuf {
+            self.config.clone()
+        }
+        fn read_config(&self) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({}))
+        }
+        fn extract_shared_config(&self, config: &serde_json::Value) -> serde_json::Value {
+            config.clone()
+        }
+        fn merge_config(&self, _: &ApiProfile, shared: &serde_json::Value) -> serde_json::Value {
+            shared.clone()
+        }
+        fn write_config(&self, config: &serde_json::Value) -> Result<()> {
+            fs::write(&self.config, serde_json::to_vec(config)?)?;
+            Ok(())
+        }
+        fn backup_config(&self) -> Result<PathBuf> {
+            Ok(self.config.clone())
+        }
+        fn cleanup_old_backups(&self, _: usize) -> Result<()> {
+            Ok(())
+        }
+        fn managed_paths(&self) -> Vec<PathBuf> {
+            vec![self.config.clone(), self.aux.clone()]
+        }
+        fn apply_auxiliary_config(&self, _: &serde_json::Value) -> Result<()> {
+            anyhow::bail!("injected auxiliary write failure")
+        }
+    }
+
+    #[test]
+    fn transaction_restores_all_managed_files_after_aux_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = FailingAuxAdapter {
+            config: dir.path().join("config"),
+            aux: dir.path().join("claude.json"),
+        };
+        fs::write(&adapter.config, b"old config").unwrap();
+        fs::write(&adapter.aux, b"old mcp").unwrap();
+
+        let error = apply_profile_transaction(
+            &adapter,
+            &ApiProfile::default(),
+            &serde_json::json!({ "mcpServers": { "x": { "command": "y" } } }),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("injected"));
+        assert_eq!(fs::read(&adapter.config).unwrap(), b"old config");
+        assert_eq!(fs::read(&adapter.aux).unwrap(), b"old mcp");
+    }
+
     #[test]
     fn transaction_removes_new_files_after_failure() {
         let dir = tempfile::tempdir().unwrap();
@@ -268,5 +381,50 @@ mod tests {
         .is_err());
         assert!(!adapter.config.exists());
         assert!(!adapter.credentials.exists());
+    }
+
+    #[test]
+    fn backfill_mcp_entries_fills_missing_codex_servers() {
+        let mut live = serde_json::json!({ "mcp_servers": {} });
+        let previous = serde_json::json!({
+            "mcp_servers": {
+                "bing-search": { "command": "npx" },
+                "github": { "url": "https://x/mcp" }
+            }
+        });
+        super::backfill_mcp_entries(&mut live, &previous);
+        assert_eq!(live["mcp_servers"]["bing-search"]["command"], "npx");
+        assert_eq!(live["mcp_servers"]["github"]["url"], "https://x/mcp");
+    }
+
+    #[test]
+    fn backfill_mcp_entries_keeps_live_conflict() {
+        let mut live = serde_json::json!({
+            "mcp_servers": { "github": { "url": "https://live/mcp" } }
+        });
+        let previous = serde_json::json!({
+            "mcp_servers": { "github": { "url": "https://db/mcp" }, "new": { "command": "x" } }
+        });
+        super::backfill_mcp_entries(&mut live, &previous);
+        assert_eq!(live["mcp_servers"]["github"]["url"], "https://live/mcp");
+        assert_eq!(live["mcp_servers"]["new"]["command"], "x");
+    }
+
+    #[test]
+    fn backfill_mcp_entries_merges_openclaw_nested_servers() {
+        let mut live = serde_json::json!({ "mcp": {} });
+        let previous = serde_json::json!({
+            "mcp": { "servers": { "cdp-bridge": { "command": "uvx" } } }
+        });
+        super::backfill_mcp_entries(&mut live, &previous);
+        assert_eq!(live["mcp"]["servers"]["cdp-bridge"]["command"], "uvx");
+    }
+
+    #[test]
+    fn backfill_mcp_entries_skips_non_object_values() {
+        let mut live = serde_json::json!({});
+        let previous = serde_json::json!({ "mcp_servers": "nope" });
+        super::backfill_mcp_entries(&mut live, &previous);
+        assert!(live.get("mcp_servers").is_none());
     }
 }

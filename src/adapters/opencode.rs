@@ -195,88 +195,6 @@ impl OpenCodeAdapter {
         }
         format!("{base}/v1")
     }
-
-    /// 把单个 Claude MCP server 转成 OpenCode 格式。
-    /// 既无 command 又无 url → 无法转换，返回 None（跳过该项）。
-    /// 丢弃 OpenCode 不认的字段（type/alwaysAllow/startup_timeout_sec/未知项）。
-    fn convert_one_server(server: &serde_json::Value) -> Option<serde_json::Value> {
-        let obj = server.as_object()?;
-        let mut out = serde_json::Map::new();
-
-        if let Some(url) = obj.get("url").and_then(|v| v.as_str()) {
-            // 远程型
-            out.insert("type".into(), serde_json::Value::String("remote".into()));
-            out.insert("url".into(), serde_json::Value::String(url.to_string()));
-            // headers 携带认证信息（如 Bearer token），OpenCode 远程 MCP 支持，保留
-            if let Some(headers) = obj.get("headers").and_then(|v| v.as_object()) {
-                if !headers.is_empty() {
-                    out.insert("headers".into(), serde_json::Value::Object(headers.clone()));
-                }
-            }
-        } else if let Some(command) = obj.get("command").and_then(|v| v.as_str()) {
-            // 本地型：command(字符串) + args(数组) → command(数组)
-            let mut cmd = vec![serde_json::Value::String(command.to_string())];
-            if let Some(args) = obj.get("args").and_then(|v| v.as_array()) {
-                cmd.extend(args.iter().cloned());
-            }
-            out.insert("type".into(), serde_json::Value::String("local".into()));
-            out.insert("command".into(), serde_json::Value::Array(cmd));
-            // env → environment（仅非空对象）
-            if let Some(env) = obj.get("env").and_then(|v| v.as_object()) {
-                if !env.is_empty() {
-                    out.insert("environment".into(), serde_json::Value::Object(env.clone()));
-                }
-            }
-        } else {
-            // 既无 url 又无 command：无法转换
-            return None;
-        }
-
-        out.insert("enabled".into(), serde_json::Value::Bool(true));
-        Some(serde_json::Value::Object(out))
-    }
-
-    /// 把 Claude 的 mcpServers 对象整体转成 OpenCode 的 mcp 对象。
-    /// 非对象输入 → 空对象。转不了的单项跳过。
-    fn claude_mcp_to_opencode(claude_servers: &serde_json::Value) -> serde_json::Value {
-        let mut out = serde_json::Map::new();
-        if let Some(servers) = claude_servers.as_object() {
-            for (name, server) in servers {
-                if let Some(converted) = Self::convert_one_server(server) {
-                    out.insert(name.clone(), converted);
-                }
-            }
-        }
-        serde_json::Value::Object(out)
-    }
-
-    /// 把转换后的 mcp 对象合并进 config["mcp"]：同名覆盖，保留 config 已有的额外项。
-    /// config.mcp 不存在或不是对象时，以空对象起步。
-    fn merge_mcp_into(config: &mut serde_json::Value, mcp: &serde_json::Value) {
-        let incoming = match mcp.as_object() {
-            Some(m) if !m.is_empty() => m,
-            _ => return, // 没有要合并的，直接返回
-        };
-        // 确保 config["mcp"] 是对象
-        let needs_init = !config.get("mcp").map(|v| v.is_object()).unwrap_or(false);
-        if needs_init {
-            config["mcp"] = serde_json::json!({});
-        }
-        if let Some(dst) = config.get_mut("mcp").and_then(|v| v.as_object_mut()) {
-            for (name, server) in incoming {
-                dst.insert(name.clone(), server.clone()); // 同名覆盖
-            }
-        }
-    }
-
-    /// 读 ~/.claude.json 的 mcpServers。读不到/解析失败/无该键 → None（不报错）。
-    fn read_claude_mcp_servers() -> Option<serde_json::Value> {
-        let home = dirs::home_dir()?;
-        let path = home.join(".claude.json");
-        let content = fs::read_to_string(&path).ok()?;
-        let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
-        parsed.get("mcpServers").cloned()
-    }
 }
 
 impl Default for OpenCodeAdapter {
@@ -459,13 +377,6 @@ impl ConfigAdapter for OpenCodeAdapter {
                     obj.remove("model");
                 }
             }
-        }
-
-        // 自动同步 Claude 的 MCP（读 ~/.claude.json，转 OpenCode 格式，合并进 config.mcp）。
-        // 读不到 Claude 配置时静默跳过，不影响切换。
-        if let Some(claude_servers) = Self::read_claude_mcp_servers() {
-            let converted = Self::claude_mcp_to_opencode(&claude_servers);
-            Self::merge_mcp_into(&mut config, &converted);
         }
 
         config
@@ -770,6 +681,24 @@ mod tests {
     }
 
     #[test]
+    fn test_merge_mcp_only_from_shared_config() {
+        // MCP 只来自共享配置,不读本机 ~/.claude.json(即使本机有 8 个 MCP 也不混入)
+        let adapter = OpenCodeAdapter::new();
+        let shared = serde_json::json!({
+            "mcp": { "test-only-srv": { "type": "local", "command": ["x"] } }
+        });
+
+        let merged = adapter.merge_config(&sample_profile(), &shared);
+
+        let mcp = merged["mcp"].as_object().unwrap();
+        assert_eq!(mcp.len(), 1);
+        assert_eq!(
+            mcp["test-only-srv"]["command"],
+            serde_json::json!(["x"])
+        );
+    }
+
+    #[test]
     fn test_merge_writes_multiple_models() {
         let adapter = OpenCodeAdapter::new();
         let profile = ApiProfile {
@@ -867,140 +796,6 @@ mod tests {
             merged["provider"]["anthropic"]["options"]["apiKey"],
             "sk-test-key"
         );
-    }
-
-    #[test]
-    fn test_convert_stdio_server() {
-        let claude = serde_json::json!({
-            "type": "stdio",
-            "command": "npx",
-            "args": ["-y", "pkg"],
-            "env": { "K": "v" }
-        });
-        let out = OpenCodeAdapter::convert_one_server(&claude).unwrap();
-        assert_eq!(out["type"], "local");
-        assert_eq!(out["command"], serde_json::json!(["npx", "-y", "pkg"]));
-        assert_eq!(out["environment"]["K"], "v");
-        assert_eq!(out["enabled"], true);
-        assert!(out.get("args").is_none());
-    }
-
-    #[test]
-    fn test_convert_command_only() {
-        let claude = serde_json::json!({ "command": "foo" });
-        let out = OpenCodeAdapter::convert_one_server(&claude).unwrap();
-        assert_eq!(out["command"], serde_json::json!(["foo"]));
-        assert_eq!(out["type"], "local");
-    }
-
-    #[test]
-    fn test_convert_empty_env_omitted() {
-        let claude = serde_json::json!({ "command": "foo", "env": {} });
-        let out = OpenCodeAdapter::convert_one_server(&claude).unwrap();
-        assert!(
-            out.get("environment").is_none(),
-            "空 env 不应写 environment"
-        );
-    }
-
-    #[test]
-    fn test_convert_remote_server() {
-        let claude = serde_json::json!({ "type": "sse", "url": "https://x/mcp" });
-        let out = OpenCodeAdapter::convert_one_server(&claude).unwrap();
-        assert_eq!(out["type"], "remote");
-        assert_eq!(out["url"], "https://x/mcp");
-        assert_eq!(out["enabled"], true);
-    }
-
-    #[test]
-    fn test_convert_remote_preserves_headers() {
-        let claude = serde_json::json!({
-            "type": "http",
-            "url": "https://api.githubcopilot.com/mcp/",
-            "headers": { "Authorization": "Bearer tok123" }
-        });
-        let out = OpenCodeAdapter::convert_one_server(&claude).unwrap();
-        assert_eq!(out["type"], "remote");
-        assert_eq!(out["url"], "https://api.githubcopilot.com/mcp/");
-        assert_eq!(out["headers"]["Authorization"], "Bearer tok123");
-        assert_eq!(out["enabled"], true);
-    }
-
-    #[test]
-    fn test_convert_drops_claude_specific_fields() {
-        let claude = serde_json::json!({
-            "command": "npx",
-            "args": ["chrome-devtools-mcp@latest"],
-            "alwaysAllow": ["navigate_page", "click"],
-            "startup_timeout_sec": 120
-        });
-        let out = OpenCodeAdapter::convert_one_server(&claude).unwrap();
-        assert!(out.get("alwaysAllow").is_none());
-        assert!(out.get("startup_timeout_sec").is_none());
-        assert_eq!(
-            out["command"],
-            serde_json::json!(["npx", "chrome-devtools-mcp@latest"])
-        );
-    }
-
-    #[test]
-    fn test_convert_no_command_no_url_skipped() {
-        let claude = serde_json::json!({ "env": { "K": "v" } });
-        assert!(OpenCodeAdapter::convert_one_server(&claude).is_none());
-    }
-
-    #[test]
-    fn test_claude_mcp_to_opencode_batch() {
-        let claude = serde_json::json!({
-            "playwright": { "command": "npx", "args": ["@playwright/mcp@latest"] },
-            "remote-x": { "type": "http", "url": "https://x/mcp" },
-            "broken": { "env": { "K": "v" } }
-        });
-        let out = OpenCodeAdapter::claude_mcp_to_opencode(&claude);
-        assert_eq!(out["playwright"]["type"], "local");
-        assert_eq!(out["remote-x"]["type"], "remote");
-        // 转不了的被跳过
-        assert!(out.get("broken").is_none());
-    }
-
-    #[test]
-    fn test_claude_mcp_to_opencode_non_object() {
-        let out = OpenCodeAdapter::claude_mcp_to_opencode(&serde_json::json!(null));
-        assert_eq!(out, serde_json::json!({}));
-        let out2 = OpenCodeAdapter::claude_mcp_to_opencode(&serde_json::json!("nope"));
-        assert_eq!(out2, serde_json::json!({}));
-    }
-
-    #[test]
-    fn test_merge_mcp_overwrites_same_name_keeps_extra() {
-        let mut config = serde_json::json!({
-            "mcp": {
-                "foo": { "type": "local", "command": ["OLD"] },
-                "bar": { "type": "local", "command": ["keep"] }
-            }
-        });
-        let incoming = serde_json::json!({
-            "foo": { "type": "local", "command": ["NEW"], "enabled": true }
-        });
-        OpenCodeAdapter::merge_mcp_into(&mut config, &incoming);
-        assert_eq!(config["mcp"]["foo"]["command"], serde_json::json!(["NEW"]));
-        assert_eq!(config["mcp"]["bar"]["command"], serde_json::json!(["keep"]));
-    }
-
-    #[test]
-    fn test_merge_mcp_empty_incoming_noop() {
-        let mut config = serde_json::json!({ "mcp": { "bar": { "x": 1 } } });
-        OpenCodeAdapter::merge_mcp_into(&mut config, &serde_json::json!({}));
-        assert_eq!(config["mcp"]["bar"]["x"], 1);
-    }
-
-    #[test]
-    fn test_merge_mcp_creates_block_when_absent() {
-        let mut config = serde_json::json!({ "model": "x/y" });
-        let incoming = serde_json::json!({ "foo": { "type": "local", "command": ["a"] } });
-        OpenCodeAdapter::merge_mcp_into(&mut config, &incoming);
-        assert_eq!(config["mcp"]["foo"]["command"], serde_json::json!(["a"]));
-        assert_eq!(config["model"], "x/y");
     }
 
     #[test]

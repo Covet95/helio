@@ -20,6 +20,29 @@ impl ClaudeCodeAdapter {
     fn global_settings_path(&self) -> PathBuf {
         self.config_dir.join("settings.json")
     }
+
+    /// ~/.claude.json 路径（顶层 mcpServers = Claude Code 全局 MCP 的事实位置）
+    fn claude_json_path(&self) -> PathBuf {
+        self.config_dir
+            .parent()
+            .map(|p| p.join(".claude.json"))
+            .unwrap_or_else(|| {
+                dirs::home_dir()
+                    .expect("Failed to get home directory")
+                    .join(".claude.json")
+            })
+    }
+
+    /// 读 ~/.claude.json 顶层 mcpServers。读不到/解析失败/无该键 → None（不报错）。
+    fn read_claude_json_mcp_servers(&self) -> Option<serde_json::Value> {
+        let path = self.claude_json_path();
+        if !path.exists() {
+            return None;
+        }
+        let content = fs::read_to_string(path).ok()?;
+        let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
+        parsed.get("mcpServers").cloned()
+    }
 }
 
 impl Default for ClaudeCodeAdapter {
@@ -46,19 +69,9 @@ impl ConfigAdapter for ClaudeCodeAdapter {
 
     /// Claude Code 的 MCP servers 存在 `~/.claude.json`（顶层 mcpServers = 全局），
     /// 不在 settings.json 里。优先读 .claude.json，找不到再回退 settings（兼容老式配置）。
-    #[cfg(feature = "tauri-gui")]
     fn read_mcp_servers_raw(&self) -> Result<Option<serde_json::Value>> {
-        if let Some(home) = dirs::home_dir() {
-            let claude_json = home.join(".claude.json");
-            if claude_json.exists() {
-                if let Ok(content) = fs::read_to_string(&claude_json) {
-                    if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&content) {
-                        if let Some(mcp) = cfg.get("mcpServers").cloned() {
-                            return Ok(Some(mcp));
-                        }
-                    }
-                }
-            }
+        if let Some(mcp) = self.read_claude_json_mcp_servers() {
+            return Ok(Some(mcp));
         }
 
         let config = self.read_config()?;
@@ -82,6 +95,12 @@ impl ConfigAdapter for ClaudeCodeAdapter {
                 env.remove(&format!("ANTHROPIC_DEFAULT_{role}_MODEL"));
                 env.remove(&format!("ANTHROPIC_DEFAULT_{role}_MODEL_NAME"));
             }
+        }
+
+        // MCP：把 ~/.claude.json 的 mcpServers 纳入共享配置（入库，可随数据库迁移）。
+        // claude.json 存在时优先，否则保留 config 里老式的 mcpServers。
+        if let Some(mcp) = self.read_claude_json_mcp_servers() {
+            shared["mcpServers"] = mcp;
         }
 
         shared
@@ -170,7 +189,37 @@ impl ConfigAdapter for ClaudeCodeAdapter {
             }
         }
 
+        // MCP 写回 ~/.claude.json（apply_auxiliary_config），settings.json 不写 mcpServers
+        if let Some(obj) = config.as_object_mut() {
+            obj.remove("mcpServers");
+        }
+
         config
+    }
+
+    fn apply_auxiliary_config(&self, shared_config: &serde_json::Value) -> Result<()> {
+        let Some(mcp) = shared_config.get("mcpServers").cloned() else {
+            return Ok(());
+        };
+        let path = self.claude_json_path();
+        let mut claude_json: serde_json::Value = if path.exists() {
+            fs::read_to_string(&path)
+                .ok()
+                .and_then(|c| serde_json::from_str(&c).ok())
+                .unwrap_or_else(|| serde_json::json!({}))
+        } else {
+            serde_json::json!({})
+        };
+        if let Some(obj) = claude_json.as_object_mut() {
+            obj.insert("mcpServers".to_string(), mcp);
+        }
+        let content = serde_json::to_string_pretty(&claude_json).context("Failed to serialize")?;
+        atomic_write_private(&path, content.as_bytes()).context("Failed to write claude.json")?;
+        Ok(())
+    }
+
+    fn managed_paths(&self) -> Vec<PathBuf> {
+        vec![self.config_path(), self.claude_json_path()]
     }
 
     fn write_config(&self, config: &serde_json::Value) -> Result<()> {
@@ -220,7 +269,13 @@ mod tests {
 
     #[test]
     fn test_extract_shared_config() {
-        let adapter = ClaudeCodeAdapter::new();
+        // 用 temp 目录隔离,避免读到真实 ~/.claude.json
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join(".claude");
+        fs::create_dir_all(&config_dir).unwrap();
+        let adapter = ClaudeCodeAdapter {
+            config_dir: config_dir.clone(),
+        };
 
         let config = serde_json::json!({
             "env": {
@@ -246,6 +301,48 @@ mod tests {
         // 其他字段应该保留
         assert_eq!(shared["env"]["OTHER_VAR"], "value");
         assert_eq!(shared["permissions"]["allow"][0], "bash");
+
+        let _ = fs::remove_dir_all(&config_dir);
+    }
+
+    #[test]
+    fn test_extract_includes_claude_json_mcp_servers() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join(".claude");
+        fs::create_dir_all(&config_dir).unwrap();
+        let adapter = ClaudeCodeAdapter {
+            config_dir: config_dir.clone(),
+        };
+        fs::write(
+            dir.path().join(".claude.json"),
+            r#"{"mcpServers":{"bing-search":{"command":"npx"}},"projects":{"p1":"kept"}}"#,
+        )
+        .unwrap();
+
+        let shared = adapter.extract_shared_config(&serde_json::json!({}));
+
+        assert_eq!(shared["mcpServers"]["bing-search"]["command"], "npx");
+
+        let _ = fs::remove_dir_all(&config_dir);
+    }
+
+    #[test]
+    fn test_extract_without_claude_json_keeps_settings_mcp() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join(".claude");
+        fs::create_dir_all(&config_dir).unwrap();
+        let adapter = ClaudeCodeAdapter {
+            config_dir: config_dir.clone(),
+        };
+
+        // 无 ~/.claude.json,settings.json 里有老式 mcpServers → 保留
+        let shared = adapter.extract_shared_config(&serde_json::json!({
+            "mcpServers": { "legacy": { "command": "npx" } }
+        }));
+
+        assert_eq!(shared["mcpServers"]["legacy"]["command"], "npx");
+
+        let _ = fs::remove_dir_all(&config_dir);
     }
 
     #[test]
@@ -267,7 +364,8 @@ mod tests {
             },
             "permissions": {
                 "allow": ["bash"]
-            }
+            },
+            "mcpServers": { "bing-search": { "command": "npx" } }
         });
 
         let merged = adapter.merge_config(&api_profile, &shared_config);
@@ -279,6 +377,76 @@ mod tests {
         // 共享配置应该保留
         assert_eq!(merged["env"]["OTHER_VAR"], "value");
         assert_eq!(merged["permissions"]["allow"][0], "bash");
+
+        // mcpServers 不写 settings.json（走 ~/.claude.json）
+        assert!(merged.get("mcpServers").is_none());
+    }
+
+    #[test]
+    fn test_apply_auxiliary_config_writes_claude_json_preserving_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join(".claude");
+        fs::create_dir_all(&config_dir).unwrap();
+        let adapter = ClaudeCodeAdapter {
+            config_dir: config_dir.clone(),
+        };
+        let claude_json = dir.path().join(".claude.json");
+        fs::write(&claude_json, r#"{"projects":{"p1":"kept"}}"#).unwrap();
+
+        let shared = serde_json::json!({
+            "mcpServers": { "bing-search": { "command": "npx" } }
+        });
+        adapter.apply_auxiliary_config(&shared).unwrap();
+
+        let written: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&claude_json).unwrap()).unwrap();
+        assert_eq!(written["mcpServers"]["bing-search"]["command"], "npx");
+        // 其他字段保留
+        assert_eq!(written["projects"]["p1"], "kept");
+
+        let _ = fs::remove_dir_all(&config_dir);
+    }
+
+    #[test]
+    fn test_apply_auxiliary_config_creates_file_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join(".claude");
+        fs::create_dir_all(&config_dir).unwrap();
+        let adapter = ClaudeCodeAdapter {
+            config_dir: config_dir.clone(),
+        };
+        let claude_json = dir.path().join(".claude.json");
+
+        let shared = serde_json::json!({
+            "mcpServers": { "cdp-bridge": { "command": "uvx" } }
+        });
+        adapter.apply_auxiliary_config(&shared).unwrap();
+
+        assert!(claude_json.exists());
+        let written: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&claude_json).unwrap()).unwrap();
+        assert_eq!(written["mcpServers"]["cdp-bridge"]["command"], "uvx");
+
+        let _ = fs::remove_dir_all(&config_dir);
+    }
+
+    #[test]
+    fn test_apply_auxiliary_config_no_mcp_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join(".claude");
+        fs::create_dir_all(&config_dir).unwrap();
+        let adapter = ClaudeCodeAdapter {
+            config_dir: config_dir.clone(),
+        };
+        let claude_json = dir.path().join(".claude.json");
+
+        adapter
+            .apply_auxiliary_config(&serde_json::json!({}))
+            .unwrap();
+
+        assert!(!claude_json.exists());
+
+        let _ = fs::remove_dir_all(&config_dir);
     }
 
     #[test]
