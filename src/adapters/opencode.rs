@@ -142,7 +142,9 @@ impl OpenCodeAdapter {
             return Ok(());
         }
         if self.config_path().exists() {
-            let _ = self.backup_config();
+            // 备份失败必须中止删除,否则配置被改写后无恢复手段。
+            self.backup_config()
+                .with_context(|| "Failed to back up opencode config before removal")?;
         }
         let next = Self::remove_provider_from_config(&config, &pid);
         self.write_config(&next)
@@ -692,10 +694,7 @@ mod tests {
 
         let mcp = merged["mcp"].as_object().unwrap();
         assert_eq!(mcp.len(), 1);
-        assert_eq!(
-            mcp["test-only-srv"]["command"],
-            serde_json::json!(["x"])
-        );
+        assert_eq!(mcp["test-only-srv"]["command"], serde_json::json!(["x"]));
     }
 
     #[test]

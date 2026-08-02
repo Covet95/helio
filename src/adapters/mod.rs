@@ -79,22 +79,7 @@ pub trait ConfigAdapter {
     }
 
     fn restore_files(&self, snapshots: &[FileSnapshot]) -> Result<()> {
-        let mut first_error = None;
-        for snapshot in snapshots {
-            let result: Result<()> = match &snapshot.contents {
-                Some(contents) => atomic_write_private(&snapshot.path, contents),
-                None if snapshot.path.exists() => {
-                    fs::remove_file(&snapshot.path).map_err(Into::into)
-                }
-                None => Ok(()),
-            };
-            if let Err(error) = result {
-                if first_error.is_none() {
-                    first_error = Some(error);
-                }
-            }
-        }
-        first_error.map_or(Ok(()), Err)
+        restore_snapshots(snapshots)
     }
 
     /// 应用 API 凭据到工具特定的位置（默认无操作）。
@@ -103,6 +88,25 @@ pub trait ConfigAdapter {
     fn apply_api_credentials(&self, _api_profile: &ApiProfile) -> Result<()> {
         Ok(())
     }
+}
+
+/// 把前镜像逐文件写回（存在 → 原子写回；不存在 → 删除）。失败不中断，收集首个错误。
+/// 供事务错误回滚与崩溃恢复 journal 共用。
+pub fn restore_snapshots(snapshots: &[FileSnapshot]) -> Result<()> {
+    let mut first_error = None;
+    for snapshot in snapshots {
+        let result: Result<()> = match &snapshot.contents {
+            Some(contents) => atomic_write_private(&snapshot.path, contents),
+            None if snapshot.path.exists() => fs::remove_file(&snapshot.path).map_err(Into::into),
+            None => Ok(()),
+        };
+        if let Err(error) = result {
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+        }
+    }
+    first_error.map_or(Ok(()), Err)
 }
 
 pub fn apply_profile_transaction(
@@ -165,6 +169,141 @@ pub fn apply_profile_configuration(
     })
 }
 
+/// 一次完整的配置切换（CLI / GUI / 托盘共用入口）：
+/// 写 journal（意图 + 前镜像 + 旧 active）→ 若已是目标 profile 则先清 active →
+/// DB 写 shared_config → 写配置文件（含备份）→ 记 active_profile → 删 journal。
+///
+/// 清 active 是为了「重复切换同一 profile」时的崩溃恢复：若不先清，半完成时
+/// `active_profile` 仍等于目标，恢复逻辑会误判「已完成」而保留半状态配置。
+///
+/// 软失败（本进程内 Err）会**立即**按 journal 回滚，不把半状态留给下次启动。
+/// 进程崩溃后由 `journal::recover_interrupted_switch` 在下次启动时完成同样恢复。
+pub fn apply_profile_switch(
+    db: &crate::db::Database,
+    target_app: TargetApp,
+    api_profile: &ApiProfile,
+    shared_config: &serde_json::Value,
+    create_backup: bool,
+) -> Result<ProfileApplicationResult> {
+    let profile_id = api_profile
+        .id
+        .ok_or_else(|| anyhow::anyhow!("Profile '{}' has no id", api_profile.name))?;
+    let adapter = get_adapter(target_app);
+    let journal = journal::begin_switch(
+        db,
+        adapter.as_ref(),
+        target_app,
+        profile_id,
+        &api_profile.name,
+    )?;
+
+    let result = (|| -> Result<ProfileApplicationResult> {
+        // 制造 `active != target` 窗口：仅当当前 active 已是目标时需要。
+        // 不同 profile 之间切换时 active 本来就不是目标，无需动。
+        let already_active = db
+            .get_active_profile(target_app)?
+            .map(|a| a.profile_id == profile_id)
+            .unwrap_or(false);
+        if already_active {
+            db.clear_active_profile(target_app)?;
+        }
+        db.save_shared_config(target_app, shared_config.clone())?;
+        let applied =
+            apply_profile_configuration(target_app, api_profile, shared_config, create_backup)?;
+        db.set_active_profile(target_app, profile_id)?;
+        Ok(applied)
+    })();
+
+    match result {
+        Ok(applied) => {
+            if let Some(journal) = journal {
+                if let Err(error) = journal.commit() {
+                    // 切换已完成，清理失败仅导致下次启动多一次「已完成」判定。
+                    tracing::warn!("{error:#}");
+                }
+            }
+            Ok(applied)
+        }
+        Err(error) => {
+            // 软失败立即按 journal 回滚（与启动恢复同一路径），避免半状态一直留到下次启动。
+            // 无 journal 的场景（:memory: 测试库）只能返回原错误。
+            if journal.is_some() {
+                if let Err(recover_error) = journal::recover_interrupted_switch(db) {
+                    return Err(anyhow::anyhow!(
+                        "{error}; immediate journal recovery also failed: {recover_error}"
+                    ));
+                }
+            }
+            Err(error)
+        }
+    }
+}
+
+#[cfg(test)]
+mod switch_journal_tests {
+    use super::*;
+    use crate::db::Database;
+    use crate::models::ApiProfile;
+    use std::fs;
+    use std::path::PathBuf;
+
+    // 验证：begin_switch 遇到残留 journal 时会先恢复，且恢复失败时拒绝开新事务。
+    #[test]
+    fn begin_switch_refuses_to_overwrite_unrecoverable_journal() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let db_path = dir.path().join("db.sqlite");
+        let db = Database::open(&db_path)?;
+
+        // 未知 version：recover 会忽略并保留 journal。
+        let journal_path = PathBuf::from(format!("{}.switch-journal.json", db_path.display()));
+        fs::write(
+            &journal_path,
+            br#"{
+              "version": 999,
+              "app": "claude-code",
+              "profile_id": 1,
+              "profile_name": "x",
+              "created_at": 0,
+              "previous_shared_config": null,
+              "snapshots": []
+            }"#,
+        )?;
+
+        struct Dummy;
+        impl ConfigAdapter for Dummy {
+            fn config_path(&self) -> PathBuf {
+                PathBuf::from("/tmp/unused")
+            }
+            fn read_config(&self) -> Result<serde_json::Value> {
+                Ok(serde_json::json!({}))
+            }
+            fn extract_shared_config(&self, c: &serde_json::Value) -> serde_json::Value {
+                c.clone()
+            }
+            fn merge_config(&self, _: &ApiProfile, s: &serde_json::Value) -> serde_json::Value {
+                s.clone()
+            }
+            fn write_config(&self, _: &serde_json::Value) -> Result<()> {
+                Ok(())
+            }
+            fn backup_config(&self) -> Result<PathBuf> {
+                Ok(PathBuf::from("/tmp/unused"))
+            }
+            fn cleanup_old_backups(&self, _: usize) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let err = journal::begin_switch(&db, &Dummy, TargetApp::ClaudeCode, 1, "x").unwrap_err();
+        assert!(
+            err.to_string().contains("恢复未完成") || err.to_string().contains("journal"),
+            "unexpected: {err}"
+        );
+        assert!(journal_path.exists(), "不得覆盖未恢复的 journal");
+        Ok(())
+    }
+}
+
 pub fn backfill_missing_top_level(live: &mut serde_json::Value, previous: &serde_json::Value) {
     if let (Some(live_object), Some(previous_object)) = (live.as_object_mut(), previous.as_object())
     {
@@ -206,9 +345,8 @@ fn backfill_mcp_entries(live: &mut serde_json::Value, previous: &serde_json::Val
 
         // openclaw: mcp.servers 深一层补缺
         if *key == "mcp" {
-            if let Some(previous_servers) = previous_value
-                .get("servers")
-                .and_then(|v| v.as_object())
+            if let Some(previous_servers) =
+                previous_value.get("servers").and_then(|v| v.as_object())
             {
                 if let Some(live_servers) = live_value
                     .get_mut("servers")
@@ -229,6 +367,7 @@ pub mod backup;
 pub mod claude_code;
 pub mod codex;
 pub mod hermes;
+pub mod journal;
 pub mod openclaw;
 pub mod opencode;
 pub mod pi;

@@ -3,11 +3,12 @@ import { Button } from '../components/common/Button';
 import { Spinner } from '../components/common/Spinner';
 import { PageHeader } from '../components/common/PageHeader';
 import {
-  RefreshCw, Boxes, Sparkles, Webhook, ShieldCheck, ChevronDown, Terminal, Globe, AlertCircle, Layers, FileCog, Save, X, CheckCircle2, SlidersHorizontal,
+  RefreshCw, Boxes, Sparkles, Webhook, ShieldCheck, ChevronDown, Terminal, Globe, AlertCircle, Layers, FileCog, Save, X, CheckCircle2, SlidersHorizontal, History, RotateCcw,
 } from 'lucide-react';
 import type { TargetApp } from '../types';
 import { SUPPORTED_TOOLS } from '../types';
 import { cn, humanizeError } from '../lib/utils';
+import type { ConfigBackupInfo } from '../lib/tauri';
 
 interface McpServerCfg {
   command?: string;
@@ -197,6 +198,9 @@ export default function ConfigPage() {
                 </>
               )}
             </Section>
+
+            {/* 配置备份（切换时自动生成，可回滚） */}
+            <ConfigBackups targetApp={targetApp} />
 
             {/* Codex 行为设置（仅 Codex） */}
             {targetApp === 'codex' && <CodexBehaviorSettings current={other} onSaved={load} />}
@@ -431,6 +435,121 @@ function CodexBehaviorSettings({
 
         <div className="text-[11px] text-ink-faint">
           下拉选「(不设置)」会从 config.toml 删除该字段。保存前自动备份并校验 TOML，标注「非官方」的为魔改字段。
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ConfigBackups({ targetApp }: { targetApp: TargetApp }) {
+  const [backups, setBackups] = useState<ConfigBackupInfo[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [restoring, setRestoring] = useState<string | null>(null);
+  const [err, setErr] = useState('');
+  const [msg, setMsg] = useState('');
+
+  const load = async () => {
+    setLoading(true);
+    setErr('');
+    try {
+      const { tauriApi } = await import('../lib/tauri');
+      setBackups(await tauriApi.listConfigBackups(targetApp));
+    } catch (e) {
+      setErr('读取配置备份失败: ' + humanizeError(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [targetApp]);
+
+  const restore = async (b: ConfigBackupInfo) => {
+    const name = b.path.split('/').pop() || b.path;
+    if (
+      !window.confirm(
+        `确定恢复备份 ${name}？\n\n恢复前会自动备份当前配置；恢复内容将覆盖配置文件:\n${b.target ?? '（未知，此备份不可恢复）'}`,
+      )
+    ) {
+      return;
+    }
+    setRestoring(b.path);
+    setErr('');
+    setMsg('');
+    try {
+      const { tauriApi } = await import('../lib/tauri');
+      await tauriApi.restoreConfigBackup(targetApp, b.path);
+      setMsg('恢复完成');
+      load();
+    } catch (e) {
+      setErr('恢复失败: ' + humanizeError(e));
+    } finally {
+      setRestoring(null);
+    }
+  };
+
+  return (
+    <section className="overflow-hidden rounded-lg border border-line bg-card">
+      <div className="flex items-center gap-2 border-b border-line px-4 py-2.5">
+        <History size={15} className="text-accent" />
+        <span className="text-[14px] font-semibold text-ink">配置备份</span>
+        <span className="rounded-md bg-elevated px-1.5 py-0.5 text-[11px] font-medium text-ink-dim">
+          {backups?.length ?? 0}
+        </span>
+        <div className="ml-auto flex items-center gap-2">
+          <Button variant="secondary" onClick={load} disabled={loading} size="sm">
+            <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
+            {loading ? '读取中…' : '刷新'}
+          </Button>
+        </div>
+      </div>
+      <div className="p-4">
+        {msg && (
+          <div className="mb-3 flex items-center gap-2 rounded-md border border-ok/30 bg-ok/8 px-3 py-2 text-[12px] text-ok">
+            <CheckCircle2 size={14} className="shrink-0" />
+            <span className="flex-1">{msg}</span>
+          </div>
+        )}
+        {err && (
+          <div className="mb-3 flex items-center gap-2 rounded-md border border-danger/30 bg-danger/8 px-3 py-2 text-[12px] text-danger">
+            <AlertCircle size={14} className="shrink-0" />
+            <span className="flex-1 whitespace-pre-wrap break-words">{err}</span>
+          </div>
+        )}
+        {backups && backups.length === 0 ? (
+          <Empty>暂无备份（每次切换/保存配置时自动生成，保留最近 10 个）</Empty>
+        ) : (
+          <ul className="space-y-2">
+            {backups?.map((b) => (
+              <li
+                key={b.path}
+                className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-md border border-line bg-surface px-3 py-2"
+              >
+                <span className="shrink-0 rounded bg-elevated px-1.5 py-0.5 text-[11px] text-ink-dim">{b.time}</span>
+                <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-ink-faint" title={b.path}>
+                  {b.path}
+                </span>
+                {b.target ? (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => restore(b)}
+                    disabled={restoring !== null}
+                  >
+                    <RotateCcw size={13} className={restoring === b.path ? 'animate-spin' : ''} />
+                    {restoring === b.path ? '恢复中…' : '恢复'}
+                  </Button>
+                ) : (
+                  <span className="text-[11px] text-ink-faint">格式异常</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+        <div className="mt-3 text-[11px] text-ink-faint">
+          恢复前自动备份当前配置；恢复目标由备份文件名推导，仅限本工具生成的备份。
         </div>
       </div>
     </section>

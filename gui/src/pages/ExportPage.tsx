@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Button } from '../components/common/Button';
 import { PageHeader } from '../components/common/PageHeader';
-import { Download, Upload } from 'lucide-react';
+import { Download, Upload, FolderCog } from 'lucide-react';
 import { ConfirmDialog } from '../components/common/Modal';
 import { humanizeError } from '../lib/utils';
 
@@ -10,8 +10,11 @@ type Feedback = { text: string; kind: 'success' | 'error' | 'info' };
 export default function ExportPage() {
   const [importing, setImporting] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [skillsImporting, setSkillsImporting] = useState(false);
+  const [skillsExporting, setSkillsExporting] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [confirmImport, setConfirmImport] = useState(false);
+  const [confirmSkillsImport, setConfirmSkillsImport] = useState(false);
 
   const handleExport = async () => {
     try {
@@ -62,6 +65,59 @@ export default function ExportPage() {
     }
   };
 
+  const handleSkillsExport = async () => {
+    try {
+      setSkillsExporting(true);
+      setFeedback(null);
+      const { save } = await import('@tauri-apps/plugin-dialog');
+      const filePath = await save({
+        defaultPath: `helio-skills-${Date.now()}.tar.gz`,
+        filters: [{ name: 'Skills 备份', extensions: ['tar.gz', 'tgz'] }],
+      });
+      if (!filePath) { setFeedback({ text: '导出已取消', kind: 'info' }); return; }
+      const { tauriApi } = await import('../lib/tauri');
+      const result = await tauriApi.exportSkills(filePath);
+      setFeedback({
+        text: result.total > 0
+          ? `Skills 导出成功：共 ${result.total} 个（${result.apps.map(a => `${a.app} ${a.count}`).join('、')}）`
+          : '未发现任何 Skills',
+        kind: result.total > 0 ? 'success' : 'info',
+      });
+    } catch (err) {
+      setFeedback({ text: `Skills 导出失败: ${humanizeError(err)}`, kind: 'error' });
+    } finally {
+      setSkillsExporting(false);
+    }
+  };
+
+  const handleSkillsImport = async () => {
+    try {
+      setSkillsImporting(true);
+      setConfirmSkillsImport(false);
+      setFeedback(null);
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const filePath = await open({
+        multiple: false,
+        filters: [{ name: 'Skills 备份', extensions: ['tar.gz', 'tgz'] }],
+      });
+      if (!filePath) { setFeedback({ text: '导入已取消', kind: 'info' }); return; }
+      const { tauriApi } = await import('../lib/tauri');
+      const result = await tauriApi.importSkills(filePath as string);
+      if (result.skipped > 0) {
+        setFeedback({
+          text: `Skills 导入完成：恢复 ${result.restored} 个，跳过同名 ${result.skipped} 个（${result.skipped_names.join('、')}）`,
+          kind: 'success',
+        });
+      } else {
+        setFeedback({ text: `Skills 导入完成：恢复 ${result.restored} 个`, kind: 'success' });
+      }
+    } catch (err) {
+      setFeedback({ text: `Skills 导入失败: ${humanizeError(err)}`, kind: 'error' });
+    } finally {
+      setSkillsImporting(false);
+    }
+  };
+
   return (
     <div className="min-h-full">
       <PageHeader title="备份 / 恢复" />
@@ -87,8 +143,23 @@ export default function ExportPage() {
           <ActionRow
             icon={<Upload size={20} className="text-opencode" />}
             title="导入数据库"
-            meta="覆盖前自动备份"
+            meta="仅接受 Helio 备份 · 覆盖前自动备份"
             button={<Button variant="secondary" onClick={() => setConfirmImport(true)} disabled={importing}><Upload size={16} />{importing ? '导入中…' : '导入'}</Button>}
+          />
+        </div>
+
+        <div className="mt-4 overflow-hidden rounded-lg border border-line bg-card">
+          <ActionRow
+            icon={<FolderCog size={20} className="text-accent" />}
+            title="导出 Skills"
+            meta="claude-code / codex / opencode / pi / hermes / openclaw 全部 Skills 目录"
+            button={<Button onClick={handleSkillsExport} disabled={skillsExporting}><Download size={16} />{skillsExporting ? '导出中…' : '导出'}</Button>}
+          />
+          <ActionRow
+            icon={<FolderCog size={20} className="text-opencode" />}
+            title="导入 Skills"
+            meta="tar.gz · 整体校验 · 同名跳过"
+            button={<Button variant="secondary" onClick={() => setConfirmSkillsImport(true)} disabled={skillsImporting}><Upload size={16} />{skillsImporting ? '导入中…' : '导入'}</Button>}
           />
         </div>
       </div>
@@ -96,11 +167,21 @@ export default function ExportPage() {
       {confirmImport && (
         <ConfirmDialog
           title="导入数据库"
-          message="当前数据库会被覆盖。导入前会自动备份当前库（带时间戳保留，可回退），且仅在所选文件是合法数据库时才执行。"
+          message="当前数据库会被覆盖。仅接受 Helio 导出的备份文件，校验不通过则不会改动现有数据。导入前自动备份当前库（带时间戳，最多保留 10 份，可回退）。"
           confirmText="导入"
           danger
           onCancel={() => setConfirmImport(false)}
           onConfirm={handleImport}
+        />
+      )}
+
+      {confirmSkillsImport && (
+        <ConfirmDialog
+          title="导入 Skills"
+          message="将从备份恢复到各工具对应目录。归档会先整体校验（拒绝路径穿越、异常条目与超大文件），校验不通过不写入任何文件；本地已存在的同名 Skill 会跳过、不会覆盖。"
+          confirmText="导入"
+          onCancel={() => setConfirmSkillsImport(false)}
+          onConfirm={handleSkillsImport}
         />
       )}
     </div>

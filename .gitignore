@@ -7,6 +7,10 @@ gui/node_modules/
 *.backup
 .switch-api/
 
+# 切换事务 journal：含配置前镜像与 shared_config，可能有明文 API key
+*.switch-journal.json
+.switch-journal.json
+
 # 开发过程产物（brainstorm / 计划），不纳入版本库
 .planning/
 .superpowers/

@@ -3,6 +3,7 @@ use colored::Colorize;
 use std::io::{self, Write};
 
 pub mod secure_fs;
+pub mod skills_backup;
 
 /// 打印成功消息
 pub fn success(msg: &str) {

@@ -94,6 +94,17 @@ export const tauriApi = {
   importDatabase: (inputPath: string) =>
     command<void>('import_database', { inputPath }),
 
+  // Skills 备份/恢复
+  exportSkills: (outputPath: string) =>
+    command<SkillsExportResult>('export_skills', { outputPath }, {
+      apps: [],
+      total: 0,
+      path: '',
+    }),
+
+  importSkills: (inputPath: string) =>
+    command<SkillsImportResult>('import_skills', { inputPath }),
+
   getLocalConfigInfo: (targetApp: TargetApp) =>
     command<{
       mcp_servers: Record<string, any>;
@@ -106,6 +117,13 @@ export const tauriApi = {
       hooks: {},
       permissions: {},
     }),
+
+  // 配置备份列表 / 恢复
+  listConfigBackups: (targetApp: TargetApp) =>
+    command<ConfigBackupInfo[]>('list_config_backups', { targetApp }, []),
+
+  restoreConfigBackup: (targetApp: TargetApp, backupFile: string) =>
+    command<string>('restore_config_backup', { targetApp, backupFile }),
 
   // 从本地导入
   scanLocalApi: (targetApp: TargetApp) =>
@@ -203,4 +221,22 @@ export interface CcSwitchProvider {
   model_thinking_enabled?: boolean;
   service_tier?: string;
   is_current: boolean;
+}
+
+export interface ConfigBackupInfo {
+  path: string;
+  time: string;
+  target: string | null;
+}
+
+export interface SkillsExportResult {
+  apps: { app: string; count: number }[];
+  total: number;
+  path: string;
+}
+
+export interface SkillsImportResult {
+  restored: number;
+  skipped: number;
+  skipped_names: string[];
 }

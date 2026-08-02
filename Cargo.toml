@@ -49,6 +49,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 # Utilities
 uuid = { version = "1.10", features = ["v4", "serde"] }
 
+# Archive (skills backup)
+tar = "0.4"
+flate2 = "1.0"
+sha2 = "0.10"
+
 [dev-dependencies]
 tempfile = "3.10"
 

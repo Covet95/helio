@@ -122,7 +122,18 @@ switch-api profile add official --url https://api.anthropic.com --key YOUR_KEY
 switch-api switch claude-code official
 switch-api status
 switch-api export --output backup.db
+switch-api import backup.db
 ```
+
+### 备份与恢复
+
+导出是**一致性快照**（`VACUUM INTO`），单文件、含尚未落盘到主文件的已提交写入，权限固定为仅当前用户可读写（0600），且不会改动你选择的导出目录本身的权限。
+
+导入只接受 Helio 自己的数据库：先只读校验（完整性 + `api_profiles` schema 特征），再在私有 staging 副本上跑一遍 schema 迁移，全部通过才原子替换现有库。任一步失败都中止，现有数据不受影响。旧版本导出的备份可以直接导入，替换时自动升级 schema。
+
+替换前会把现有库快照成 `db.backup.<时间戳>.sqlite`（与数据库同目录），最多保留 10 份，超出自动清理；schema 迁移前的 `*.premigrate.*` 备份同样保留 10 份。**这些备份含明文 API Key**，与数据库一样是 0600，转存前请注意。
+
+恢复：关闭 Helio，把想要的 `db.backup.*.sqlite` 通过 `switch-api import` 导入即可（不要手工改名覆盖，那样会漏掉 `-wal` 边车文件的清理）。
 
 ### 模型探活（GUI「测试模型」）
 

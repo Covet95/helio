@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use switch_api::adapters::get_adapter;
 use switch_api::db::Database;
 use switch_api::models::{
@@ -238,7 +238,17 @@ pub enum KeyCommands {
 }
 
 pub fn execute(cli: Cli) -> Result<()> {
+    // 导入要删除并替换 live 文件，必须在打开连接之前处理：
+    // 持着旧连接做替换会让它继续指向已删除的 inode，还可能把缓存的 WAL 状态写回。
+    if let Commands::Import { input, force } = cli.command {
+        return cmd_import(input, &cli.db_path, force);
+    }
+
     let db = Database::open(&cli.db_path)?;
+    // 上次切换可能在写盘与写 DB 之间崩溃，按 journal 恢复半状态。
+    if let Err(error) = switch_api::adapters::journal::recover_interrupted_switch(&db) {
+        tracing::warn!("恢复中断的切换失败(已跳过): {error:#}");
+    }
 
     match cli.command {
         Commands::Init { target_app } => {
@@ -358,15 +368,14 @@ pub fn execute(cli: Cli) -> Result<()> {
             cmd_status(&db, verbose)?;
         }
         Commands::Sync { target_app } => {
-            let target = parse_target_app(&target_app)?;
-            cmd_sync(&db, target)?;
+            cmd_sync(&db, parse_target_app(&target_app)?)?;
         }
         Commands::Export { output } => {
             cmd_export(&cli.db_path, output)?;
         }
-        Commands::Import { input, force } => {
-            cmd_import(input, &cli.db_path, force)?;
-        }
+        // 已在函数开头提前返回：导入既不能持有 live 连接，也不该要求 live 库能打开
+        // （库损坏时导入正是恢复手段）。
+        Commands::Import { .. } => unreachable!(),
     }
 
     Ok(())
@@ -765,9 +774,9 @@ fn cmd_switch(
         .map(|config| config.config);
     let shared_config =
         switch_api::adapters::resolve_shared_config(target_app, persisted_shared_config)?;
-    db.save_shared_config(target_app, shared_config.clone())?;
 
-    let applied = switch_api::adapters::apply_profile_configuration(
+    let applied = switch_api::adapters::apply_profile_switch(
+        db,
         target_app,
         &api_profile,
         &shared_config,
@@ -776,9 +785,6 @@ fn cmd_switch(
     if let Some(backup_path) = applied.backup_path {
         utils::success(&format!("已备份到: {}", backup_path.display()));
     }
-
-    // 7. 更新活动记录
-    db.set_active_profile(target_app, api_profile.id.unwrap())?;
 
     utils::success(&format!("已切换到 {}", profile_name));
     println!("  配置文件: {}", applied.config_path.display());
@@ -827,8 +833,9 @@ fn cmd_sync(db: &Database, target_app: TargetApp) -> Result<()> {
     Ok(())
 }
 
-fn cmd_export(db_path: &PathBuf, output: PathBuf) -> Result<()> {
-    std::fs::copy(db_path, &output)?;
+fn cmd_export(db_path: &Path, output: PathBuf) -> Result<()> {
+    // 快照而非文件拷贝：拷主文件会漏掉还在 -wal 里的已提交数据。
+    Database::snapshot_to(db_path, &output)?;
 
     let size = std::fs::metadata(&output)?.len();
     utils::success(&format!(
@@ -840,30 +847,24 @@ fn cmd_export(db_path: &PathBuf, output: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn cmd_import(input: PathBuf, db_path: &PathBuf, force: bool) -> Result<()> {
-    // 检查输入文件是否存在
-    if !input.exists() {
-        anyhow::bail!("输入文件不存在: {}", input.display());
+fn cmd_import(input: PathBuf, db_path: &Path, force: bool) -> Result<()> {
+    // 覆盖现有数据库前先校验：只读地确认这确实是 Helio 库。
+    // 旧实现用 `Database::open` 当校验，而 `CREATE TABLE IF NOT EXISTS` 会把任意
+    // SQLite 文件补全成"合法"库——实测能把浏览器书签库当备份导入并清空全部档案。
+    Database::validate_import_candidate(&input)
+        .map_err(|e| anyhow::anyhow!("输入文件不是 Helio 数据库: {}", e))?;
+
+    if db_path.exists() && !force && !utils::confirm("将覆盖现有数据库，是否继续？")?
+    {
+        utils::info("已取消");
+        return Ok(());
     }
 
-    // 覆盖现有数据库前，先验证输入文件是合法 SQLite 库，
-    // 避免选错文件（损坏/非数据库）时把现有数据覆盖掉才发现。
-    Database::open(&input).map_err(|e| anyhow::anyhow!("输入文件不是合法的数据库: {}", e))?;
-
-    if db_path.exists() {
-        if !force && !utils::confirm("将覆盖现有数据库，是否继续？")? {
-            utils::info("已取消");
-            return Ok(());
-        }
-
-        // 备份带时间戳，保留历史备份不互相覆盖；即使 --force 也始终备份以便回退。
-        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-        let backup = db_path.with_file_name(format!("db.backup.{}.sqlite", timestamp));
-        std::fs::copy(db_path, &backup)?;
+    // 备份 + staging + 原子替换 + 清理陈旧 -wal 都在 core 里完成，
+    // GUI 与 CLI 共用同一套逻辑；即使 --force 也始终备份以便回退。
+    if let Some(backup) = Database::replace_file_from_import(&input, db_path)? {
         utils::success(&format!("已备份现有数据库到: {}", backup.display()));
     }
-
-    std::fs::copy(&input, db_path)?;
     utils::success(&format!("已导入数据库从: {}", input.display()));
 
     Ok(())

@@ -22,6 +22,10 @@ pub fn run() {
     }
 
     let db = Database::open(&db_path).expect("Failed to open database");
+    // 上次切换可能在写盘与写 DB 之间崩溃，按 journal 恢复半状态（失败不阻止启动）。
+    if let Err(error) = switch_api::adapters::journal::recover_interrupted_switch(&db) {
+        eprintln!("[Helio] failed to recover interrupted switch: {error:#}");
+    }
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -53,9 +57,13 @@ pub fn run() {
             commands::main_cmds::copy_text,
             commands::main_cmds::get_shared_config,
             commands::main_cmds::save_shared_config,
+            commands::main_cmds::list_config_backups,
+            commands::main_cmds::restore_config_backup,
             commands::main_cmds::get_status,
             commands::main_cmds::export_database,
             commands::main_cmds::import_database,
+            commands::main_cmds::export_skills,
+            commands::main_cmds::import_skills,
             commands::main_cmds::scan_local_mcp_servers,
             commands::main_cmds::scan_local_skills,
             commands::main_cmds::get_local_config_info,

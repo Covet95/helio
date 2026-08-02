@@ -2,13 +2,27 @@ use crate::models::{
     ActiveProfile, ApiProfile, ClaudeProfileFields, CodexProfileFields, HermesProfileFields,
     OpenClawProfileFields, OpenCodeProfileFields, SharedConfig, TargetApp,
 };
-use anyhow::Result;
-use rusqlite::{params, Connection, OptionalExtension};
+use anyhow::{Context, Result};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-use crate::utils::secure_fs::{copy_private, ensure_private_dir, ensure_private_file};
+use crate::utils::secure_fs::{
+    copy_private, ensure_private_dir, ensure_private_file, secure_export_file,
+};
+
+/// 自动数据库备份的保留个数（`db.backup.*` 与 `*.premigrate.*` 各自独立计数）。
+const DB_BACKUP_KEEP: usize = 10;
+
+/// 数据库文件所在目录。`Path::parent()` 对裸文件名（如 `--db-path live.sqlite`）
+/// 返回 `Some("")`，直接拿去建目录/改权限会失败，这里归一成 `.`。
+fn parent_dir(path: &Path) -> PathBuf {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
+}
 
 pub struct Database {
     conn: Connection,
@@ -44,9 +58,7 @@ impl Database {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
         if path != Path::new(":memory:") {
-            if let Some(parent) = path.parent() {
-                ensure_private_dir(parent)?;
-            }
+            ensure_private_dir(&parent_dir(path))?;
         }
         let conn = Connection::open(path)?;
         if path != Path::new(":memory:") {
@@ -62,6 +74,11 @@ impl Database {
         let db = Self { conn };
         db.init_schema()?;
         Ok(db)
+    }
+
+    /// 数据库文件路径（`:memory:` 为 None）。用于定位事务 journal 等旁车文件。
+    pub fn db_path(&self) -> Option<PathBuf> {
+        self.conn.path().map(PathBuf::from)
     }
 
     /// 初始化数据库表结构
@@ -260,9 +277,22 @@ impl Database {
         // 备份库文件(若是文件库)。:memory: 没有路径，跳过备份。
         if let Some(db_path) = self.conn.path() {
             if db_path != ":memory:" && !db_path.is_empty() {
-                let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
+                let ts = chrono::Local::now().format("%Y%m%d_%H%M%S_%f");
                 let backup = format!("{db_path}.premigrate.{ts}.sqlite");
-                let _ = copy_private(Path::new(db_path), Path::new(&backup));
+                // 迁移会重建整表,备份失败必须中止迁移,否则旧数据无兜底。
+                copy_private(Path::new(db_path), Path::new(&backup)).with_context(|| {
+                    format!("Failed to back up database before migration: {}", backup)
+                })?;
+                // 备份含明文 key，必须轮转；文件名形如 `db.sqlite.premigrate.*`。
+                let path = Path::new(db_path);
+                if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                    crate::adapters::backup::cleanup_prefix(
+                        &parent_dir(path),
+                        &format!("{file_name}.premigrate."),
+                        DB_BACKUP_KEEP,
+                    )
+                    .with_context(|| "Failed to rotate pre-migration backups")?;
+                }
             }
         }
 
@@ -333,48 +363,283 @@ impl Database {
         Ok(())
     }
 
+    /// 把 WAL 内容合并进主文件并截断 `-wal`。
+    /// 用于 rename 主文件之前——rename 不会搬走边车文件，未合并的写入会丢失。
+    fn checkpoint_truncate(&self) -> Result<()> {
+        self.conn
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .context("Failed to checkpoint write-ahead log")?;
+        Ok(())
+    }
+
+    /// 删除数据库的 `-wal` / `-shm` 边车文件。
+    ///
+    /// 库以 WAL 模式打开，主文件可能落后于 `-wal`。替换或恢复主文件时若把旧 `-wal` 留在原地，
+    /// SQLite 会用它去"恢复"新主文件，导致读回被替换掉的旧数据（实测可复现）。
+    fn remove_sidecar_files(db_path: &Path) -> Result<()> {
+        for suffix in ["-wal", "-shm"] {
+            let mut name = db_path.as_os_str().to_os_string();
+            name.push(suffix);
+            let sidecar = PathBuf::from(name);
+            if sidecar.exists() {
+                fs::remove_file(&sidecar)
+                    .with_context(|| format!("Failed to remove {}", sidecar.display()))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// 尽力清掉整个 staging 目录。
+    ///
+    /// staging 放在独立目录而不是直接放数据库目录：在它上面跑迁移会派生出边车文件和
+    /// `*.premigrate.*` 备份（同样含明文密钥），逐个按名字删容易漏。整目录删除既覆盖
+    /// 失败中止，也覆盖成功替换后的收尾。
+    fn discard_staging(staging_dir: &Path) {
+        let _ = fs::remove_dir_all(staging_dir);
+    }
+
+    /// 生成 `source` 的一致快照到 `dest`（单文件，含尚未 checkpoint 的 WAL 数据）。
+    ///
+    /// 用 `VACUUM INTO` 而非文件拷贝：拷主文件会丢 WAL 里已提交的数据，
+    /// 连带 `-wal`/`-shm` 一起拷则得到三文件、不可移植且拷贝期间无快照隔离的备份。
+    /// 只读连接即可执行 `VACUUM INTO`，不会写入源库。
+    ///
+    /// 覆盖既有 `dest` 时先写同目录临时文件，完整后再替换：失败保留旧备份
+    /// （旧实现先 `remove_file(dest)` 再 VACUUM，磁盘满/中断会把唯一备份抹掉）。
+    pub fn snapshot_to(source: &Path, dest: &Path) -> Result<()> {
+        if !source.exists() {
+            anyhow::bail!("Database does not exist: {}", source.display());
+        }
+
+        let parent = parent_dir(dest);
+        // 用户导出路径可能尚未存在父目录；只创建 dest 的父目录，
+        // 且不改权限（导出目录属于用户选择，不能 ensure_private_dir）。
+        if parent != Path::new(".") {
+            fs::create_dir_all(&parent).with_context(|| {
+                format!("Failed to create export directory {}", parent.display())
+            })?;
+        }
+
+        // VACUUM INTO 要求目标不存在；写到唯一临时名，成功后再替换 dest。
+        let tmp = parent.join(format!(
+            ".{}.tmp-{}",
+            dest.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("export.db"),
+            Uuid::new_v4()
+        ));
+
+        let snapshot_result: Result<()> = (|| {
+            let conn = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .with_context(|| format!("Failed to read database {}", source.display()))?;
+            let tmp_sql = tmp.to_string_lossy().replace('\'', "''");
+            conn.execute_batch(&format!("VACUUM INTO '{tmp_sql}';"))
+                .with_context(|| {
+                    format!(
+                        "Failed to write database snapshot to {}. \
+                         请确认目标路径可写且磁盘空间充足。",
+                        dest.display()
+                    )
+                })?;
+
+            // VACUUM INTO 产出的文件是 0644（随 umask），凭据库必须收紧到 owner-only。
+            secure_export_file(&tmp)?;
+
+            // 优先直接 rename。目标已存在时（尤其 Windows 不能覆盖 rename）先把旧文件
+            // 挪到旁路再替换；新文件此时已完整，失败则尽力把旧文件移回。
+            match fs::rename(&tmp, dest) {
+                Ok(()) => Ok(()),
+                Err(first) if dest.exists() => {
+                    let bak = parent.join(format!(
+                        ".{}.replace-{}",
+                        dest.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("export.db"),
+                        Uuid::new_v4()
+                    ));
+                    fs::rename(dest, &bak).with_context(|| {
+                        format!(
+                            "Failed to move old export aside {} (also: {first})",
+                            dest.display()
+                        )
+                    })?;
+                    if let Err(error) = fs::rename(&tmp, dest) {
+                        let _ = fs::rename(&bak, dest);
+                        return Err(error).with_context(|| {
+                            format!("Failed to replace export {}", dest.display())
+                        });
+                    }
+                    let _ = fs::remove_file(&bak);
+                    Ok(())
+                }
+                Err(error) => Err(error)
+                    .with_context(|| format!("Failed to move snapshot to {}", dest.display())),
+            }
+        })();
+
+        if snapshot_result.is_err() || tmp.exists() {
+            let _ = fs::remove_file(&tmp);
+        }
+        snapshot_result
+    }
+
+    /// 导入前校验候选文件是否为 Helio 档案库。**全程只读**，不写入也不迁移候选文件。
+    ///
+    /// 不能用 `Database::open` 当校验：`init_schema` 的 `CREATE TABLE IF NOT EXISTS`
+    /// 会把任意 SQLite 文件（甚至 0 字节文件）补全成"合法"库，实测可把浏览器书签库
+    /// 当备份导入并清空全部档案。`PRAGMA quick_check` 也不够——书签库同样返回 ok。
+    pub fn validate_import_candidate(path: &Path) -> Result<()> {
+        if !path.exists() {
+            anyhow::bail!("Input database does not exist: {}", path.display());
+        }
+        // 0 字节文件会被 SQLite 当作合法空库接受。
+        let size = fs::metadata(path)
+            .with_context(|| format!("Failed to inspect {}", path.display()))?
+            .len();
+        if size == 0 {
+            anyhow::bail!("File is empty, not a Helio database: {}", path.display());
+        }
+
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .with_context(|| format!("Failed to open {}", path.display()))?;
+
+        // 非 SQLite / 损坏文件在这里才报错（open 是惰性的）。
+        let check: String = conn
+            .query_row("PRAGMA quick_check;", [], |row| row.get(0))
+            .with_context(|| format!("File is not a valid database: {}", path.display()))?;
+        if check != "ok" {
+            anyhow::bail!("Database is corrupted: {check}");
+        }
+
+        // 认 Helio 自己的 schema 特征。只查 api_profiles 及关键列，不要求最新 schema——
+        // 旧版本导出的备份必须仍可导入，替换后由 Database::open 跑迁移补齐。
+        let has_profiles: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='api_profiles'",
+                [],
+                |_| Ok(true),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if !has_profiles {
+            anyhow::bail!(
+                "Not a Helio database (no api_profiles table): {}",
+                path.display()
+            );
+        }
+
+        let mut stmt = conn.prepare("PRAGMA table_info(api_profiles)")?;
+        let columns: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<_>>()?;
+        // 只认初版就存在的列。`target_app` 等是后续 ALTER TABLE 加的，
+        // 要求它们会把用户的旧备份挡在门外——那是回归而非加固。
+        for required in ["name", "provider", "api_url", "api_key"] {
+            if !columns.iter().any(|c| c == required) {
+                anyhow::bail!(
+                    "Not a Helio database (api_profiles missing `{required}` column): {}",
+                    path.display()
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Validates an imported database in a private staging path, then atomically replaces a
     /// closed live database. Callers must drop the old `Database` connection before this method.
     pub fn replace_file_from_import(
         input_path: &Path,
         live_path: &Path,
     ) -> Result<Option<PathBuf>> {
-        if !input_path.exists() {
-            anyhow::bail!("Input database does not exist: {}", input_path.display());
-        }
-        let parent = live_path.parent().ok_or_else(|| {
-            anyhow::anyhow!("Database path has no parent: {}", live_path.display())
-        })?;
-        ensure_private_dir(parent)?;
+        Self::validate_import_candidate(input_path)?;
+        let parent = parent_dir(live_path);
+        ensure_private_dir(&parent)?;
 
-        let staging_path = parent.join(format!(".db.import.{}.sqlite", Uuid::new_v4()));
-        copy_private(input_path, &staging_path)?;
-        let validation = match Database::open(&staging_path) {
-            Ok(database) => database,
+        // staging 单独建目录：迁移会派生边车与 `*.premigrate.*` 备份，围在一处才好整体清理。
+        // 内容用一致快照而非裸拷贝：候选库自己可能带 -wal（例如另一个 Helio 实例的库副本）。
+        let staging_dir = parent.join(format!(".db.import.{}", Uuid::new_v4()));
+        ensure_private_dir(&staging_dir)?;
+        let staging_path = staging_dir.join("db.sqlite");
+        if let Err(error) = Self::snapshot_to(input_path, &staging_path) {
+            Self::discard_staging(&staging_dir);
+            return Err(error);
+        }
+
+        // 在**私有 staging 副本**上跑迁移：既验证该库确实能升到当前 schema
+        // （迁移失败就在替换前中止，live 库不受影响），又让替换后的库无需再迁移。
+        // 候选文件本身始终保持只读，迁移只作用于我们自己的副本。
+        let staged = match Self::open(&staging_path) {
+            Ok(migrated) => migrated,
             Err(error) => {
-                let _ = fs::remove_file(&staging_path);
-                return Err(error);
+                Self::discard_staging(&staging_dir);
+                return Err(error.context(format!(
+                    "Cannot upgrade {} to the current schema",
+                    input_path.display()
+                )));
             }
         };
-        drop(validation);
+        // 迁移写入停留在 staging 的 -wal 里，而后续 rename 只搬主文件。
+        // 必须先 checkpoint 把 WAL 合并进主文件，再删除边车文件——直接删 -wal 会丢迁移结果。
+        let checkpoint = staged.checkpoint_truncate();
+        drop(staged);
+        if let Err(error) = checkpoint.and_then(|_| Self::remove_sidecar_files(&staging_path)) {
+            Self::discard_staging(&staging_dir);
+            return Err(error);
+        }
 
+        // 备份用快照（含 live 库 WAL 中的数据），成功后才移除 live 文件；
+        // 旧实现直接 rename 主文件，会丢 WAL 数据且多一个中间失败态。
         let backup_path = if live_path.exists() {
-            let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+            let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S_%f");
             let backup = live_path.with_file_name(format!("db.backup.{timestamp}.sqlite"));
-            fs::rename(live_path, &backup)?;
-            ensure_private_file(&backup)?;
+            if let Err(error) = Self::snapshot_to(live_path, &backup) {
+                Self::discard_staging(&staging_dir);
+                return Err(error);
+            }
             Some(backup)
         } else {
             None
         };
 
-        if let Err(error) = fs::rename(&staging_path, live_path) {
+        let restore_from_backup = |error: anyhow::Error| -> anyhow::Error {
             if let Some(backup) = backup_path.as_ref() {
-                let _ = fs::rename(backup, live_path);
+                // restore_replaced_file 内部会先清掉 live 及其边车文件再回滚。
+                if let Err(restore) = Self::restore_replaced_file(live_path, backup) {
+                    return anyhow::anyhow!("{error}; rollback failed: {restore}");
+                }
             }
-            return Err(error.into());
+            error
+        };
+
+        if live_path.exists() {
+            if let Err(error) = fs::remove_file(live_path) {
+                Self::discard_staging(&staging_dir);
+                return Err(restore_from_backup(error.into()));
+            }
+        }
+        // 关键：旧 -wal/-shm 必须清掉，否则新库会被旧 WAL"恢复"成替换前的内容。
+        if let Err(error) = Self::remove_sidecar_files(live_path) {
+            Self::discard_staging(&staging_dir);
+            return Err(restore_from_backup(error));
+        }
+
+        if let Err(error) = fs::rename(&staging_path, live_path) {
+            Self::discard_staging(&staging_dir);
+            return Err(restore_from_backup(error.into()));
         }
         ensure_private_file(live_path)?;
+        // 主文件已 rename 走，剩下的迁移副产物（含明文密钥）随目录一并清掉。
+        Self::discard_staging(&staging_dir);
+
+        // 轮转失败不应让「已成功替换」的导入变成 Err：否则 GUI 会回滚刚导入的库，
+        // 用户看到「导入失败」但其实主库已是新内容（或被二次回滚搞乱）。
+        if backup_path.is_some() {
+            if let Err(error) =
+                crate::adapters::backup::cleanup_prefix(&parent, "db.backup.", DB_BACKUP_KEEP)
+            {
+                tracing::warn!("导入成功，但旧备份轮转失败（可稍后手动清理）: {error:#}");
+            }
+        }
         Ok(backup_path)
     }
 
@@ -382,6 +647,8 @@ impl Database {
         if live_path.exists() {
             fs::remove_file(live_path)?;
         }
+        // 恢复的库同样不能套着失败导入留下的 -wal/-shm。
+        Self::remove_sidecar_files(live_path)?;
         fs::rename(backup_path, live_path)?;
         ensure_private_file(live_path)?;
         Ok(())
@@ -754,6 +1021,15 @@ impl Database {
         Ok(())
     }
 
+    /// 删除共享配置（切换事务回滚到「从未保存过」状态时使用）。
+    pub fn delete_shared_config(&self, target_app: TargetApp) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM shared_configs WHERE target_app = ?1",
+            params![target_app.as_str()],
+        )?;
+        Ok(())
+    }
+
     /// 获取共享配置
     pub fn get_shared_config(&self, target_app: TargetApp) -> Result<Option<SharedConfig>> {
         let mut stmt = self.conn.prepare(
@@ -784,6 +1060,16 @@ impl Database {
         self.conn.execute(
             "INSERT OR REPLACE INTO active_profiles (target_app, profile_id) VALUES (?1, ?2)",
             params![target_app.as_str(), profile_id],
+        )?;
+        Ok(())
+    }
+
+    /// 清除某工具的活动 Profile（切换事务在「重复切换同一 profile」时用来制造
+    /// `active != target` 窗口，使崩溃恢复能区分「已完成」与「半完成」）。
+    pub fn clear_active_profile(&self, target_app: TargetApp) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM active_profiles WHERE target_app = ?1",
+            params![target_app.as_str()],
         )?;
         Ok(())
     }
@@ -950,6 +1236,453 @@ mod tests {
                 .api_key,
             "old-key"
         );
+        Ok(())
+    }
+
+    /// 建一个带 profile 的库，并让最后一条写入停留在未 checkpoint 的 WAL 中。
+    /// 返回持有读快照的连接——必须由调用方保活，否则 WAL 会被 checkpoint 掉。
+    fn live_db_with_uncheckpointed_wal(path: &Path, wal_only_name: &str) -> Result<Connection> {
+        let db = Database::open(path)?;
+        db.add_profile(&ApiProfile {
+            name: "checkpointed".into(),
+            provider: "openai".into(),
+            api_url: "https://checkpointed.example".into(),
+            api_key: "checkpointed-key".into(),
+            target_app: Some(TargetApp::Codex),
+            ..Default::default()
+        })?;
+        drop(db);
+
+        let writer = Database::open(path)?;
+        // 读者持有快照 → checkpoint 无法推进，写入滞留在 -wal。
+        let reader = Connection::open(path)?;
+        reader.execute_batch("BEGIN;")?;
+        reader.query_row("SELECT COUNT(*) FROM api_profiles", [], |r| {
+            r.get::<_, i64>(0)
+        })?;
+
+        writer.add_profile(&ApiProfile {
+            name: wal_only_name.into(),
+            provider: "openai".into(),
+            api_url: "https://wal.example".into(),
+            api_key: "wal-key".into(),
+            target_app: Some(TargetApp::Codex),
+            ..Default::default()
+        })?;
+        drop(writer);
+
+        let mut wal = path.as_os_str().to_os_string();
+        wal.push("-wal");
+        assert!(
+            fs::metadata(PathBuf::from(wal))?.len() > 0,
+            "fixture 前提失效：-wal 应非空"
+        );
+        Ok(reader)
+    }
+
+    #[test]
+    fn test_snapshot_includes_uncheckpointed_wal_data() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let live_path = dir.path().join("live.sqlite");
+        let reader = live_db_with_uncheckpointed_wal(&live_path, "wal-only")?;
+
+        let snapshot_path = dir.path().join("export.sqlite");
+        Database::snapshot_to(&live_path, &snapshot_path)?;
+        drop(reader);
+
+        // 旧实现只拷主文件，wal-only 会丢失。
+        let exported = Database::open(&snapshot_path)?;
+        assert_eq!(
+            exported
+                .get_profile_by_name_and_target("wal-only", TargetApp::Codex)?
+                .api_key,
+            "wal-key",
+            "导出快照必须包含尚在 WAL 中的已提交数据"
+        );
+        assert!(exported
+            .get_profile_by_name_and_target("checkpointed", TargetApp::Codex)
+            .is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn test_snapshot_overwrites_existing_destination() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let live_path = dir.path().join("live.sqlite");
+        let db = Database::open(&live_path)?;
+        db.add_profile(&ApiProfile {
+            name: "p".into(),
+            provider: "openai".into(),
+            api_url: "https://p.example".into(),
+            api_key: "p-key".into(),
+            target_app: Some(TargetApp::Codex),
+            ..Default::default()
+        })?;
+        drop(db);
+
+        // VACUUM INTO 本身要求目标不存在，snapshot_to 需自行处理覆盖。
+        let dest = dir.path().join("export.sqlite");
+        fs::write(&dest, b"stale content")?;
+        Database::snapshot_to(&live_path, &dest)?;
+
+        let exported = Database::open(&dest)?;
+        assert!(exported
+            .get_profile_by_name_and_target("p", TargetApp::Codex)
+            .is_ok());
+        Ok(())
+    }
+
+    /// 覆盖导出失败时不得删除旧备份：source 不存在应在动 dest 之前失败。
+    #[test]
+    fn test_snapshot_failure_preserves_existing_destination() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let dest = dir.path().join("export.sqlite");
+        fs::write(&dest, b"keep-me")?;
+        let missing = dir.path().join("nope.sqlite");
+        assert!(Database::snapshot_to(&missing, &dest).is_err());
+        assert_eq!(fs::read(&dest)?, b"keep-me", "导出失败不得抹掉既有备份文件");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_snapshot_is_owner_only() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir()?;
+        let live_path = dir.path().join("live.sqlite");
+        drop(Database::open(&live_path)?);
+
+        // 目标目录模拟用户目录（0755），导出不应收紧它。
+        let user_dir = dir.path().join("Desktop");
+        fs::create_dir(&user_dir)?;
+        fs::set_permissions(&user_dir, fs::Permissions::from_mode(0o755))?;
+
+        let dest = user_dir.join("helio-backup.db");
+        Database::snapshot_to(&live_path, &dest)?;
+
+        // VACUUM INTO 产出 0644，必须被收紧。
+        assert_eq!(fs::metadata(&dest)?.permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::metadata(&user_dir)?.permissions().mode() & 0o777,
+            0o755,
+            "导出不应改动用户目标目录权限"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_snapshot_rejects_missing_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope.sqlite");
+        assert!(Database::snapshot_to(&missing, &dir.path().join("out.db")).is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_unrelated_sqlite_database() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        // 合法 SQLite 但不是 Helio 库（实测：浏览器书签库曾被当备份导入并清空全部档案）。
+        let foreign = dir.path().join("bookmarks.db");
+        let conn = Connection::open(&foreign)?;
+        conn.execute_batch("CREATE TABLE bookmarks(url TEXT); INSERT INTO bookmarks VALUES('x');")?;
+        drop(conn);
+
+        let error = Database::validate_import_candidate(&foreign).unwrap_err();
+        assert!(
+            error.to_string().contains("api_profiles"),
+            "错误应说明缺少 api_profiles，实际: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_and_garbage_files() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        // 0 字节文件会被 SQLite 当作合法空库。
+        let empty = dir.path().join("empty.db");
+        fs::write(&empty, b"")?;
+        assert!(Database::validate_import_candidate(&empty).is_err());
+
+        let garbage = dir.path().join("garbage.db");
+        fs::write(&garbage, b"not a sqlite database at all")?;
+        assert!(Database::validate_import_candidate(&garbage).is_err());
+
+        let missing = dir.path().join("nope.db");
+        assert!(Database::validate_import_candidate(&missing).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_validate_accepts_helio_database_without_modifying_it() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("helio.sqlite");
+        let db = Database::open(&path)?;
+        db.add_profile(&ApiProfile {
+            name: "p".into(),
+            provider: "openai".into(),
+            api_url: "https://p.example".into(),
+            api_key: "p-key".into(),
+            target_app: Some(TargetApp::Codex),
+            ..Default::default()
+        })?;
+        drop(db);
+
+        let before = fs::read(&path)?;
+        Database::validate_import_candidate(&path)?;
+        assert_eq!(
+            fs::read(&path)?,
+            before,
+            "校验必须只读，不得写入或迁移候选文件"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_validate_accepts_older_helio_schema() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let legacy = dir.path().join("legacy.sqlite");
+        // 模拟旧版本导出的库：只有 api_profiles 的关键列，没有后来新增的列，
+        // 也没有 schema_migrations。用户的历史备份必须仍能导入。
+        write_legacy_helio_db(&legacy)?;
+        Database::validate_import_candidate(&legacy)?;
+        Ok(())
+    }
+
+    /// 旧版本 Helio 库：`name` 全局 UNIQUE、缺少后续新增的列，但保留初版就有的
+    /// `model_mapping`（`migrate_composite_unique` 重建表时会 SELECT 它）。
+    fn write_legacy_helio_db(path: &Path) -> Result<()> {
+        let conn = Connection::open(path)?;
+        conn.execute_batch(
+            r#"
+            CREATE TABLE api_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                provider TEXT NOT NULL,
+                api_url TEXT NOT NULL,
+                api_key TEXT NOT NULL,
+                model_mapping TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            INSERT INTO api_profiles (name,provider,api_url,api_key,created_at,updated_at)
+            VALUES ('legacy','openai','https://legacy.example','legacy-key',1,1);
+            "#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_import_of_older_schema_migrates_live_database() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let live_path = dir.path().join("live.sqlite");
+        drop(Database::open(&live_path)?);
+
+        let legacy = dir.path().join("legacy.sqlite");
+        write_legacy_helio_db(&legacy)?;
+
+        Database::replace_file_from_import(&legacy, &live_path)?;
+
+        // 替换后的库应已是当前 schema，且旧数据仍在。
+        let migrated = Database::open(&live_path)?;
+        let profile = migrated
+            .list_profiles()?
+            .into_iter()
+            .find(|p| p.name == "legacy")
+            .expect("旧库中的档案应保留");
+        assert_eq!(profile.api_key, "legacy-key");
+        Ok(())
+    }
+
+    #[test]
+    fn test_import_aborts_when_candidate_cannot_be_migrated() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let live_path = dir.path().join("live.sqlite");
+        let live = Database::open(&live_path)?;
+        live.add_profile(&ApiProfile {
+            name: "live".into(),
+            provider: "openai".into(),
+            api_url: "https://live.example".into(),
+            api_key: "live-key".into(),
+            target_app: Some(TargetApp::Codex),
+            ..Default::default()
+        })?;
+        drop(live);
+
+        // 有 api_profiles 及关键列，能通过静态校验，但缺 model_mapping → 迁移必然失败。
+        let broken = dir.path().join("broken.sqlite");
+        let conn = Connection::open(&broken)?;
+        conn.execute_batch(
+            r#"
+            CREATE TABLE api_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                provider TEXT NOT NULL,
+                api_url TEXT NOT NULL,
+                api_key TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            "#,
+        )?;
+        drop(conn);
+
+        assert!(Database::replace_file_from_import(&broken, &live_path).is_err());
+
+        // 迁移在私有 staging 副本上失败 → live 库必须原封不动。
+        let live = Database::open(&live_path)?;
+        assert_eq!(
+            live.get_profile_by_name_and_target("live", TargetApp::Codex)?
+                .api_key,
+            "live-key"
+        );
+        // staging 残留必须清理干净。
+        let leftovers = fs::read_dir(dir.path())?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".db.import."))
+            .count();
+        assert_eq!(leftovers, 0, "失败的导入不应留下 staging 文件");
+        Ok(())
+    }
+
+    #[test]
+    fn test_import_over_stale_wal_returns_imported_data() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let live_path = dir.path().join("live.sqlite");
+        let reader = live_db_with_uncheckpointed_wal(&live_path, "live-wal-only")?;
+
+        let import_path = dir.path().join("import.sqlite");
+        let imported = Database::open(&import_path)?;
+        imported.add_profile(&ApiProfile {
+            name: "imported".into(),
+            provider: "openai".into(),
+            api_url: "https://imported.example".into(),
+            api_key: "imported-key".into(),
+            target_app: Some(TargetApp::Codex),
+            ..Default::default()
+        })?;
+        drop(imported);
+
+        let backup_path = Database::replace_file_from_import(&import_path, &live_path)?
+            .expect("替换已存在的库应产生备份");
+        drop(reader);
+
+        // 旧实现把陈旧 -wal 留在原地，新库被它"恢复"成替换前的内容。
+        let replaced = Database::open(&live_path)?;
+        assert_eq!(
+            replaced
+                .get_profile_by_name_and_target("imported", TargetApp::Codex)?
+                .api_key,
+            "imported-key",
+            "导入后应读到导入的数据"
+        );
+        assert!(
+            replaced
+                .get_profile_by_name_and_target("live-wal-only", TargetApp::Codex)
+                .is_err(),
+            "导入后不应残留被替换库的数据"
+        );
+        drop(replaced);
+
+        // 备份必须含 live 库 WAL 中的数据（旧实现 rename 主文件会丢）。
+        let backup = Database::open(&backup_path)?;
+        assert_eq!(
+            backup
+                .get_profile_by_name_and_target("live-wal-only", TargetApp::Codex)?
+                .api_key,
+            "wal-key",
+            "备份应包含尚在 WAL 中的已提交数据"
+        );
+        assert!(backup
+            .get_profile_by_name_and_target("checkpointed", TargetApp::Codex)
+            .is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn test_restore_replaced_file_clears_sidecars() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let live_path = dir.path().join("live.sqlite");
+        let backup_path = dir.path().join("db.backup.sqlite");
+
+        // 备份库含 old 档案。
+        let backup = Database::open(&backup_path)?;
+        backup.add_profile(&ApiProfile {
+            name: "old".into(),
+            provider: "openai".into(),
+            api_url: "https://old.example".into(),
+            api_key: "old-key".into(),
+            target_app: Some(TargetApp::Codex),
+            ..Default::default()
+        })?;
+        drop(backup);
+
+        // live 位置留下失败导入的产物 + 陈旧 sidecar。
+        let reader = live_db_with_uncheckpointed_wal(&live_path, "failed-import")?;
+        drop(reader);
+
+        Database::restore_replaced_file(&live_path, &backup_path)?;
+
+        for suffix in ["-wal", "-shm"] {
+            let mut name = live_path.as_os_str().to_os_string();
+            name.push(suffix);
+            assert!(
+                !PathBuf::from(name).exists(),
+                "恢复后不应残留 {suffix} 文件"
+            );
+        }
+        let restored = Database::open(&live_path)?;
+        assert_eq!(
+            restored
+                .get_profile_by_name_and_target("old", TargetApp::Codex)?
+                .api_key,
+            "old-key"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_import_backups_are_rotated() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let live_path = dir.path().join("live.sqlite");
+        let import_path = dir.path().join("import.sqlite");
+        drop(Database::open(&live_path)?);
+        drop(Database::open(&import_path)?);
+
+        for _ in 0..12 {
+            Database::replace_file_from_import(&import_path, &live_path)?;
+        }
+
+        let backups = fs::read_dir(dir.path())?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("db.backup."))
+            .count();
+        assert_eq!(backups, DB_BACKUP_KEEP, "自动备份应轮转，保留 10 个");
+        Ok(())
+    }
+
+    #[test]
+    fn test_premigrate_backups_are_rotated() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let db_path = dir.path().join("live.sqlite");
+
+        // 每轮重新写一个旧 schema 的库，让 migrate_composite_unique 再备份一次。
+        for _ in 0..12 {
+            if db_path.exists() {
+                fs::remove_file(&db_path)?;
+            }
+            Database::remove_sidecar_files(&db_path)?;
+            write_legacy_helio_db(&db_path)?;
+            drop(Database::open(&db_path)?);
+        }
+
+        let backups = fs::read_dir(dir.path())?
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("live.sqlite.premigrate.")
+            })
+            .count();
+        assert_eq!(backups, DB_BACKUP_KEEP, "迁移前备份应轮转，保留 10 个");
         Ok(())
     }
 

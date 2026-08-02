@@ -7,11 +7,29 @@ use std::path::Path;
 use std::os::unix::fs::PermissionsExt;
 
 pub fn ensure_private_dir(path: &Path) -> Result<()> {
+    // `Path::parent()` 对裸文件名返回 Some("")，调用方难以逐个防御；空路径按当前目录处理。
+    let path = if path.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        path
+    };
     fs::create_dir_all(path)
         .with_context(|| format!("Failed to create private directory {}", path.display()))?;
     #[cfg(unix)]
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
         .with_context(|| format!("Failed to secure directory {}", path.display()))?;
+    Ok(())
+}
+
+/// 收紧导出目标文件自身的权限，但**不触碰其父目录**。
+/// 导出路径由用户选择（如 `~/Desktop`），`ensure_private_dir` 会把该目录改成 0700，
+/// 属于越权副作用；导出只应保证文件本身 owner-only。
+pub fn secure_export_file(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("Failed to secure exported file {}", path.display()))?;
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
@@ -67,7 +85,10 @@ pub fn copy_private(source: &Path, destination: &Path) -> Result<u64> {
 // 权限测试仅 Unix 有意义（Windows 无 POSIX mode），整体在 Windows 上不编译。
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{atomic_write_private, copy_private, ensure_private_dir, ensure_private_file};
+    use super::{
+        atomic_write_private, copy_private, ensure_private_dir, ensure_private_file,
+        secure_export_file,
+    };
     use anyhow::Result;
     use std::fs;
     #[cfg(unix)]
@@ -106,6 +127,58 @@ mod tests {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644))?;
         ensure_private_file(&path)?;
         assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secure_export_file_leaves_parent_directory_untouched() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        // 模拟用户目录（如 ~/Desktop）：0755，不应被导出流程收紧。
+        let user_dir = dir.path().join("Desktop");
+        fs::create_dir(&user_dir)?;
+        fs::set_permissions(&user_dir, fs::Permissions::from_mode(0o755))?;
+
+        let exported = user_dir.join("helio-backup.db");
+        fs::write(&exported, b"snapshot")?;
+        fs::set_permissions(&exported, fs::Permissions::from_mode(0o644))?;
+        secure_export_file(&exported)?;
+
+        assert_eq!(
+            fs::metadata(&exported)?.permissions().mode() & 0o777,
+            0o600,
+            "导出文件应收紧为 owner-only"
+        );
+        assert_eq!(
+            fs::metadata(&user_dir)?.permissions().mode() & 0o777,
+            0o755,
+            "导出不应改动用户选择的目标目录权限"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_private_tightens_parent_directory() -> Result<()> {
+        // 记录既有行为：copy_private 会把目标父目录设为 0700，
+        // 因此它只适用于应用私有目录，不可用于用户选择的导出路径。
+        let dir = tempfile::tempdir()?;
+        let nested = dir.path().join("private-store");
+        fs::create_dir(&nested)?;
+        fs::set_permissions(&nested, fs::Permissions::from_mode(0o755))?;
+
+        let source = dir.path().join("source.db");
+        fs::write(&source, b"x")?;
+        copy_private(&source, &nested.join("copy.db"))?;
+
+        assert_eq!(fs::metadata(&nested)?.permissions().mode() & 0o777, 0o700);
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_private_dir_accepts_empty_path_as_current_dir() -> Result<()> {
+        // `Path::new("live.sqlite").parent()` 是 Some("")，不能当作错误。
+        ensure_private_dir(std::path::Path::new(""))?;
         Ok(())
     }
 }

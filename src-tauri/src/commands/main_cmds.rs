@@ -483,16 +483,16 @@ pub async fn update_profile(profile: ApiProfile, state: State<'_, AppState>) -> 
         active_profiles
     };
 
-    // 全局写锁：与其他切换/写盘命令互斥，避免并发写配置
+    // 全局写锁：与其他切换/写盘命令互斥，避免并发写配置。
+    // 走 apply_profile_switch（含 journal）：写盘失败时立即回滚，并保持 active 语义一致。
     let _write_guard = state.config_lock.lock().map_err(|e| e.to_string())?;
     for (target, api_profile, persisted_shared_config) in active_profiles {
-        let shared_config = apply_profile_config(target, &api_profile, persisted_shared_config)?;
-        state
-            .db
-            .lock()
-            .map_err(|e| e.to_string())?
-            .save_shared_config(target, shared_config)
-            .map_err(|e| e.to_string())?;
+        let shared_config =
+            switch_api::adapters::resolve_shared_config(target, persisted_shared_config)
+                .map_err(|e| e.to_string())?;
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        switch_api::adapters::apply_profile_switch(&db, target, &api_profile, &shared_config, true)
+            .map_err(|e| format!("更新后同步配置失败 ({target}): {e}"))?;
     }
     Ok(())
 }
@@ -556,30 +556,14 @@ pub async fn switch_profile(
     api_profile.normalize_keys();
     // 全局写锁：与其他切换/写盘命令互斥
     let _write_guard = state.config_lock.lock().map_err(|e| e.to_string())?;
-    let shared_config = apply_profile_config(target, &api_profile, persisted_shared_config)?;
-    let profile_id = api_profile
-        .id
-        .ok_or_else(|| format!("Profile '{}' has no id", profile_name))?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.save_shared_config(target, shared_config)
-        .map_err(|e| e.to_string())?;
-    db.set_active_profile(target, profile_id)
-        .map_err(|e| e.to_string())?;
-
-    Ok(())
-}
-
-pub(crate) fn apply_profile_config(
-    target: TargetApp,
-    api_profile: &ApiProfile,
-    persisted_shared_config: Option<serde_json::Value>,
-) -> Result<serde_json::Value, String> {
     let shared_config =
         switch_api::adapters::resolve_shared_config(target, persisted_shared_config)
             .map_err(|e| e.to_string())?;
-    switch_api::adapters::apply_profile_configuration(target, api_profile, &shared_config, true)
-        .map_err(|e| e.to_string())?;
-    Ok(shared_config)
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    switch_api::adapters::apply_profile_switch(&db, target, &api_profile, &shared_config, true)
+        .map_err(|e| format!("切换失败: {e}"))?;
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -631,10 +615,70 @@ pub async fn save_shared_config(
     let target = TargetApp::parse(&target_app)
         .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
 
+    // 与切换/导入互斥，避免写 shared_config 时被 replace live 库打断。
+    let _write_guard = state.config_lock.lock().map_err(|e| e.to_string())?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
     db.save_shared_config(target, config)
         .map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConfigBackupInfo {
+    pub path: String,
+    /// 备份时间，格式化为本地时间字符串（解析文件名内嵌时间戳，失败退回 mtime）
+    pub time: String,
+    /// 恢复时将写回的目标配置文件；文件名格式异常时为 None（不可恢复）
+    pub target: Option<String>,
+}
+
+/// 列出 target_app 的配置备份（新→旧）。
+#[tauri::command]
+pub async fn list_config_backups(target_app: String) -> Result<Vec<ConfigBackupInfo>, String> {
+    use switch_api::adapters::{backup, get_adapter};
+    let target = TargetApp::parse(&target_app)
+        .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
+    let config_dir = get_adapter(target).config_path();
+    let config_dir = config_dir
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let backups = backup::list_backups(&config_dir).map_err(|e| e.to_string())?;
+    Ok(backups
+        .into_iter()
+        .map(|b| ConfigBackupInfo {
+            time: chrono::DateTime::<chrono::Local>::from(b.time)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string(),
+            path: b.path.display().to_string(),
+            target: b.target.map(|t| t.display().to_string()),
+        })
+        .collect())
+}
+
+/// 恢复配置备份（写盘操作，走全局配置写锁；恢复前自动备份当前配置）。
+/// 返回恢复写回的配置文件路径。
+#[tauri::command]
+pub async fn restore_config_backup(
+    target_app: String,
+    backup_file: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    use switch_api::adapters::{backup, get_adapter};
+    let target = TargetApp::parse(&target_app)
+        .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
+    let config_dir = get_adapter(target).config_path();
+    let config_dir = config_dir
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let _guard = state
+        .config_lock
+        .lock()
+        .map_err(|e| format!("获取配置写锁失败：{e}"))?;
+    let restored = backup::restore_backup(&config_dir, std::path::Path::new(&backup_file))
+        .map_err(|e| format!("恢复失败：{e:#}"))?;
+    Ok(restored.display().to_string())
 }
 
 /// 读取 Codex 的 config.toml 原始文本（不经 JSON 往返，保留用户格式/注释）。
@@ -1186,6 +1230,7 @@ pub async fn import_shared_config(
     let cfg = adapter.read_config().map_err(|e| e.to_string())?;
     let shared = adapter.extract_shared_config(&cfg);
 
+    let _write_guard = state.config_lock.lock().map_err(|e| e.to_string())?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.save_shared_config(target, shared.clone())
         .map_err(|e| e.to_string())?;
@@ -1200,16 +1245,48 @@ pub async fn export_database(
     let _db = state.db.lock().map_err(|e| e.to_string())?;
     let db_path = default_db_path()?;
 
-    switch_api::utils::secure_fs::copy_private(&db_path, std::path::Path::new(&output_path))
+    // 快照而非文件拷贝：拷主文件会漏掉还在 -wal 里的已提交数据（实测可导出成空档案库）。
+    // 导出目标由用户选择，snapshot_to 只收紧文件本身权限，不动其所在目录。
+    Database::snapshot_to(&db_path, std::path::Path::new(&output_path))
         .map_err(|e| format!("Failed to export database: {}", e))?;
 
     Ok(())
+}
+
+/// 把全部 skills 目录打包为 tar.gz（manifest + {app}/{skill}/...）。
+/// 与数据库备份正交：skills 是文件系统资产，不入库。
+#[tauri::command]
+pub async fn export_skills(
+    output_path: String,
+    state: State<'_, AppState>,
+) -> Result<switch_api::utils::skills_backup::SkillsExportResult, String> {
+    // 与配置写路径互斥：导出期间避免并发切换改到半截 skill 目录。
+    let _write_guard = state.config_lock.lock().map_err(|e| e.to_string())?;
+    let home = dirs::home_dir().ok_or("Failed to get home directory")?;
+    switch_api::utils::skills_backup::export_skills(&home, std::path::Path::new(&output_path))
+        .map_err(|e| format!("Failed to export skills: {e}"))
+}
+
+/// 从 tar.gz 归档恢复 skills。整体校验不通过则拒绝且不写盘；
+/// 同名 skill 目录已存在时跳过（不覆盖）。
+#[tauri::command]
+pub async fn import_skills(
+    input_path: String,
+    state: State<'_, AppState>,
+) -> Result<switch_api::utils::skills_backup::SkillsImportResult, String> {
+    // 与切换/写配置互斥；skills_backup 内部另有进程级 IMPORT_LOCK 防重入。
+    let _write_guard = state.config_lock.lock().map_err(|e| e.to_string())?;
+    let home = dirs::home_dir().ok_or("Failed to get home directory")?;
+    switch_api::utils::skills_backup::import_skills(&home, std::path::Path::new(&input_path))
+        .map_err(|e| format!("Failed to import skills: {e}"))
 }
 
 #[tauri::command]
 pub async fn import_database(input_path: String, state: State<'_, AppState>) -> Result<(), String> {
     let db_path = default_db_path()?;
 
+    // 与切换/写配置互斥：导入会替换 live 库文件，期间绝不能有其他命令仍持有旧连接写盘。
+    let _write_guard = state.config_lock.lock().map_err(|e| e.to_string())?;
     let mut db = state.db.lock().map_err(|e| e.to_string())?;
     let placeholder = Database::open(":memory:").map_err(|e| e.to_string())?;
     let previous = std::mem::replace(&mut *db, placeholder);
@@ -1229,6 +1306,10 @@ pub async fn import_database(input_path: String, state: State<'_, AppState>) -> 
     match Database::open(&db_path) {
         Ok(reloaded) => {
             *db = reloaded;
+            // 导入可能带来/抹掉 switch journal 旁车；启动式恢复一次，保持 active/配置一致。
+            if let Err(error) = switch_api::adapters::journal::recover_interrupted_switch(&db) {
+                eprintln!("[Helio] recover after import failed: {error:#}");
+            }
         }
         Err(error) => {
             if let Some(backup_path) = backup.as_ref() {
@@ -1534,14 +1615,12 @@ async fn run_failover(
     if let Some(persisted_shared_config) = persisted_shared_config {
         // 全局写锁：与其他切换/写盘命令互斥
         let _write_guard = state.config_lock.lock().map_err(|e| e.to_string())?;
-        let shared_config = apply_profile_config(target, &profile, persisted_shared_config)?;
-        let db = state.db.lock().map_err(|e| e.to_string())?;
-        db.save_shared_config(target, shared_config)
-            .map_err(|e| e.to_string())?;
-        if let Some(profile_id) = profile.id {
-            db.set_active_profile(target, profile_id)
+        let shared_config =
+            switch_api::adapters::resolve_shared_config(target, persisted_shared_config)
                 .map_err(|e| e.to_string())?;
-        }
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        switch_api::adapters::apply_profile_switch(&db, target, &profile, &shared_config, true)
+            .map_err(|e| format!("切换失败: {e}"))?;
         re_switched = true;
     }
 

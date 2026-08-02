@@ -185,7 +185,7 @@ pub(crate) fn show_main_window(app: &AppHandle) {
     }
 }
 
-/// 执行一次切换：复用 apply_profile_config + 更新 active + emit 事件 + 弹通知。
+/// 执行一次切换：复用 apply_profile_switch（含崩溃一致性 journal）+ emit 事件 + 弹通知。
 /// 出错时只弹错误通知，不 panic、不动菜单。
 fn do_switch(app: &AppHandle, tool: TargetApp, profile_name: &str) {
     let result: Result<(), String> = (|| {
@@ -203,16 +203,12 @@ fn do_switch(app: &AppHandle, tool: TargetApp, profile_name: &str) {
         };
         // 全局写锁：与 GUI 切换等写盘命令互斥
         let _write_guard = state.config_lock.lock().map_err(|e| e.to_string())?;
-        let shared_config = crate::commands::main_cmds::apply_profile_config(
-            tool,
-            &profile,
-            persisted_shared_config,
-        )?;
-        let id = profile.id.ok_or_else(|| "profile 无 id".to_string())?;
+        let shared_config =
+            switch_api::adapters::resolve_shared_config(tool, persisted_shared_config)
+                .map_err(|e| e.to_string())?;
         let db = state.db.lock().map_err(|e| e.to_string())?;
-        db.save_shared_config(tool, shared_config)
-            .map_err(|e| e.to_string())?;
-        db.set_active_profile(tool, id).map_err(|e| e.to_string())?;
+        switch_api::adapters::apply_profile_switch(&db, tool, &profile, &shared_config, true)
+            .map_err(|e| format!("切换失败: {e}"))?;
         Ok(())
     })();
 
