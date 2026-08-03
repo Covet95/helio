@@ -11,7 +11,7 @@ import {
   contextPreviewLine,
   type ContextMode,
 } from '../../lib/contextWindow';
-import { emptyProfileForTool } from './helpers';
+import { emptyProfileForTool, normalizeCodexCatalogModels } from './helpers';
 
 function newKeyId(): string {
   return `k${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
@@ -78,6 +78,7 @@ export function ProfileModal({
   const keys = form.api_keys && form.api_keys.length > 0 ? form.api_keys : ensureKeyPool(form);
   const activeKey =
     keys.find((k) => k.is_active)?.key?.trim() || form.api_key.trim();
+  const isBedrock = tool === 'codex' && form.provider.trim().toLowerCase() === 'amazon-bedrock';
 
   const setKeys = (next: ApiKeyEntry[]) => {
     setForm((f) => withActiveKey(f, next));
@@ -85,6 +86,10 @@ export function ProfileModal({
   };
 
   const loadModels = async () => {
+    if (isBedrock) {
+      setModelErr('Amazon Bedrock 使用 Codex 内置 AWS 认证，Helio 无法加载其模型列表');
+      return;
+    }
     if (!form.api_url.trim() || !activeKey) {
       setModelErr('先填 API URL 和 API Key');
       return;
@@ -107,6 +112,9 @@ export function ProfileModal({
   const runProbe = async (apiKey: string, keyLabel?: string) => {
     const { tauriApi } = await import('../../lib/tauri');
     const model = form.model?.trim() || form.models?.[0]?.trim() || '';
+    if (isBedrock) {
+      throw new Error('Amazon Bedrock 使用 Codex 内置 AWS 认证，Helio 无法执行 HTTP 模型探活');
+    }
     if (!form.api_url.trim() || !apiKey.trim()) {
       throw new Error('先填 API URL 和 API Key');
     }
@@ -119,7 +127,9 @@ export function ProfileModal({
       apiKey,
       model,
       envKey: form.env_key,
+      wireApi: form.wire_api,
       apiMode: form.api_mode,
+      experimentalBearerToken: form.experimental_bearer_token,
       keyLabel,
     });
   };
@@ -221,29 +231,30 @@ export function ProfileModal({
   const submit = () => {
     const normalized = withActiveKey(form, ensureKeyPool(form));
     const usesCodexEnv = tool === 'codex' && Boolean(normalized.env_key?.trim());
-    if (!normalized.name.trim() || !normalized.provider.trim() || !normalized.api_url.trim() || (!usesCodexEnv && !normalized.api_key.trim())) {
+    const usesBedrock = tool === 'codex' && normalized.provider.trim().toLowerCase() === 'amazon-bedrock';
+    if (!normalized.name.trim() || !normalized.provider.trim() || (!usesBedrock && (!normalized.api_url.trim() || (!usesCodexEnv && !normalized.api_key.trim())))) {
       setFormErr('请填写名称、Provider、API URL，并提供 API Key 或 Codex 环境变量名');
       return;
     }
     setFormErr('');
     let catalog_models = normalized.catalog_models;
     if (tool === 'codex' && catalog_models) {
-      const cleaned = catalog_models
-        .map((e) => ({
-          slug: e.slug, // 原样保留，仅去掉完全空白项
-          display_name: e.display_name?.trim() ? e.display_name : undefined,
-          context_window: e.context_window && e.context_window > 0 ? e.context_window : undefined,
-          supports_reasoning: e.supports_reasoning || undefined,
-          supports_images: e.supports_images || undefined,
-          supports_tool_calls: e.supports_tool_calls || undefined,
-          supports_web_search: e.supports_web_search || undefined,
-        }))
-        .filter((e) => e.slug.trim().length > 0);
-      catalog_models = cleaned.length ? cleaned : undefined;
+      catalog_models = normalizeCodexCatalogModels(catalog_models);
     } else if (tool !== 'codex') {
       catalog_models = undefined;
     }
-    onSave({ ...normalized, target_app: tool, catalog_models });
+    onSave({
+      ...normalized,
+      api_url: usesBedrock ? '' : normalized.api_url,
+      api_key: usesBedrock ? '' : normalized.api_key,
+      api_keys: usesBedrock ? undefined : normalized.api_keys,
+      env_key: usesBedrock ? undefined : normalized.env_key,
+      supports_standalone_web_search: usesBedrock
+        ? undefined
+        : normalized.supports_standalone_web_search || undefined,
+      target_app: tool,
+      catalog_models,
+    });
   };
 
   return (
@@ -320,10 +331,22 @@ export function ProfileModal({
                  onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="my-proxy" />
           <Field label="Provider" value={form.provider} required
                  onChange={(e) => setForm({ ...form, provider: e.target.value })} placeholder="anthropic / openai / google" />
-          <Field label="API URL" type="url" value={form.api_url} required mono
-                 onChange={(e) => { setForm({ ...form, api_url: e.target.value }); setApiHealth(null); }} />
+          {isBedrock ? (
+            <div className="space-y-3 rounded-md border border-line bg-surface/60 p-3">
+              <div className="text-[12px] text-ink-dim">
+                Amazon Bedrock 使用 Codex 内置 AWS 认证，不写入 API URL 或 API Key。
+              </div>
+              <Field label="AWS Profile（可选）" value={form.aws_profile || ''} mono
+                     onChange={(e) => setForm({ ...form, aws_profile: e.target.value.trim() || undefined })} />
+              <Field label="AWS Region（可选）" value={form.aws_region || ''} mono
+                     onChange={(e) => setForm({ ...form, aws_region: e.target.value.trim() || undefined })} />
+            </div>
+          ) : (
+            <Field label="API URL" type="url" value={form.api_url} required mono
+                   onChange={(e) => { setForm({ ...form, api_url: e.target.value }); setApiHealth(null); }} />
+          )}
 
-          {!multiKeyMode ? (
+          {!isBedrock && !multiKeyMode ? (
             <div className="space-y-1.5">
               <Field
                 label="API Key"
@@ -351,7 +374,7 @@ export function ProfileModal({
                 同一 API 配置多把 Key…
               </button>
             </div>
-          ) : (
+          ) : !isBedrock ? (
             <div className="space-y-2 rounded-lg border border-line bg-surface/60 p-3">
               <div className="flex items-center justify-between">
                 <span className="text-[12px] font-medium text-ink-dim">
@@ -436,8 +459,9 @@ export function ProfileModal({
                 + 添加 Key
               </Button>
             </div>
-          )}
+          ) : null}
 
+          {!isBedrock && (
           <div className="flex flex-wrap items-center gap-2">
             <Button type="button" variant="secondary" size="sm" onClick={testConnection} disabled={checkingApi}>
               {checkingApi ? '测试中…' : multiKeyMode ? '测试活跃模型' : '测试模型'}
@@ -461,6 +485,7 @@ export function ProfileModal({
               </span>
             )}
           </div>
+          )}
 
           {showModelParams && (
             <div className="rounded-lg border border-line bg-surface/60 p-3.5 space-y-3.5">
@@ -469,7 +494,7 @@ export function ProfileModal({
                      onChange={(e) => setForm({ ...form, model: e.target.value })} placeholder="gpt-5.5 / claude-opus-4" />
               <div>
                 <div className="flex items-center gap-2">
-                  <Button type="button" variant="secondary" size="sm" onClick={loadModels} disabled={loadingModels}>
+                  <Button type="button" variant="secondary" size="sm" onClick={loadModels} disabled={loadingModels || isBedrock}>
                     {loadingModels ? '加载中…' : '加载模型列表'}
                   </Button>
                   {models.length > 0 && (
@@ -608,7 +633,6 @@ export function ProfileModal({
                             className="h-7 w-28 rounded border border-line bg-surface px-1.5 font-mono text-[11px]"
                           />
                           {[
-                            ['supports_reasoning', '推理'],
                             ['supports_images', '图片'],
                             ['supports_tool_calls', '工具调用'],
                             ['supports_web_search', '联网搜索'],
@@ -623,9 +647,38 @@ export function ProfileModal({
                                   setForm({ ...form, catalog_models: next });
                                 }}
                               />
-                              {label}
+                              {key === 'supports_web_search' ? `${label}（需 Provider 支持）` : label}
                             </label>
                           ))}
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2 text-[11px] text-ink-dim">
+                          <span>推理等级</span>
+                          {['minimal', 'low', 'medium', 'high', 'xhigh'].map((level) => {
+                            const levels = entry.reasoning_levels
+                              ?? (entry.supports_reasoning ? ['low', 'medium', 'high'] : []);
+                            const checked = levels.includes(level);
+                            return (
+                              <label key={level} className="flex items-center gap-1">
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={(e) => {
+                                    const next = [...(form.catalog_models || [])];
+                                    const updated = e.target.checked
+                                      ? [...levels, level]
+                                      : levels.filter((item) => item !== level);
+                                    next[idx] = {
+                                      ...next[idx],
+                                      reasoning_levels: Array.from(new Set(updated)),
+                                      supports_reasoning: undefined,
+                                    };
+                                    setForm({ ...form, catalog_models: next });
+                                  }}
+                                />
+                                {level}
+                              </label>
+                            );
+                          })}
                         </div>
                       </div>
                     ))}
@@ -900,23 +953,24 @@ export function ProfileModal({
                 </div>
               )}
 
-              {tool === 'codex' && (
+              {tool === 'codex' && !isBedrock && (
                 <label className="flex cursor-pointer items-center justify-between">
                   <div>
-                    <div className="text-[13px] font-medium text-ink">思考模式</div>
-                    <div className="text-[11px] text-ink-faint">model_thinking_enabled</div>
+                    <div className="text-[13px] font-medium text-ink">Provider 独立联网搜索</div>
+                    <div className="text-[11px] text-ink-faint">supports_standalone_web_search；模型目录也需启用联网搜索</div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => setForm({ ...form, model_thinking_enabled: form.model_thinking_enabled ? undefined : true })}
-                    className={`relative h-6 w-11 rounded-full transition-colors ${form.model_thinking_enabled ? 'bg-accent' : 'bg-line-strong'}`}
-                  >
-                    <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow-soft transition-transform ${form.model_thinking_enabled ? 'translate-x-[22px]' : 'translate-x-0.5'}`} />
-                  </button>
+                  <input
+                    type="checkbox"
+                    checked={form.supports_standalone_web_search === true}
+                    onChange={(e) => setForm({
+                      ...form,
+                      supports_standalone_web_search: e.target.checked || undefined,
+                    })}
+                  />
                 </label>
               )}
 
-              {tool === 'codex' && (
+              {tool === 'codex' && !isBedrock && (
                 <Field label="API Key 环境变量" value={form.env_key || ''} mono
                        onChange={(e) => setForm({ ...form, env_key: e.target.value.trim() || undefined })}
                        placeholder="留空则由 Helio 安全写入 auth.json；例如 OPENAI_API_KEY" />

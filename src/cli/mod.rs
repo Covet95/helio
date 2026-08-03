@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use switch_api::adapters::get_adapter;
 use switch_api::db::Database;
 use switch_api::models::{
-    ApiKeyEntry, ApiProfile, HermesProfileFields, OpenClawProfileFields, TargetApp,
+    ApiKeyEntry, ApiProfile, CodexProfileFields, HermesProfileFields, OpenClawProfileFields,
+    TargetApp,
 };
 use switch_api::probe::ProbeRequest;
 use switch_api::utils;
@@ -37,7 +38,7 @@ pub enum Commands {
 
     /// 管理 API Profiles
     #[command(subcommand)]
-    Profile(ProfileCommands),
+    Profile(Box<ProfileCommands>),
 
     /// 切换 API Profile
     Switch {
@@ -91,10 +92,10 @@ pub enum ProfileCommands {
         name: String,
         /// API URL
         #[arg(long)]
-        url: String,
+        url: Option<String>,
         /// API Key
         #[arg(long)]
-        key: String,
+        key: Option<String>,
         /// Provider (anthropic, openai, custom)
         #[arg(long, default_value = "anthropic")]
         provider: String,
@@ -107,6 +108,18 @@ pub enum ProfileCommands {
         /// 推理强度 (low, medium, high, xhigh)
         #[arg(long)]
         reasoning_effort: Option<String>,
+        /// Codex provider-scoped API key environment variable
+        #[arg(long)]
+        env_key: Option<String>,
+        /// Codex custom provider supports standalone web search
+        #[arg(long)]
+        supports_standalone_web_search: bool,
+        /// Codex built-in Amazon Bedrock AWS profile
+        #[arg(long)]
+        aws_profile: Option<String>,
+        /// Codex built-in Amazon Bedrock AWS region
+        #[arg(long)]
+        aws_region: Option<String>,
         /// 启用 1M 上下文窗口
         #[arg(long)]
         context_1m: bool,
@@ -174,6 +187,18 @@ pub enum ProfileCommands {
         /// 新的推理强度 (low, medium, high, xhigh)
         #[arg(long)]
         reasoning_effort: Option<String>,
+        /// 新的 Codex provider-scoped API key environment variable (empty clears)
+        #[arg(long)]
+        env_key: Option<String>,
+        /// Codex custom provider standalone web-search support
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+        supports_standalone_web_search: Option<bool>,
+        /// Codex built-in Amazon Bedrock AWS profile (empty clears)
+        #[arg(long)]
+        aws_profile: Option<String>,
+        /// Codex built-in Amazon Bedrock AWS region (empty clears)
+        #[arg(long)]
+        aws_region: Option<String>,
         /// 启用 1M 上下文窗口
         #[arg(long, num_args = 0..=1, default_missing_value = "true")]
         context_1m: Option<bool>,
@@ -255,7 +280,7 @@ pub fn execute(cli: Cli) -> Result<()> {
             let target = parse_target_app(&target_app)?;
             cmd_init(&db, target)?;
         }
-        Commands::Profile(profile_cmd) => match profile_cmd {
+        Commands::Profile(profile_cmd) => match *profile_cmd {
             ProfileCommands::Add {
                 name,
                 url,
@@ -264,6 +289,10 @@ pub fn execute(cli: Cli) -> Result<()> {
                 model_mapping,
                 model,
                 reasoning_effort,
+                env_key,
+                supports_standalone_web_search,
+                aws_profile,
+                aws_region,
                 context_1m,
                 api_mode,
                 max_tokens,
@@ -279,6 +308,10 @@ pub fn execute(cli: Cli) -> Result<()> {
                         model_mapping,
                         model,
                         reasoning_effort,
+                        env_key,
+                        supports_standalone_web_search,
+                        aws_profile,
+                        aws_region,
                         context_1m,
                         api_mode,
                         max_tokens,
@@ -308,6 +341,10 @@ pub fn execute(cli: Cli) -> Result<()> {
                 model_mapping,
                 model,
                 reasoning_effort,
+                env_key,
+                supports_standalone_web_search,
+                aws_profile,
+                aws_region,
                 context_1m,
                 api_mode,
                 max_tokens,
@@ -323,6 +360,10 @@ pub fn execute(cli: Cli) -> Result<()> {
                         model_mapping,
                         model,
                         reasoning_effort,
+                        env_key,
+                        supports_standalone_web_search,
+                        aws_profile,
+                        aws_region,
                         context_1m,
                         api_mode,
                         max_tokens,
@@ -385,12 +426,16 @@ pub fn execute(cli: Cli) -> Result<()> {
 
 struct ProfileAddRequest {
     name: String,
-    url: String,
-    key: String,
+    url: Option<String>,
+    key: Option<String>,
     provider: String,
     model_mapping: Option<String>,
     model: Option<String>,
     reasoning_effort: Option<String>,
+    env_key: Option<String>,
+    supports_standalone_web_search: bool,
+    aws_profile: Option<String>,
+    aws_region: Option<String>,
     context_1m: bool,
     api_mode: Option<String>,
     max_tokens: Option<i64>,
@@ -406,9 +451,33 @@ struct ProfileUpdateRequest {
     model_mapping: Option<String>,
     model: Option<String>,
     reasoning_effort: Option<String>,
+    env_key: Option<String>,
+    supports_standalone_web_search: Option<bool>,
+    aws_profile: Option<String>,
+    aws_region: Option<String>,
     context_1m: Option<bool>,
     api_mode: Option<String>,
     max_tokens: Option<i64>,
+}
+
+fn validate_profile_input(profile: &ApiProfile) -> Result<()> {
+    let is_bedrock = switch_api::adapters::codex::CodexAdapter::is_amazon_bedrock_profile(profile);
+    if is_bedrock {
+        if profile.target_app != Some(TargetApp::Codex) {
+            anyhow::bail!("provider=amazon-bedrock requires --target-app codex");
+        }
+        return Ok(());
+    }
+
+    if profile.api_url.trim().is_empty() {
+        anyhow::bail!("--url is required unless provider=amazon-bedrock for Codex");
+    }
+    let uses_codex_env =
+        profile.target_app == Some(TargetApp::Codex) && profile.codex.env_key.is_some();
+    if !uses_codex_env && profile.api_key.trim().is_empty() {
+        anyhow::bail!("--key is required unless Codex --env-key is provided");
+    }
+    Ok(())
 }
 
 fn cmd_init(db: &Database, target_app: TargetApp) -> Result<()> {
@@ -444,6 +513,10 @@ fn cmd_profile_add(db: &Database, request: ProfileAddRequest) -> Result<()> {
         model_mapping,
         model,
         reasoning_effort,
+        env_key,
+        supports_standalone_web_search,
+        aws_profile,
+        aws_region,
         context_1m,
         api_mode,
         max_tokens,
@@ -458,7 +531,13 @@ fn cmd_profile_add(db: &Database, request: ProfileAddRequest) -> Result<()> {
         None
     };
 
-    let mut profile = ApiProfile::new(name.clone(), provider, url, key, model_mapping_map);
+    let mut profile = ApiProfile::new(
+        name.clone(),
+        provider,
+        url.unwrap_or_default(),
+        key.unwrap_or_default(),
+        model_mapping_map,
+    );
     profile.model = model.filter(|value| !value.trim().is_empty());
     profile.codex.reasoning_effort = reasoning_effort.filter(|value| !value.trim().is_empty());
     if context_1m {
@@ -468,6 +547,17 @@ fn cmd_profile_add(db: &Database, request: ProfileAddRequest) -> Result<()> {
     if let Some(t) = target_app.as_deref() {
         profile.target_app = Some(parse_target_app(t)?);
     }
+    if profile.target_app == Some(TargetApp::Codex) {
+        profile.codex = CodexProfileFields {
+            reasoning_effort: profile.codex.reasoning_effort.take(),
+            env_key: env_key.filter(|value| !value.trim().is_empty()),
+            supports_standalone_web_search: supports_standalone_web_search.then_some(true),
+            aws_profile: aws_profile.filter(|value| !value.trim().is_empty()),
+            aws_region: aws_region.filter(|value| !value.trim().is_empty()),
+            ..Default::default()
+        };
+    }
+    validate_profile_input(&profile)?;
 
     let mode = api_mode.filter(|v| !v.trim().is_empty());
     match profile.target_app {
@@ -646,6 +736,10 @@ fn cmd_profile_update(db: &Database, request: ProfileUpdateRequest) -> Result<()
         model_mapping,
         model,
         reasoning_effort,
+        env_key,
+        supports_standalone_web_search,
+        aws_profile,
+        aws_region,
         context_1m,
         api_mode,
         max_tokens,
@@ -699,6 +793,26 @@ fn cmd_profile_update(db: &Database, request: ProfileUpdateRequest) -> Result<()
         updated = true;
     }
 
+    if let Some(new_env_key) = env_key {
+        profile.codex.env_key = (!new_env_key.trim().is_empty()).then_some(new_env_key);
+        updated = true;
+    }
+
+    if let Some(enabled) = supports_standalone_web_search {
+        profile.codex.supports_standalone_web_search = enabled.then_some(true);
+        updated = true;
+    }
+
+    if let Some(new_aws_profile) = aws_profile {
+        profile.codex.aws_profile = (!new_aws_profile.trim().is_empty()).then_some(new_aws_profile);
+        updated = true;
+    }
+
+    if let Some(new_aws_region) = aws_region {
+        profile.codex.aws_region = (!new_aws_region.trim().is_empty()).then_some(new_aws_region);
+        updated = true;
+    }
+
     if let Some(new_context_1m) = context_1m {
         profile.context_1m = Some(new_context_1m);
         updated = true;
@@ -738,6 +852,16 @@ fn cmd_profile_update(db: &Database, request: ProfileUpdateRequest) -> Result<()
         return Ok(());
     }
 
+    if target == TargetApp::Codex
+        && switch_api::adapters::codex::CodexAdapter::is_amazon_bedrock_profile(&profile)
+    {
+        profile.api_url.clear();
+        profile.api_key.clear();
+        profile.api_keys = None;
+        profile.codex.env_key = None;
+        profile.codex.supports_standalone_web_search = None;
+    }
+    validate_profile_input(&profile)?;
     db.update_profile(&profile)?;
     utils::success(&format!("已更新 Profile: {}", name));
 
@@ -1056,6 +1180,11 @@ fn model_for_probe(profile: &ApiProfile) -> String {
 
 async fn cli_failover(profile: &mut ApiProfile, target: TargetApp) -> Result<bool> {
     use switch_api::probe::probe_with_params;
+    if target == TargetApp::Codex
+        && switch_api::adapters::codex::CodexAdapter::is_amazon_bedrock_profile(profile)
+    {
+        anyhow::bail!("Amazon Bedrock uses Codex built-in AWS authentication and cannot use HTTP key failover");
+    }
     profile.normalize_keys();
     let model = model_for_probe(profile);
     if model.is_empty() {

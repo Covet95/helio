@@ -1,4 +1,4 @@
-import type { ApiProfile, StatusInfo, TargetApp } from '../../types';
+import type { ApiProfile, CodexCatalogModel, StatusInfo, TargetApp } from '../../types';
 import { SUPPORTED_TOOLS } from '../../types';
 import { PROVIDER_PRESETS } from '../../lib/presets';
 import { cn } from '../../lib/utils';
@@ -101,4 +101,27 @@ export function emptyProfileForTool(tool: TargetApp): ApiProfile {
     };
   }
   return base;
+}
+
+export function normalizeCodexCatalogModels(
+  catalogModels: CodexCatalogModel[] | undefined,
+): CodexCatalogModel[] | undefined {
+  const cleaned = (catalogModels || [])
+    .map((entry) => ({
+      slug: entry.slug,
+      display_name: entry.display_name?.trim() ? entry.display_name : undefined,
+      context_window: entry.context_window && entry.context_window > 0
+        ? entry.context_window
+        : undefined,
+      reasoning_levels: Array.from(new Set(
+        (entry.reasoning_levels ?? (entry.supports_reasoning ? ['low', 'medium', 'high'] : []))
+          .map((level) => level.trim().toLowerCase())
+          .filter((level) => ['minimal', 'low', 'medium', 'high', 'xhigh'].includes(level)),
+      )),
+      supports_images: entry.supports_images || undefined,
+      supports_tool_calls: entry.supports_tool_calls || undefined,
+      supports_web_search: entry.supports_web_search || undefined,
+    }))
+    .filter((entry) => entry.slug.trim().length > 0);
+  return cleaned.length ? cleaned : undefined;
 }

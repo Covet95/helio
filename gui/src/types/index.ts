@@ -3,6 +3,7 @@ export interface CodexCatalogModel {
   slug: string;
   display_name?: string;
   context_window?: number;
+  reasoning_levels?: string[];
   supports_reasoning?: boolean;
   supports_images?: boolean;
   supports_tool_calls?: boolean;
@@ -39,10 +40,14 @@ export interface ApiProfile {
   requires_openai_auth?: boolean;
   /** Codex legacy import compatibility. */
   experimental_bearer_token?: string;
-  /** Codex 顶层 model_thinking_enabled 开关 */
-  model_thinking_enabled?: boolean;
   /** Codex 顶层 service_tier（如 fast） */
   service_tier?: string;
+  /** Custom Codex provider declares standalone web-search support. */
+  supports_standalone_web_search?: boolean;
+  /** Built-in Amazon Bedrock profile override. */
+  aws_profile?: string;
+  /** Built-in Amazon Bedrock profile override. */
+  aws_region?: string;
   /**
    * 协议模式。Hermes → model.api_mode / custom_providers[].api_mode；
    * OpenClaw → models.providers.<id>.api。各工具独立解释，不共用适配逻辑。

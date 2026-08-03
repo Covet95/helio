@@ -8,8 +8,7 @@ use switch_api::models::{ApiProfile, TargetApp};
 use tauri::State;
 
 use crate::commands::helpers::{
-    claude_extract_models, codex_bool_field, codex_context_1m, codex_string_field,
-    default_provider, str_field,
+    claude_extract_models, codex_context_1m, codex_string_field, default_provider, str_field,
 };
 
 pub struct AppState {
@@ -833,8 +832,10 @@ pub struct ScannedApi {
     pub env_key: Option<String>,
     pub requires_openai_auth: Option<bool>,
     pub experimental_bearer_token: Option<String>,
-    pub model_thinking_enabled: Option<bool>,
     pub service_tier: Option<String>,
+    pub supports_standalone_web_search: Option<bool>,
+    pub aws_profile: Option<String>,
+    pub aws_region: Option<String>,
     /// Hermes / OpenClaw 协议模式（独立字段，不再借用 wire_api）
     pub api_mode: Option<String>,
     /// OpenClaw models[].maxTokens
@@ -859,6 +860,9 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
     let mut codex_env_key: Option<String> = None;
     let mut requires_openai_auth: Option<bool> = None;
     let mut experimental_bearer_token: Option<String> = None;
+    let mut supports_standalone_web_search: Option<bool> = None;
+    let mut aws_profile: Option<String> = None;
+    let mut aws_region: Option<String> = None;
     // Claude Code 的默认模型 / 角色映射（仅 ClaudeCode 用到）
     let mut claude_model: Option<String> = None;
     let mut claude_mapping: Option<std::collections::HashMap<String, String>> = None;
@@ -886,37 +890,54 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
                 // 优先用 model_provider 指定的块，否则取第一个
                 let block = providers.get(&pid).or_else(|| providers.values().next());
                 if let Some(b) = block {
-                    url = str_field(b, "base_url");
-                    // 某些配置把 key 写在 provider 块里
-                    if key.is_empty() {
-                        key = str_field(b, "api_key");
-                    }
-                    // env_key 指向环境变量名
-                    let env_key = str_field(b, "env_key");
-                    if !env_key.trim().is_empty() {
-                        codex_env_key = Some(env_key.clone());
-                    }
-                    if key.is_empty() && !env_key.is_empty() {
-                        key = std::env::var(&env_key).unwrap_or_default();
-                    }
-                    // 回带 provider 块内的协议字段，供导入还原
-                    let w = str_field(b, "wire_api");
-                    if !w.trim().is_empty() {
-                        wire_api = Some(w);
-                    }
-                    requires_openai_auth = b.get("requires_openai_auth").and_then(|v| v.as_bool());
-                    let bearer = str_field(b, "experimental_bearer_token");
-                    if !bearer.trim().is_empty() {
-                        experimental_bearer_token = Some(bearer);
+                    if pid == "amazon-bedrock" {
+                        if let Some(aws) = b.get("aws") {
+                            let profile = str_field(aws, "profile");
+                            if !profile.is_empty() {
+                                aws_profile = Some(profile);
+                            }
+                            let region = str_field(aws, "region");
+                            if !region.is_empty() {
+                                aws_region = Some(region);
+                            }
+                        }
+                    } else {
+                        url = str_field(b, "base_url");
+                        // 某些配置把 key 写在 provider 块里
+                        if key.is_empty() {
+                            key = str_field(b, "api_key");
+                        }
+                        // env_key 指向环境变量名
+                        let env_key = str_field(b, "env_key");
+                        if !env_key.trim().is_empty() {
+                            codex_env_key = Some(env_key.clone());
+                        }
+                        if key.is_empty() && !env_key.is_empty() {
+                            key = std::env::var(&env_key).unwrap_or_default();
+                        }
+                        // 回带 provider 块内的协议字段，供导入还原
+                        let w = str_field(b, "wire_api");
+                        if !w.trim().is_empty() {
+                            wire_api = Some(w);
+                        }
+                        requires_openai_auth =
+                            b.get("requires_openai_auth").and_then(|v| v.as_bool());
+                        supports_standalone_web_search = b
+                            .get("supports_standalone_web_search")
+                            .and_then(|v| v.as_bool());
+                        let bearer = str_field(b, "experimental_bearer_token");
+                        if !bearer.trim().is_empty() {
+                            experimental_bearer_token = Some(bearer);
+                        }
                     }
                 }
             }
             // 顶层兜底
-            if url.is_empty() {
+            if pid != "amazon-bedrock" && url.is_empty() {
                 url = str_field(&cfg, "base_url");
             }
             // 从 auth.json 或常见环境变量读 key
-            if key.is_empty() {
+            if pid != "amazon-bedrock" && key.is_empty() {
                 if let Some(home) = dirs::home_dir() {
                     let auth = home.join(".codex").join("auth.json");
                     if let Ok(c) = std::fs::read_to_string(&auth) {
@@ -929,7 +950,7 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
                     }
                 }
             }
-            if key.is_empty() {
+            if pid != "amazon-bedrock" && key.is_empty() {
                 key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
             }
         }
@@ -1182,6 +1203,12 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
         }
         api_mode = None;
     }
+    if target == TargetApp::Codex {
+        let active_provider = str_field(&cfg, "model_provider");
+        if !active_provider.is_empty() {
+            provider = active_provider;
+        }
+    }
 
     // Codex/Claude keep their own context_1m path; Hermes/OpenClaw use local scan.
     let resolved_context_1m = match target {
@@ -1190,7 +1217,9 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
     };
 
     Ok(ScannedApi {
-        found: !url.is_empty() || !key.is_empty(),
+        found: !url.is_empty()
+            || !key.is_empty()
+            || (target == TargetApp::Codex && provider == "amazon-bedrock"),
         api_url: url,
         api_key: key,
         provider,
@@ -1209,8 +1238,10 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
         env_key: codex_env_key,
         requires_openai_auth,
         experimental_bearer_token,
-        model_thinking_enabled: codex_bool_field(target, &cfg, "model_thinking_enabled"),
         service_tier: codex_string_field(target, &cfg, "service_tier"),
+        supports_standalone_web_search,
+        aws_profile,
+        aws_region,
         api_mode,
         max_tokens,
         source,
@@ -1469,11 +1500,29 @@ async fn run_failover(
         (p, was)
     };
 
+    if target == TargetApp::Codex
+        && switch_api::adapters::codex::CodexAdapter::is_amazon_bedrock_profile(&profile)
+    {
+        return Err(
+            "Amazon Bedrock 使用 Codex 内置 AWS 认证，不能通过 HTTP API Key 探活或 failover".into(),
+        );
+    }
+
     let model = model_for_probe(&profile);
     if model.is_empty() {
         return Err("先为该 Profile 填写默认模型再 failover".into());
     }
+    let wire_api = if target == TargetApp::Codex {
+        profile.codex.wire_api.clone()
+    } else {
+        None
+    };
     let mode = profile_protocol_fields(&profile);
+    let experimental_bearer_token = if target == TargetApp::Codex {
+        profile.codex.experimental_bearer_token.clone()
+    } else {
+        None
+    };
     let app_str = target.as_str().to_string();
 
     let mut keys = profile.api_keys.clone().unwrap_or_default();
@@ -1497,7 +1546,9 @@ async fn run_failover(
             let app_str = app_str.clone();
             let api_url = profile.api_url.clone();
             let model = model.clone();
+            let wire_api = wire_api.clone();
             let mode = mode.clone();
+            let experimental_bearer_token = experimental_bearer_token.clone();
             async move {
                 (
                     entry.id.clone(),
@@ -1509,9 +1560,9 @@ async fn run_failover(
                             api_url: &api_url,
                             api_key: &entry.key,
                             model: &model,
-                            wire_api: None,
+                            wire_api: wire_api.as_deref(),
                             api_mode: mode.as_deref(),
-                            experimental_bearer_token: None,
+                            experimental_bearer_token: experimental_bearer_token.as_deref(),
                             key_label: Some(entry.label.clone()),
                         }),
                     )

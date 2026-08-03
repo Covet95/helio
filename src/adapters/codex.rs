@@ -8,6 +8,8 @@ use std::path::PathBuf;
 /// 非 1M 时 catalog 条目默认上下文（与常见 Codex 内置条目对齐）
 const CATALOG_CONTEXT_STANDARD: i64 = 272_000;
 const CATALOG_CONTEXT_1M: i64 = 1_000_000;
+const LEGACY_REASONING_LEVELS: &[&str] = &["low", "medium", "high"];
+const CODEX_REASONING_LEVELS: &[&str] = &["minimal", "low", "medium", "high", "xhigh"];
 
 const FALLBACK_BASE_INSTRUCTIONS: &str = "You are Codex, a coding agent based on GPT-5. You and the user share one workspace, and your job is to collaborate with them until their goal is genuinely handled.";
 
@@ -32,6 +34,37 @@ impl CodexAdapter {
 
     fn model_catalog_path(&self) -> PathBuf {
         self.config_dir.join("model_catalog.json")
+    }
+
+    pub fn is_amazon_bedrock_profile(api_profile: &ApiProfile) -> bool {
+        api_profile
+            .provider
+            .trim()
+            .eq_ignore_ascii_case("amazon-bedrock")
+    }
+
+    fn normalized_reasoning_levels(entry: &CodexCatalogModel) -> Vec<String> {
+        let source: Vec<String> = entry
+            .reasoning_levels
+            .clone()
+            .or_else(|| {
+                entry.supports_reasoning.and_then(|enabled| {
+                    enabled.then(|| {
+                        LEGACY_REASONING_LEVELS
+                            .iter()
+                            .map(|level| (*level).to_string())
+                            .collect()
+                    })
+                })
+            })
+            .unwrap_or_default();
+        let mut seen = std::collections::HashSet::new();
+        source
+            .into_iter()
+            .map(|level| level.trim().to_ascii_lowercase())
+            .filter(|level| CODEX_REASONING_LEVELS.contains(&level.as_str()))
+            .filter(|level| seen.insert(level.clone()))
+            .collect()
     }
 
     /// 有效 catalog 列表：过滤空 slug、按首次出现去重，默认 model 不在列表时 prepend。
@@ -59,6 +92,7 @@ impl CodexAdapter {
                     slug: slug.to_string(),
                     display_name,
                     context_window: entry.context_window,
+                    reasoning_levels: entry.reasoning_levels.clone(),
                     supports_reasoning: entry.supports_reasoning,
                     supports_images: entry.supports_images,
                     supports_tool_calls: entry.supports_tool_calls,
@@ -129,20 +163,26 @@ impl CodexAdapter {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .unwrap_or(e.slug.as_str());
-                let context_window = e.context_window.filter(|value| *value > 0).unwrap_or(default_context);
-                let supports_reasoning = e.supports_reasoning.unwrap_or(false);
+                let context_window = e
+                    .context_window
+                    .filter(|value| *value > 0)
+                    .unwrap_or(default_context);
+                let reasoning_levels = Self::normalized_reasoning_levels(e);
+                let supports_reasoning = !reasoning_levels.is_empty();
                 let supports_images = e.supports_images.unwrap_or(false);
                 let supports_tool_calls = e.supports_tool_calls.unwrap_or(false);
                 let supports_web_search = e.supports_web_search.unwrap_or(false);
-                let reasoning_levels = if supports_reasoning {
-                    serde_json::json!([
-                        { "effort": "low", "description": "Fast responses with lighter reasoning" },
-                        { "effort": "medium", "description": "Balances speed and reasoning depth for everyday tasks" },
-                        { "effort": "high", "description": "Greater reasoning depth for complex problems" }
-                    ])
-                } else {
-                    serde_json::json!([])
-                };
+                let reasoning_levels = serde_json::Value::Array(
+                    reasoning_levels
+                        .iter()
+                        .map(|effort| {
+                            serde_json::json!({
+                                "effort": effort,
+                                "description": format!("{effort} reasoning effort")
+                            })
+                        })
+                        .collect(),
+                );
                 let input_modalities = if supports_images {
                     serde_json::json!(["text", "image"])
                 } else {
@@ -152,7 +192,14 @@ impl CodexAdapter {
                     "slug": e.slug,
                     "display_name": display,
                     "description": format!("Custom {} model via proxy provider.", e.slug),
-                    "default_reasoning_level": if supports_reasoning { "medium" } else { "none" },
+                    "default_reasoning_level": if supports_reasoning {
+                        Self::normalized_reasoning_levels(e)
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| "medium".to_string())
+                    } else {
+                        "none".to_string()
+                    },
                     "supported_reasoning_levels": reasoning_levels,
                     "shell_type": "shell_command",
                     "visibility": "list",
@@ -213,7 +260,7 @@ impl CodexAdapter {
     /// Codex 内置（保留）的 provider id —— 不允许在 model_providers 中覆盖。
     /// 参见 Codex 报错：`model_providers contains reserved built-in provider IDs`。
     fn is_reserved_provider_id(id: &str) -> bool {
-        matches!(id, "openai" | "ollama" | "lmstudio" | "amazon-bedrock")
+        matches!(id, "openai" | "ollama" | "lmstudio")
     }
 
     fn env_key(api_profile: &ApiProfile) -> Option<&str> {
@@ -347,6 +394,48 @@ impl ConfigAdapter for CodexAdapter {
         shared
     }
 
+    fn validate_profile(&self, api_profile: &ApiProfile) -> Result<()> {
+        if !Self::is_amazon_bedrock_profile(api_profile) {
+            if api_profile.api_url.trim().is_empty() {
+                anyhow::bail!("Codex custom provider requires an API URL");
+            }
+            if Self::env_key(api_profile).is_none() && api_profile.api_key.trim().is_empty() {
+                anyhow::bail!("Codex custom provider requires an API key or env_key");
+            }
+        }
+
+        if let Some(effort) = api_profile
+            .codex
+            .reasoning_effort
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            if !CODEX_REASONING_LEVELS.contains(&effort) {
+                anyhow::bail!("Unsupported Codex reasoning effort: {effort}");
+            }
+        }
+
+        if let Some(entries) = api_profile.codex.catalog_models.as_ref() {
+            for entry in entries {
+                if let Some(levels) = entry.reasoning_levels.as_ref() {
+                    for level in levels {
+                        let normalized = level.trim().to_ascii_lowercase();
+                        if !CODEX_REASONING_LEVELS.contains(&normalized.as_str()) {
+                            anyhow::bail!(
+                                "Unsupported Codex catalog reasoning level for {}: {}",
+                                entry.slug,
+                                level
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn merge_config(
         &self,
         api_profile: &ApiProfile,
@@ -354,73 +443,127 @@ impl ConfigAdapter for CodexAdapter {
     ) -> serde_json::Value {
         let mut config = shared_config.clone();
 
+        let is_bedrock = Self::is_amazon_bedrock_profile(api_profile);
         if config.get("model_providers").is_none() {
             config["model_providers"] = serde_json::json!({});
         }
 
-        // 使用 profile.provider 作为 provider id（默认沿用 "custom"）。
-        // Codex 保留了内置 provider id（如 `openai`），不允许在 model_providers
-        // 中覆盖；若撞上保留字则加 `-custom` 后缀（与 Codex 报错建议一致）。
-        let raw_id = if api_profile.provider.is_empty() {
-            "custom".to_string()
-        } else {
-            api_profile.provider.to_lowercase()
-        };
-        let provider_id = if Self::is_reserved_provider_id(&raw_id) {
-            format!("{raw_id}-custom")
-        } else {
-            raw_id
-        };
-
-        // 写入目标 provider 配置并规范化 Responses 与鉴权模式；其他 provider 不动。
-        if let Some(providers) = config
-            .get_mut("model_providers")
-            .and_then(|v| v.as_object_mut())
-        {
-            let is_new = !providers.contains_key(&provider_id);
-            let entry = providers
-                .entry(provider_id.clone())
-                .or_insert_with(|| serde_json::json!({}));
-            if let Some(p) = entry.as_object_mut() {
-                p.insert(
-                    "base_url".to_string(),
-                    serde_json::Value::String(api_profile.api_url.clone()),
-                );
-                if let Some(env_key) = Self::env_key(api_profile) {
-                    p.insert(
-                        "env_key".to_string(),
-                        serde_json::Value::String(env_key.to_string()),
-                    );
-                    p.insert(
-                        "requires_openai_auth".to_string(),
-                        serde_json::Value::Bool(false),
+        if is_bedrock {
+            config["model_provider"] = serde_json::Value::String("amazon-bedrock".to_string());
+            if let Some(providers) = config
+                .get_mut("model_providers")
+                .and_then(|value| value.as_object_mut())
+            {
+                providers.remove("amazon-bedrock-custom");
+                let profile = api_profile
+                    .codex
+                    .aws_profile
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                let region = api_profile
+                    .codex
+                    .aws_region
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                if profile.is_some() || region.is_some() {
+                    let mut aws = serde_json::Map::new();
+                    if let Some(profile) = profile {
+                        aws.insert(
+                            "profile".to_string(),
+                            serde_json::Value::String(profile.to_string()),
+                        );
+                    }
+                    if let Some(region) = region {
+                        aws.insert(
+                            "region".to_string(),
+                            serde_json::Value::String(region.to_string()),
+                        );
+                    }
+                    providers.insert(
+                        "amazon-bedrock".to_string(),
+                        serde_json::json!({ "aws": aws }),
                     );
                 } else {
-                    p.remove("env_key");
-                    p.insert(
-                        "requires_openai_auth".to_string(),
-                        serde_json::Value::Bool(true),
-                    );
-                }
-                p.remove("experimental_bearer_token");
-                p.insert(
-                    "wire_api".to_string(),
-                    serde_json::Value::String("responses".to_string()),
-                );
-                if is_new {
-                    // 全新 provider：补上 Codex 必需的 name 默认值。
-                    p.entry("name".to_string())
-                        .or_insert_with(|| serde_json::Value::String(provider_id.clone()));
+                    providers.remove("amazon-bedrock");
                 }
             }
+        } else {
+            // 使用 profile.provider 作为 provider id（默认沿用 "custom"）。
+            // Codex 保留了内置 provider id（如 `openai`），不允许在 model_providers
+            // 中覆盖；若撞上保留字则加 `-custom` 后缀（与 Codex 报错建议一致）。
+            let raw_id = if api_profile.provider.is_empty() {
+                "custom".to_string()
+            } else {
+                api_profile.provider.to_lowercase()
+            };
+            let provider_id = if Self::is_reserved_provider_id(&raw_id) {
+                format!("{raw_id}-custom")
+            } else {
+                raw_id
+            };
+
+            // 写入目标 provider 配置并规范化 Responses 与鉴权模式；其他 provider 不动。
+            if let Some(providers) = config
+                .get_mut("model_providers")
+                .and_then(|v| v.as_object_mut())
+            {
+                let is_new = !providers.contains_key(&provider_id);
+                let entry = providers
+                    .entry(provider_id.clone())
+                    .or_insert_with(|| serde_json::json!({}));
+                if let Some(p) = entry.as_object_mut() {
+                    p.insert(
+                        "base_url".to_string(),
+                        serde_json::Value::String(api_profile.api_url.clone()),
+                    );
+                    if let Some(env_key) = Self::env_key(api_profile) {
+                        p.insert(
+                            "env_key".to_string(),
+                            serde_json::Value::String(env_key.to_string()),
+                        );
+                        p.insert(
+                            "requires_openai_auth".to_string(),
+                            serde_json::Value::Bool(false),
+                        );
+                    } else {
+                        p.remove("env_key");
+                        p.insert(
+                            "requires_openai_auth".to_string(),
+                            serde_json::Value::Bool(true),
+                        );
+                    }
+                    if api_profile.codex.supports_standalone_web_search == Some(true) {
+                        p.insert(
+                            "supports_standalone_web_search".to_string(),
+                            serde_json::Value::Bool(true),
+                        );
+                    } else {
+                        p.remove("supports_standalone_web_search");
+                    }
+                    p.remove("experimental_bearer_token");
+                    p.insert(
+                        "wire_api".to_string(),
+                        serde_json::Value::String("responses".to_string()),
+                    );
+                    if is_new {
+                        // 全新 provider：补上 Codex 必需的 name 默认值。
+                        p.entry("name".to_string())
+                            .or_insert_with(|| serde_json::Value::String(provider_id.clone()));
+                    }
+                }
+            }
+            config["model_provider"] = serde_json::Value::String(provider_id);
         }
 
-        // 设置当前使用的 provider。API key 不写 config.toml —— 走 auth.json
-        // （见 apply_api_credentials），且清掉历史版本误写入的顶层 api_key。
-        config["model_provider"] = serde_json::Value::String(provider_id);
+        // API key 不写 config.toml —— 走 auth.json（见 apply_api_credentials），
+        // 且清掉历史版本误写入的顶层 api_key。
         if let Some(obj) = config.as_object_mut() {
             obj.remove("api_key");
-            if Self::env_key(api_profile).is_none() {
+            obj.remove("aws_profile");
+            obj.remove("aws_region");
+            if !is_bedrock && Self::env_key(api_profile).is_none() {
                 obj.insert(
                     "cli_auth_credentials_store".to_string(),
                     serde_json::Value::String("file".to_string()),
@@ -481,17 +624,7 @@ impl ConfigAdapter for CodexAdapter {
 
             obj.remove("model_effort_level");
 
-            match api_profile.codex.model_thinking_enabled {
-                Some(enabled) => {
-                    obj.insert(
-                        "model_thinking_enabled".to_string(),
-                        serde_json::Value::Bool(enabled),
-                    );
-                }
-                None => {
-                    obj.remove("model_thinking_enabled");
-                }
-            }
+            obj.remove("model_thinking_enabled");
 
             match api_profile
                 .codex
@@ -588,7 +721,7 @@ impl ConfigAdapter for CodexAdapter {
         // catalog 先于 auth：失败则整次 switch 的 apply 失败，可重试
         self.write_model_catalog(api_profile)?;
 
-        if Self::env_key(api_profile).is_some() {
+        if Self::is_amazon_bedrock_profile(api_profile) || Self::env_key(api_profile).is_some() {
             return Ok(());
         }
 
@@ -747,7 +880,7 @@ command = "npx"
     }
 
     #[test]
-    fn test_merge_avoids_reserved_provider_id() {
+    fn test_merge_uses_built_in_amazon_bedrock() {
         let adapter = CodexAdapter::new();
         // 非保留字 provider 原样使用
         let custom = ApiProfile {
@@ -758,14 +891,43 @@ command = "npx"
         assert_eq!(merged["model_provider"], "myproxy");
         assert!(merged["model_providers"]["myproxy"].is_object());
 
-        // 当前 Codex 保留字同样被改名
+        // Amazon Bedrock is a Codex built-in provider, not a custom provider id.
         let built_in = ApiProfile {
             provider: "Amazon-Bedrock".to_string(),
+            codex: CodexProfileFields {
+                aws_profile: Some("production".into()),
+                aws_region: Some("us-east-1".into()),
+                ..Default::default()
+            },
             ..sample_profile()
         };
-        let merged = adapter.merge_config(&built_in, &serde_json::json!({}));
-        assert_eq!(merged["model_provider"], "amazon-bedrock-custom");
-        assert!(merged["model_providers"].get("amazon-bedrock").is_none());
+        let merged = adapter.merge_config(
+            &built_in,
+            &serde_json::json!({
+                "model_providers": {
+                    "amazon-bedrock-custom": {"base_url": "https://stale.example"}
+                }
+            }),
+        );
+        assert_eq!(merged["model_provider"], "amazon-bedrock");
+        assert!(merged["model_providers"]
+            .get("amazon-bedrock-custom")
+            .is_none());
+        assert_eq!(
+            merged["model_providers"]["amazon-bedrock"]["aws"]["profile"],
+            "production"
+        );
+        assert_eq!(
+            merged["model_providers"]["amazon-bedrock"]["aws"]["region"],
+            "us-east-1"
+        );
+        assert!(merged.get("aws_profile").is_none());
+        assert!(merged.get("aws_region").is_none());
+        let toml = CodexAdapter::json_to_toml(&merged).unwrap();
+        let serialized = toml::to_string(&toml).unwrap();
+        assert!(serialized.contains("[model_providers.amazon-bedrock.aws]"));
+        assert!(serialized.contains("profile = \"production\""));
+        assert!(serialized.contains("region = \"us-east-1\""));
     }
 
     #[test]
@@ -873,6 +1035,66 @@ command = "npx"
     }
 
     #[test]
+    fn test_merge_writes_standalone_web_search_only_when_enabled() {
+        let adapter = CodexAdapter::new();
+        let enabled = ApiProfile {
+            provider: "myproxy".into(),
+            codex: CodexProfileFields {
+                supports_standalone_web_search: Some(true),
+                ..Default::default()
+            },
+            ..sample_profile()
+        };
+        let merged = adapter.merge_config(&enabled, &serde_json::json!({}));
+        assert_eq!(
+            merged["model_providers"]["myproxy"]["supports_standalone_web_search"],
+            true
+        );
+
+        let disabled = ApiProfile {
+            provider: "myproxy".into(),
+            ..sample_profile()
+        };
+        let merged = adapter.merge_config(
+            &disabled,
+            &serde_json::json!({
+                "model_providers": {
+                    "myproxy": {"supports_standalone_web_search": true}
+                }
+            }),
+        );
+        assert!(merged["model_providers"]["myproxy"]
+            .get("supports_standalone_web_search")
+            .is_none());
+    }
+
+    #[test]
+    fn test_validate_rejects_unsupported_reasoning_levels() {
+        let adapter = CodexAdapter::new();
+        let profile = ApiProfile {
+            codex: CodexProfileFields {
+                reasoning_effort: Some("ultra".into()),
+                ..Default::default()
+            },
+            ..sample_profile()
+        };
+        assert!(adapter.validate_profile(&profile).is_err());
+
+        let profile = ApiProfile {
+            codex: CodexProfileFields {
+                catalog_models: Some(vec![CodexCatalogModel {
+                    slug: "proxy-model".into(),
+                    reasoning_levels: Some(vec!["ultra".into()]),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            },
+            ..sample_profile()
+        };
+        assert!(adapter.validate_profile(&profile).is_err());
+    }
+
+    #[test]
     fn test_switch_preserves_unrelated_provider_exactly() {
         let adapter = CodexAdapter::new();
         let current = serde_json::json!({
@@ -902,7 +1124,6 @@ command = "npx"
         let adapter = CodexAdapter::new();
         let profile = ApiProfile {
             codex: CodexProfileFields {
-                model_thinking_enabled: Some(true),
                 service_tier: Some("fast".to_string()),
                 ..Default::default()
             },
@@ -911,7 +1132,6 @@ command = "npx"
 
         let merged = adapter.merge_config(&profile, &serde_json::json!({}));
 
-        assert_eq!(merged["model_thinking_enabled"], true);
         assert_eq!(merged["service_tier"], "fast");
     }
 
@@ -1264,12 +1484,34 @@ command = "npx"
     }
 
     #[test]
+    fn test_bedrock_profile_does_not_modify_auth_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth_path = dir.path().join("auth.json");
+        fs::write(&auth_path, r#"{"OPENAI_API_KEY":"keep"}"#).unwrap();
+        let adapter = CodexAdapter {
+            config_dir: dir.path().to_path_buf(),
+        };
+        let profile = ApiProfile {
+            provider: "amazon-bedrock".into(),
+            api_url: String::new(),
+            api_key: String::new(),
+            target_app: Some(crate::models::TargetApp::Codex),
+            ..Default::default()
+        };
+        adapter.apply_api_credentials(&profile).unwrap();
+        assert_eq!(
+            fs::read_to_string(auth_path).unwrap(),
+            r#"{"OPENAI_API_KEY":"keep"}"#
+        );
+    }
+
+    #[test]
     fn test_catalog_uses_explicit_model_capabilities() {
         let catalog = CodexAdapter::build_catalog_json(
             &[CodexCatalogModel {
                 slug: "capable".into(),
                 context_window: Some(640_000),
-                supports_reasoning: Some(true),
+                reasoning_levels: Some(vec!["minimal".into(), "xhigh".into()]),
                 supports_images: Some(true),
                 supports_tool_calls: Some(true),
                 supports_web_search: Some(true),
@@ -1281,6 +1523,14 @@ command = "npx"
         let model = &catalog["models"][0];
         assert_eq!(model["context_window"], 640_000);
         assert_eq!(model["supports_reasoning_summaries"], true);
+        assert_eq!(model["default_reasoning_level"], "minimal");
+        assert_eq!(
+            model["supported_reasoning_levels"],
+            serde_json::json!([
+                {"effort": "minimal", "description": "minimal reasoning effort"},
+                {"effort": "xhigh", "description": "xhigh reasoning effort"}
+            ])
+        );
         assert_eq!(model["supports_parallel_tool_calls"], true);
         assert_eq!(model["supports_search_tool"], true);
         assert_eq!(

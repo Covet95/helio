@@ -230,21 +230,14 @@ export default function ConfigPage() {
   );
 }
 
-// Codex 全局行为字段：官方枚举用下拉，魔改字段标注「非官方」。
+// Codex 全局行为字段：只暴露官方文档中的顶层键。
 const CODEX_SELECT_FIELDS: { key: string; label: string; options: string[] }[] = [
-  { key: 'approval_policy', label: 'approval_policy', options: ['untrusted', 'on-failure', 'on-request', 'never'] },
+  { key: 'approval_policy', label: 'approval_policy', options: ['untrusted', 'on-request', 'never'] },
   { key: 'sandbox_mode', label: 'sandbox_mode', options: ['read-only', 'workspace-write', 'danger-full-access'] },
   { key: 'personality', label: 'personality', options: ['none', 'friendly', 'pragmatic'] },
   { key: 'model_reasoning_effort', label: 'model_reasoning_effort', options: ['minimal', 'low', 'medium', 'high', 'xhigh'] },
-  { key: 'service_tier', label: 'service_tier', options: ['fast', 'flex'] },
+  { key: 'service_tier', label: 'service_tier', options: ['fast'] },
 ];
-const CODEX_BOOL_FIELDS: { key: string; label: string; unofficial?: boolean }[] = [
-  { key: 'disable_response_storage', label: 'disable_response_storage' },
-  { key: 'enable_workflows', label: 'enable_workflows', unofficial: true },
-  { key: 'enable_ultracode_trigger', label: 'enable_ultracode_trigger', unofficial: true },
-  { key: 'skip_permission_prompts_for_mcp', label: 'skip_permission_prompts_for_mcp', unofficial: true },
-];
-
 // 把 current（来自 get_local_config_info 的 other）里的顶层值转成下拉/文本框用的字符串。
 function toStr(v: unknown): string {
   if (v === undefined || v === null) return '';
@@ -268,16 +261,8 @@ function CodexBehaviorSettings({
     s.model_auto_compact_token_limit = toStr(current.model_auto_compact_token_limit);
     return s;
   };
-  const buildBool = () => {
-    const b: Record<string, boolean> = {};
-    for (const f of CODEX_BOOL_FIELDS) b[f.key] = current[f.key] === true;
-    return b;
-  };
-
   const [strVals, setStrVals] = useState<Record<string, string>>(buildStr);
-  const [boolVals, setBoolVals] = useState<Record<string, boolean>>(buildBool);
   const [initStr, setInitStr] = useState<Record<string, string>>(buildStr);
-  const [initBool, setInitBool] = useState<Record<string, boolean>>(buildBool);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
   const [saved, setSaved] = useState(false);
@@ -285,18 +270,14 @@ function CodexBehaviorSettings({
   // current 刷新后（load() 之后）重新同步初始值与编辑值。
   useEffect(() => {
     const s = buildStr();
-    const b = buildBool();
     setStrVals(s);
-    setBoolVals(b);
     setInitStr(s);
-    setInitBool(b);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [current]);
 
   const dirty =
     CODEX_SELECT_FIELDS.some((f) => strVals[f.key] !== initStr[f.key]) ||
-    strVals.model_auto_compact_token_limit !== initStr.model_auto_compact_token_limit ||
-    CODEX_BOOL_FIELDS.some((f) => boolVals[f.key] !== initBool[f.key]);
+    strVals.model_auto_compact_token_limit !== initStr.model_auto_compact_token_limit;
 
   const dangerCombo =
     strVals.approval_policy === 'never' && strVals.sandbox_mode === 'danger-full-access';
@@ -305,11 +286,6 @@ function CodexBehaviorSettings({
     setSaved(false);
     setStrVals((prev) => ({ ...prev, [k]: v }));
   };
-  const setBool = (k: string, v: boolean) => {
-    setSaved(false);
-    setBoolVals((prev) => ({ ...prev, [k]: v }));
-  };
-
   const save = async () => {
     setErr('');
     // 只发送相对初始值有变化的字段：'' → null（删除），有值 → 写入。
@@ -332,12 +308,6 @@ function CodexBehaviorSettings({
         fields.model_auto_compact_token_limit = Number(raw);
       }
     }
-    for (const f of CODEX_BOOL_FIELDS) {
-      if (boolVals[f.key] !== initBool[f.key]) {
-        fields[f.key] = boolVals[f.key];
-      }
-    }
-
     if (Object.keys(fields).length === 0) {
       setSaved(true);
       return;
@@ -403,18 +373,6 @@ function CodexBehaviorSettings({
               className="w-full rounded-md border border-line bg-surface px-2.5 py-1.5 text-[13px] text-ink focus:border-accent focus:outline-none"
             />
           </Field>
-        </div>
-
-        <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
-          {CODEX_BOOL_FIELDS.map((f) => (
-            <Toggle
-              key={f.key}
-              label={f.label}
-              unofficial={f.unofficial}
-              checked={boolVals[f.key]}
-              onChange={(v) => setBool(f.key, v)}
-            />
-          ))}
         </div>
 
         {dangerCombo && (
@@ -575,46 +533,6 @@ function Field({
       </span>
       {children}
     </label>
-  );
-}
-
-function Toggle({
-  label,
-  unofficial,
-  checked,
-  onChange,
-}: {
-  label: string;
-  unofficial?: boolean;
-  checked: boolean;
-  onChange: (v: boolean) => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={() => onChange(!checked)}
-      className="flex items-center justify-between gap-2 rounded-md border border-line bg-surface px-3 py-2 text-left transition-colors hover:border-accent/50"
-    >
-      <span className="flex min-w-0 items-center gap-1.5 font-mono text-[12px] text-ink-dim">
-        <span className="truncate">{label}</span>
-        {unofficial && (
-          <span className="shrink-0 rounded bg-elevated px-1 py-0.5 font-sans text-[10px] text-ink-faint">非官方</span>
-        )}
-      </span>
-      <span
-        className={cn(
-          'relative h-5 w-9 shrink-0 rounded-full transition-colors',
-          checked ? 'bg-accent' : 'bg-elevated',
-        )}
-      >
-        <span
-          className={cn(
-            'absolute top-0.5 h-4 w-4 rounded-full bg-card shadow-soft transition-transform',
-            checked ? 'translate-x-4' : 'translate-x-0.5',
-          )}
-        />
-      </span>
-    </button>
   );
 }
 

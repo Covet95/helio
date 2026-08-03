@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { emptyProfileForTool, providerTint } from './helpers';
+import { emptyProfileForTool, normalizeCodexCatalogModels, providerTint } from './helpers';
 import { humanizeError } from '../../lib/utils';
 
 describe('profile helpers', () => {
@@ -23,5 +23,23 @@ describe('profile helpers', () => {
     expect(humanizeError(new Error('TypeError: unavailable'), '剪贴板不可用')).toBe('unavailable');
     expect(humanizeError('TypeError: nothing')).toBe('nothing');
     expect(humanizeError('')).toBe('发生未知错误');
+  });
+
+  it('normalizes Codex catalog reasoning levels without writing the legacy flag', () => {
+    expect(normalizeCodexCatalogModels([
+      {
+        slug: 'proxy-model',
+        supports_reasoning: true,
+        reasoning_levels: ['XHIGH', 'low', 'xhigh', 'unsupported'],
+        supports_web_search: true,
+      },
+      { slug: '   ' },
+    ])).toEqual([
+      {
+        slug: 'proxy-model',
+        reasoning_levels: ['xhigh', 'low'],
+        supports_web_search: true,
+      },
+    ]);
   });
 });

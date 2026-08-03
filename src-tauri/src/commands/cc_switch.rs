@@ -21,7 +21,6 @@ pub struct CcSwitchProvider {
     pub env_key: Option<String>,
     pub requires_openai_auth: Option<bool>,
     pub experimental_bearer_token: Option<String>,
-    pub model_thinking_enabled: Option<bool>,
     pub service_tier: Option<String>,
     pub is_current: bool,
 }
@@ -91,7 +90,6 @@ pub async fn import_cc_switch(
                 reasoning_effort: p.reasoning_effort,
                 wire_api: (target == TargetApp::Codex).then(|| "responses".to_string()),
                 env_key: p.env_key,
-                model_thinking_enabled: p.model_thinking_enabled,
                 service_tier: p.service_tier,
                 ..Default::default()
             },
@@ -120,7 +118,6 @@ pub(crate) fn parse_cc_provider(app_type: &str, settings: &str) -> CcSwitchProvi
         env_key: None,
         requires_openai_auth: None,
         experimental_bearer_token: None,
-        model_thinking_enabled: None,
         service_tier: None,
         is_current: false,
     };
@@ -179,8 +176,6 @@ pub(crate) fn parse_cc_provider(app_type: &str, settings: &str) -> CcSwitchProvi
                 .and_then(|w| w.as_i64())
                 .map(|w| w >= 1_000_000)
                 .unwrap_or(false);
-            out.model_thinking_enabled =
-                cfg.get("model_thinking_enabled").and_then(|x| x.as_bool());
             let tier = str_field(&cfg, "service_tier");
             if !tier.trim().is_empty() {
                 out.service_tier = Some(tier);
@@ -240,12 +235,11 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_codex_provider_block_and_thinking() {
+    fn test_parse_codex_provider_block() {
         let config = r#"
 model_provider = "openai-custom"
 model = "gpt-5.6-sol"
 model_reasoning_effort = "xhigh"
-model_thinking_enabled = true
 service_tier = "fast"
 model_context_window = 1000000
 [model_providers.openai-custom]

@@ -45,6 +45,11 @@ pub trait ConfigAdapter {
         shared_config: &serde_json::Value,
     ) -> serde_json::Value;
 
+    /// Validate target-specific profile fields before creating a backup or writing files.
+    fn validate_profile(&self, _api_profile: &ApiProfile) -> Result<()> {
+        Ok(())
+    }
+
     /// 写入主配置文件之外的辅助文件（如 Claude 的 ~/.claude.json 里的 MCP）。
     /// 默认无操作；实现出错时整个切换事务回滚。
     fn apply_auxiliary_config(&self, _shared_config: &serde_json::Value) -> Result<()> {
@@ -157,6 +162,7 @@ pub fn apply_profile_configuration(
     create_backup: bool,
 ) -> Result<ProfileApplicationResult> {
     let adapter = get_adapter(target_app);
+    adapter.validate_profile(api_profile)?;
     let backup_path = if create_backup && adapter.config_path().exists() {
         Some(adapter.backup_config()?)
     } else {

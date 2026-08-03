@@ -16,6 +16,10 @@ pub struct CodexCatalogModel {
     pub display_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<i64>,
+    /// Documented Codex reasoning levels supported by this model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_levels: Option<Vec<String>>,
+    /// Legacy import compatibility. New profiles use `reasoning_levels`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_reasoning: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -41,9 +45,16 @@ pub struct CodexProfileFields {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub experimental_bearer_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_thinking_enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<String>,
+    /// Custom provider capability required for standalone web search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_standalone_web_search: Option<bool>,
+    /// Built-in Amazon Bedrock provider override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aws_profile: Option<String>,
+    /// Built-in Amazon Bedrock provider override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aws_region: Option<String>,
     /// 写入 `model_catalog.json` 的模型表；空/缺省 = 切换时不改本机 catalog
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_models: Option<Vec<CodexCatalogModel>>,

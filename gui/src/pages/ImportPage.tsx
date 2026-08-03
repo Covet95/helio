@@ -25,8 +25,10 @@ interface Scanned {
   env_key?: string;
   requires_openai_auth?: boolean;
   experimental_bearer_token?: string;
-  model_thinking_enabled?: boolean;
   service_tier?: string;
+  supports_standalone_web_search?: boolean;
+  aws_profile?: string;
+  aws_region?: string;
   api_mode?: string;
   max_tokens?: number;
   source: string;
@@ -115,8 +117,10 @@ export default function ImportPage() {
         env_key: tool === 'codex' ? api.env_key : undefined,
         api_mode: tool === 'hermes' || tool === 'openclaw' ? api.api_mode : undefined,
         max_tokens: tool === 'openclaw' ? api.max_tokens : undefined,
-        model_thinking_enabled: api.model_thinking_enabled,
         service_tier: api.service_tier,
+        supports_standalone_web_search: api.supports_standalone_web_search,
+        aws_profile: api.aws_profile,
+        aws_region: api.aws_region,
         target_app: tool,
       });
       setFeedback({ text: `已导入为配置档案「${name.trim()}」`, kind: 'success' });

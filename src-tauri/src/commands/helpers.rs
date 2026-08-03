@@ -35,17 +35,6 @@ pub(crate) fn codex_context_1m(target: TargetApp, cfg: &serde_json::Value) -> Op
         .map(|w| w >= 1_000_000)
 }
 
-pub(crate) fn codex_bool_field(
-    target: TargetApp,
-    cfg: &serde_json::Value,
-    key: &str,
-) -> Option<bool> {
-    if target != TargetApp::Codex {
-        return None;
-    }
-    cfg.get(key).and_then(|v| v.as_bool())
-}
-
 /// 从 Claude Code 的 env 对象反向提取默认模型与角色映射，与 `ClaudeCodeAdapter::merge_config`
 /// 的写入格式对称：
 /// - `ANTHROPIC_MODEL` → 默认模型

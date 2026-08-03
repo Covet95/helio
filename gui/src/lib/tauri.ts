@@ -140,8 +140,10 @@ export const tauriApi = {
       env_key?: string;
       requires_openai_auth?: boolean;
       experimental_bearer_token?: string;
-      model_thinking_enabled?: boolean;
       service_tier?: string;
+      supports_standalone_web_search?: boolean;
+      aws_profile?: string;
+      aws_region?: string;
       api_mode?: string;
       max_tokens?: number;
       source: string;
@@ -158,8 +160,10 @@ export const tauriApi = {
       env_key: undefined,
       requires_openai_auth: undefined,
       experimental_bearer_token: undefined,
-      model_thinking_enabled: undefined,
       service_tier: undefined,
+      supports_standalone_web_search: undefined,
+      aws_profile: undefined,
+      aws_region: undefined,
       api_mode: undefined,
       max_tokens: undefined,
       source: `${targetApp} config`,
@@ -218,7 +222,6 @@ export interface CcSwitchProvider {
   env_key?: string;
   requires_openai_auth?: boolean;
   experimental_bearer_token?: string;
-  model_thinking_enabled?: boolean;
   service_tier?: string;
   is_current: boolean;
 }

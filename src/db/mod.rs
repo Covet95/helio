@@ -100,9 +100,11 @@ impl Database {
                 wire_api TEXT,
                 env_key TEXT,
                 requires_openai_auth INTEGER,
-                model_thinking_enabled INTEGER,
                 service_tier TEXT,
                 experimental_bearer_token TEXT,
+                supports_standalone_web_search INTEGER,
+                aws_profile TEXT,
+                aws_region TEXT,
                 api_mode TEXT,
                 max_tokens INTEGER,
                 api_keys_json TEXT,
@@ -138,6 +140,7 @@ impl Database {
         self.ensure_current_profile_columns()?;
         self.migrate_composite_unique()?;
         self.migrate_drop_model_effort_level()?;
+        self.migrate_drop_model_thinking_enabled()?;
         self.conn.execute(
             "UPDATE api_profiles SET wire_api = 'responses' WHERE lower(trim(wire_api)) = 'chat'",
             [],
@@ -185,9 +188,11 @@ impl Database {
             "ALTER TABLE api_profiles ADD COLUMN wire_api TEXT",
             "ALTER TABLE api_profiles ADD COLUMN env_key TEXT",
             "ALTER TABLE api_profiles ADD COLUMN requires_openai_auth INTEGER",
-            "ALTER TABLE api_profiles ADD COLUMN model_thinking_enabled INTEGER",
             "ALTER TABLE api_profiles ADD COLUMN service_tier TEXT",
             "ALTER TABLE api_profiles ADD COLUMN experimental_bearer_token TEXT",
+            "ALTER TABLE api_profiles ADD COLUMN supports_standalone_web_search INTEGER",
+            "ALTER TABLE api_profiles ADD COLUMN aws_profile TEXT",
+            "ALTER TABLE api_profiles ADD COLUMN aws_region TEXT",
             "ALTER TABLE api_profiles ADD COLUMN api_mode TEXT",
             "ALTER TABLE api_profiles ADD COLUMN max_tokens INTEGER",
             "ALTER TABLE api_profiles ADD COLUMN api_keys_json TEXT",
@@ -231,7 +236,8 @@ impl Database {
                 name TEXT NOT NULL, provider TEXT NOT NULL, api_url TEXT NOT NULL, api_key TEXT NOT NULL,
                 model_mapping TEXT, model TEXT, reasoning_effort TEXT, context_1m INTEGER,
                 target_app TEXT, models TEXT, wire_api TEXT, env_key TEXT, requires_openai_auth INTEGER,
-                model_thinking_enabled INTEGER, service_tier TEXT, experimental_bearer_token TEXT,
+                service_tier TEXT, experimental_bearer_token TEXT,
+                supports_standalone_web_search INTEGER, aws_profile TEXT, aws_region TEXT,
                 api_mode TEXT, max_tokens INTEGER, api_keys_json TEXT, catalog_models TEXT,
                 created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
                 UNIQUE(name, target_app)
@@ -239,13 +245,15 @@ impl Database {
             INSERT INTO api_profiles_no_effort (
                 id, name, provider, api_url, api_key, model_mapping, model, reasoning_effort,
                 context_1m, target_app, models, wire_api, env_key, requires_openai_auth,
-                model_thinking_enabled, service_tier, experimental_bearer_token, api_mode, max_tokens,
-                api_keys_json, catalog_models, created_at, updated_at
+                service_tier, experimental_bearer_token, api_mode, max_tokens,
+                supports_standalone_web_search, aws_profile, aws_region, api_keys_json,
+                catalog_models, created_at, updated_at
             )
             SELECT id, name, provider, api_url, api_key, model_mapping, model, reasoning_effort,
                 context_1m, target_app, models, wire_api, env_key, requires_openai_auth,
-                model_thinking_enabled, service_tier, experimental_bearer_token,
-                api_mode, max_tokens, api_keys_json, catalog_models, created_at, updated_at
+                service_tier, experimental_bearer_token,
+                api_mode, max_tokens, supports_standalone_web_search, aws_profile, aws_region,
+                api_keys_json, catalog_models, created_at, updated_at
             FROM api_profiles;
             DROP TABLE api_profiles;
             ALTER TABLE api_profiles_no_effort RENAME TO api_profiles;
@@ -253,6 +261,67 @@ impl Database {
             COMMIT;
         "#)?;
         Ok(())
+    }
+
+    fn migrate_drop_model_thinking_enabled(&self) -> Result<()> {
+        let id = "2026-08-03-drop-codex-model-thinking-enabled";
+        let already: bool = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM schema_migrations WHERE id = ?1",
+                params![id],
+                |_| Ok(true),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if already {
+            return Ok(());
+        }
+
+        let mut stmt = self.conn.prepare("PRAGMA table_info(api_profiles)")?;
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if !cols.iter().any(|column| column == "model_thinking_enabled") {
+            self.record_migration(id)?;
+            return Ok(());
+        }
+
+        let _guard = ForeignKeysGuard::off(&self.conn)?;
+        self.conn.execute_batch(
+            r#"
+            BEGIN;
+            CREATE TABLE api_profiles_no_thinking (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL, provider TEXT NOT NULL, api_url TEXT NOT NULL, api_key TEXT NOT NULL,
+                model_mapping TEXT, model TEXT, reasoning_effort TEXT, context_1m INTEGER,
+                target_app TEXT, models TEXT, wire_api TEXT, env_key TEXT, requires_openai_auth INTEGER,
+                service_tier TEXT, experimental_bearer_token TEXT,
+                supports_standalone_web_search INTEGER, aws_profile TEXT, aws_region TEXT,
+                api_mode TEXT, max_tokens INTEGER, api_keys_json TEXT, catalog_models TEXT,
+                created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+                UNIQUE(name, target_app)
+            );
+            INSERT INTO api_profiles_no_thinking (
+                id, name, provider, api_url, api_key, model_mapping, model, reasoning_effort,
+                context_1m, target_app, models, wire_api, env_key, requires_openai_auth,
+                service_tier, experimental_bearer_token, supports_standalone_web_search,
+                aws_profile, aws_region, api_mode, max_tokens, api_keys_json, catalog_models,
+                created_at, updated_at
+            )
+            SELECT id, name, provider, api_url, api_key, model_mapping, model, reasoning_effort,
+                context_1m, target_app, models, wire_api, env_key, requires_openai_auth,
+                service_tier, experimental_bearer_token, supports_standalone_web_search,
+                aws_profile, aws_region, api_mode, max_tokens, api_keys_json, catalog_models,
+                created_at, updated_at
+            FROM api_profiles;
+            DROP TABLE api_profiles;
+            ALTER TABLE api_profiles_no_thinking RENAME TO api_profiles;
+            CREATE INDEX IF NOT EXISTS idx_profiles_name ON api_profiles(name);
+            COMMIT;
+            "#,
+        )?;
+        self.record_migration(id)
     }
 
     /// 幂等迁移:name 全局 UNIQUE → UNIQUE(name, target_app)，并去掉历史 `-cc` 后缀。
@@ -325,9 +394,11 @@ impl Database {
                 wire_api TEXT,
                 env_key TEXT,
                 requires_openai_auth INTEGER,
-                model_thinking_enabled INTEGER,
                 service_tier TEXT,
                 experimental_bearer_token TEXT,
+                supports_standalone_web_search INTEGER,
+                aws_profile TEXT,
+                aws_region TEXT,
                 api_mode TEXT,
                 max_tokens INTEGER,
                 api_keys_json TEXT,
@@ -337,9 +408,11 @@ impl Database {
 
             INSERT INTO api_profiles_new
                 (id,name,provider,api_url,api_key,model_mapping,created_at,updated_at,model,reasoning_effort,context_1m,target_app,models,
-                 wire_api,env_key,requires_openai_auth,model_thinking_enabled,service_tier,experimental_bearer_token,api_mode,max_tokens,api_keys_json,catalog_models)
+                 wire_api,env_key,requires_openai_auth,service_tier,experimental_bearer_token,
+                 supports_standalone_web_search,aws_profile,aws_region,api_mode,max_tokens,api_keys_json,catalog_models)
             SELECT id,name,provider,api_url,api_key,model_mapping,created_at,updated_at,model,reasoning_effort,context_1m,target_app,models,
-                 wire_api,env_key,requires_openai_auth,model_thinking_enabled,service_tier,experimental_bearer_token,api_mode,max_tokens,api_keys_json,catalog_models
+                 wire_api,env_key,requires_openai_auth,service_tier,experimental_bearer_token,
+                 supports_standalone_web_search,aws_profile,aws_region,api_mode,max_tokens,api_keys_json,catalog_models
             FROM api_profiles;
 
             UPDATE api_profiles_new
@@ -697,8 +770,8 @@ impl Database {
         };
 
         self.conn.execute(
-            "INSERT INTO api_profiles (name, provider, api_url, api_key, model_mapping, model, reasoning_effort, context_1m, target_app, models, wire_api, env_key, requires_openai_auth, model_thinking_enabled, service_tier, experimental_bearer_token, api_mode, max_tokens, api_keys_json, catalog_models, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+            "INSERT INTO api_profiles (name, provider, api_url, api_key, model_mapping, model, reasoning_effort, context_1m, target_app, models, wire_api, env_key, requires_openai_auth, service_tier, experimental_bearer_token, supports_standalone_web_search, aws_profile, aws_region, api_mode, max_tokens, api_keys_json, catalog_models, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
             params![
                 &profile.name,
                 &profile.provider,
@@ -713,9 +786,11 @@ impl Database {
                 Some("responses"),
                 &profile.codex.env_key,
                 profile.codex.requires_openai_auth.map(|b| b as i64),
-                profile.codex.model_thinking_enabled.map(|b| b as i64),
                 &profile.codex.service_tier,
                 &profile.codex.experimental_bearer_token,
+                profile.codex.supports_standalone_web_search.map(|b| b as i64),
+                &profile.codex.aws_profile,
+                &profile.codex.aws_region,
                 api_mode,
                 max_tokens,
                 api_keys_json,
@@ -732,8 +807,9 @@ impl Database {
     const PROFILE_SELECT: &'static str = concat!(
         "id, name, provider, api_url, api_key, model_mapping, model, ",
         "reasoning_effort, context_1m, created_at, updated_at, target_app, models, ",
-        "wire_api, env_key, requires_openai_auth, model_thinking_enabled, service_tier, ",
-        "experimental_bearer_token, api_mode, max_tokens, api_keys_json, catalog_models"
+        "wire_api, env_key, requires_openai_auth, service_tier, experimental_bearer_token, ",
+        "supports_standalone_web_search, aws_profile, aws_region, api_mode, max_tokens, ",
+        "api_keys_json, catalog_models"
     );
 
     fn row_to_profile(row: &rusqlite::Row) -> rusqlite::Result<ApiProfile> {
@@ -753,7 +829,8 @@ impl Database {
             .transpose()
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
         let requires_openai_auth: Option<i64> = row.get("requires_openai_auth")?;
-        let model_thinking_enabled: Option<i64> = row.get("model_thinking_enabled")?;
+        let supports_standalone_web_search: Option<i64> =
+            row.get("supports_standalone_web_search")?;
         let api_mode: Option<String> = row.get("api_mode")?;
         let max_tokens: Option<i64> = row.get("max_tokens")?;
         let api_keys_str: Option<String> = row.get("api_keys_json")?;
@@ -796,9 +873,11 @@ impl Database {
                 wire_api: Some("responses".to_string()),
                 env_key: row.get("env_key")?,
                 requires_openai_auth: requires_openai_auth.map(|v| v != 0),
-                model_thinking_enabled: model_thinking_enabled.map(|v| v != 0),
                 service_tier: row.get("service_tier")?,
                 experimental_bearer_token: row.get("experimental_bearer_token")?,
+                supports_standalone_web_search: supports_standalone_web_search.map(|v| v != 0),
+                aws_profile: row.get("aws_profile")?,
+                aws_region: row.get("aws_region")?,
                 catalog_models,
             },
             opencode: OpenCodeProfileFields { models },
@@ -915,7 +994,7 @@ impl Database {
             Some(id) => {
                 self.conn.execute(
                     "UPDATE api_profiles SET name = ?1, provider = ?2, api_url = ?3, api_key = ?4,
-                     model_mapping = ?5, model = ?6, reasoning_effort = ?7, context_1m = ?8, target_app = ?9, models = ?10, wire_api = ?11, env_key = ?12, requires_openai_auth = ?13, model_thinking_enabled = ?14, service_tier = ?15, experimental_bearer_token = ?16, api_mode = ?17, max_tokens = ?18, api_keys_json = ?19, catalog_models = ?20, updated_at = ?21 WHERE id = ?22",
+                     model_mapping = ?5, model = ?6, reasoning_effort = ?7, context_1m = ?8, target_app = ?9, models = ?10, wire_api = ?11, env_key = ?12, requires_openai_auth = ?13, service_tier = ?14, experimental_bearer_token = ?15, supports_standalone_web_search = ?16, aws_profile = ?17, aws_region = ?18, api_mode = ?19, max_tokens = ?20, api_keys_json = ?21, catalog_models = ?22, updated_at = ?23 WHERE id = ?24",
                     params![
                         &profile.name,
                         &profile.provider,
@@ -930,9 +1009,11 @@ impl Database {
                         Some("responses"),
                         &profile.codex.env_key,
                         profile.codex.requires_openai_auth.map(|b| b as i64),
-                        profile.codex.model_thinking_enabled.map(|b| b as i64),
                         &profile.codex.service_tier,
                         &profile.codex.experimental_bearer_token,
+                        profile.codex.supports_standalone_web_search.map(|b| b as i64),
+                        &profile.codex.aws_profile,
+                        &profile.codex.aws_region,
                         api_mode,
                         max_tokens,
                         api_keys_json,
@@ -946,7 +1027,7 @@ impl Database {
                 // 无 id：按 name 定位，不改名
                 self.conn.execute(
                     "UPDATE api_profiles SET provider = ?1, api_url = ?2, api_key = ?3,
-                     model_mapping = ?4, model = ?5, reasoning_effort = ?6, context_1m = ?7, target_app = ?8, models = ?9, wire_api = ?10, env_key = ?11, requires_openai_auth = ?12, model_thinking_enabled = ?13, service_tier = ?14, experimental_bearer_token = ?15, api_mode = ?16, max_tokens = ?17, api_keys_json = ?18, catalog_models = ?19, updated_at = ?20 WHERE name = ?21",
+                     model_mapping = ?4, model = ?5, reasoning_effort = ?6, context_1m = ?7, target_app = ?8, models = ?9, wire_api = ?10, env_key = ?11, requires_openai_auth = ?12, service_tier = ?13, experimental_bearer_token = ?14, supports_standalone_web_search = ?15, aws_profile = ?16, aws_region = ?17, api_mode = ?18, max_tokens = ?19, api_keys_json = ?20, catalog_models = ?21, updated_at = ?22 WHERE name = ?23",
                     params![
                         &profile.provider,
                         &profile.api_url,
@@ -960,9 +1041,11 @@ impl Database {
                         Some("responses"),
                         &profile.codex.env_key,
                         profile.codex.requires_openai_auth.map(|b| b as i64),
-                        profile.codex.model_thinking_enabled.map(|b| b as i64),
                         &profile.codex.service_tier,
                         &profile.codex.experimental_bearer_token,
+                        profile.codex.supports_standalone_web_search.map(|b| b as i64),
+                        &profile.codex.aws_profile,
+                        &profile.codex.aws_region,
                         api_mode,
                         max_tokens,
                         api_keys_json,
@@ -1695,6 +1778,7 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()?;
         assert!(cols.contains(&"experimental_bearer_token".into()));
         assert!(!cols.contains(&"model_effort_level".into()));
+        assert!(!cols.contains(&"model_thinking_enabled".into()));
         let migration_count: i64 = db.conn.query_row(
             "SELECT COUNT(*) FROM schema_migrations WHERE id = ?1",
             params!["2026-07-19-profile-schema-ledger"],
@@ -1718,12 +1802,14 @@ mod tests {
                 wire_api: Some("responses".into()),
                 env_key: Some("MY_CODEX_KEY".into()),
                 experimental_bearer_token: Some("sk-b".into()),
-                model_thinking_enabled: Some(true),
+                supports_standalone_web_search: Some(true),
+                aws_profile: Some("production".into()),
+                aws_region: Some("us-east-1".into()),
                 catalog_models: Some(vec![crate::models::CodexCatalogModel {
                     slug: "gpt-5.6-sol".into(),
                     display_name: Some("GPT-5.6 Sol".into()),
                     context_window: Some(400_000),
-                    supports_reasoning: Some(true),
+                    reasoning_levels: Some(vec!["minimal".into(), "xhigh".into()]),
                     supports_images: Some(true),
                     ..Default::default()
                 }]),
@@ -1735,12 +1821,18 @@ mod tests {
         assert_eq!(got.codex.reasoning_effort.as_deref(), Some("xhigh"));
         assert_eq!(got.codex.env_key.as_deref(), Some("MY_CODEX_KEY"));
         assert_eq!(got.codex.experimental_bearer_token.as_deref(), Some("sk-b"));
+        assert_eq!(got.codex.supports_standalone_web_search, Some(true));
+        assert_eq!(got.codex.aws_profile.as_deref(), Some("production"));
+        assert_eq!(got.codex.aws_region.as_deref(), Some("us-east-1"));
         let cm = got.codex.catalog_models.as_ref().unwrap();
         assert_eq!(cm.len(), 1);
         assert_eq!(cm[0].slug, "gpt-5.6-sol");
         assert_eq!(cm[0].display_name.as_deref(), Some("GPT-5.6 Sol"));
         assert_eq!(cm[0].context_window, Some(400_000));
-        assert_eq!(cm[0].supports_reasoning, Some(true));
+        assert_eq!(
+            cm[0].reasoning_levels,
+            Some(vec!["minimal".into(), "xhigh".into()])
+        );
         assert_eq!(cm[0].supports_images, Some(true));
         Ok(())
     }
@@ -1776,7 +1868,58 @@ mod tests {
             .query_map([], |r| r.get(1))?
             .collect::<Result<Vec<_>, _>>()?;
         assert!(!cols.contains(&"model_effort_level".into()));
+        assert!(!cols.contains(&"model_thinking_enabled".into()));
         let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn test_thinking_migration_preserves_active_profile_and_new_codex_fields() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("thinking.sqlite");
+        {
+            let conn = rusqlite::Connection::open(&path)?;
+            conn.execute_batch(
+                r#"
+                PRAGMA foreign_keys=ON;
+                CREATE TABLE api_profiles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL, provider TEXT NOT NULL, api_url TEXT NOT NULL, api_key TEXT NOT NULL,
+                    model_mapping TEXT, model TEXT, reasoning_effort TEXT, context_1m INTEGER,
+                    target_app TEXT, models TEXT, wire_api TEXT, env_key TEXT, requires_openai_auth INTEGER,
+                    model_thinking_enabled INTEGER, service_tier TEXT, experimental_bearer_token TEXT,
+                    supports_standalone_web_search INTEGER, aws_profile TEXT, aws_region TEXT,
+                    api_mode TEXT, max_tokens INTEGER, api_keys_json TEXT, catalog_models TEXT,
+                    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(name, target_app)
+                );
+                CREATE TABLE active_profiles (
+                    target_app TEXT PRIMARY KEY,
+                    profile_id INTEGER NOT NULL,
+                    FOREIGN KEY (profile_id) REFERENCES api_profiles(id) ON DELETE CASCADE
+                );
+                INSERT INTO api_profiles (
+                    id, name, provider, api_url, api_key, target_app, model_thinking_enabled,
+                    supports_standalone_web_search, aws_profile, aws_region, created_at, updated_at
+                ) VALUES (
+                    7, 'bedrock', 'amazon-bedrock', '', '', 'codex', 1, 1,
+                    'production', 'us-east-1', 0, 0
+                );
+                INSERT INTO active_profiles (target_app, profile_id) VALUES ('codex', 7);
+                "#,
+            )?;
+        }
+
+        let db = Database::open(&path)?;
+        let active = db.get_active_profile_full(TargetApp::Codex)?.unwrap();
+        assert_eq!(active.id, Some(7));
+        assert_eq!(active.codex.supports_standalone_web_search, Some(true));
+        assert_eq!(active.codex.aws_profile.as_deref(), Some("production"));
+        assert_eq!(active.codex.aws_region.as_deref(), Some("us-east-1"));
+        let mut stmt = db.conn.prepare("PRAGMA table_info(api_profiles)")?;
+        let cols: Vec<String> = stmt
+            .query_map([], |r| r.get(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert!(!cols.contains(&"model_thinking_enabled".into()));
         Ok(())
     }
 
