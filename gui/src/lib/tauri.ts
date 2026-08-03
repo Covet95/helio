@@ -94,6 +94,15 @@ export const tauriApi = {
   importDatabase: (inputPath: string) =>
     command<void>('import_database', { inputPath }),
 
+  exportPortableBackup: (outputPath: string) =>
+    command<PortableBackupExportResult>('export_portable_backup', { outputPath }, {
+      path: '',
+      skills: { apps: [], total: 0, path: '' },
+    }),
+
+  importPortableBackup: (inputPath: string) =>
+    command<PortableBackupImportResult>('import_portable_backup', { inputPath }),
+
   // Skills 备份/恢复
   exportSkills: (outputPath: string) =>
     command<SkillsExportResult>('export_skills', { outputPath }, {
@@ -242,4 +251,14 @@ export interface SkillsImportResult {
   restored: number;
   skipped: number;
   skipped_names: string[];
+}
+
+export interface PortableBackupExportResult {
+  path: string;
+  skills: SkillsExportResult;
+}
+
+export interface PortableBackupImportResult {
+  restored_targets: string[];
+  skills: SkillsImportResult;
 }

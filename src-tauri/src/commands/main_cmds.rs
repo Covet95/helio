@@ -675,8 +675,25 @@ pub async fn restore_config_backup(
         .config_lock
         .lock()
         .map_err(|e| format!("获取配置写锁失败：{e}"))?;
-    let restored = backup::restore_backup(&config_dir, std::path::Path::new(&backup_file))
-        .map_err(|e| format!("恢复失败：{e:#}"))?;
+    let restored = if target == TargetApp::OpenClaw
+        && std::path::Path::new(&backup_file)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("models.backup."))
+    {
+        backup::restore_backup_to(
+            &config_dir,
+            std::path::Path::new(&backup_file),
+            &config_dir
+                .join("agents")
+                .join("main")
+                .join("agent")
+                .join("models.json"),
+        )
+    } else {
+        backup::restore_backup(&config_dir, std::path::Path::new(&backup_file))
+    }
+    .map_err(|e| format!("恢复失败：{e:#}"))?;
     Ok(restored.display().to_string())
 }
 
@@ -1284,6 +1301,25 @@ pub async fn export_database(
     Ok(())
 }
 
+#[tauri::command]
+pub async fn export_portable_backup(
+    output_path: String,
+    state: State<'_, AppState>,
+) -> Result<switch_api::utils::portable_backup::PortableBackupExportResult, String> {
+    let _write_guard = state.config_lock.lock().map_err(|e| e.to_string())?;
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    switch_api::adapters::sync_all_shared_configs(&db)
+        .map_err(|e| format!("Failed to synchronize configuration before export: {e:#}"))?;
+    let db_path = default_db_path()?;
+    let home = dirs::home_dir().ok_or("Failed to get home directory")?;
+    switch_api::utils::portable_backup::export_portable_backup(
+        &home,
+        &db_path,
+        std::path::Path::new(&output_path),
+    )
+    .map_err(|e| format!("Failed to export portable backup: {e:#}"))
+}
+
 /// 把全部 skills 目录打包为 tar.gz（manifest + {app}/{skill}/...）。
 /// 与数据库备份正交：skills 是文件系统资产，不入库。
 #[tauri::command]
@@ -1319,44 +1355,93 @@ pub async fn import_database(input_path: String, state: State<'_, AppState>) -> 
     // 与切换/写配置互斥：导入会替换 live 库文件，期间绝不能有其他命令仍持有旧连接写盘。
     let _write_guard = state.config_lock.lock().map_err(|e| e.to_string())?;
     let mut db = state.db.lock().map_err(|e| e.to_string())?;
+    replace_database_locked(std::path::Path::new(&input_path), &db_path, &mut db)?;
+    switch_api::adapters::materialize_active_profiles(&db)
+        .map_err(|e| format!("Database imported but active configuration restore failed: {e:#}"))?;
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+pub struct PortableBackupImportResult {
+    pub restored_targets: Vec<String>,
+    pub skills: switch_api::utils::skills_backup::SkillsImportResult,
+}
+
+#[tauri::command]
+pub async fn import_portable_backup(
+    input_path: String,
+    state: State<'_, AppState>,
+) -> Result<PortableBackupImportResult, String> {
+    let _write_guard = state.config_lock.lock().map_err(|e| e.to_string())?;
+    let archive = switch_api::utils::portable_backup::extract_portable_backup(
+        std::path::Path::new(&input_path),
+    )
+    .map_err(|e| format!("Failed to validate portable backup: {e:#}"))?;
+    Database::validate_import_candidate(&archive.database_path)
+        .map_err(|e| format!("Portable backup database is invalid: {e:#}"))?;
+
+    let db_path = default_db_path()?;
+    let mut db = state.db.lock().map_err(|e| e.to_string())?;
+    replace_database_locked(&archive.database_path, &db_path, &mut db)?;
+
+    let home = dirs::home_dir().ok_or("Failed to get home directory")?;
+    let skills = switch_api::utils::skills_backup::import_skills(&home, &archive.skills_path)
+        .map_err(|e| format!("Database imported but Skills restore failed: {e:#}"))?;
+    let restored_targets = switch_api::adapters::materialize_active_profiles(&db)
+        .map_err(|e| format!("Database imported but active configuration restore failed: {e:#}"))?
+        .into_iter()
+        .map(|target| target.as_str().to_string())
+        .collect();
+    Ok(PortableBackupImportResult {
+        restored_targets,
+        skills,
+    })
+}
+
+fn replace_database_locked(
+    input_path: &std::path::Path,
+    db_path: &std::path::Path,
+    db: &mut Database,
+) -> Result<(), String> {
     let placeholder = Database::open(":memory:").map_err(|e| e.to_string())?;
-    let previous = std::mem::replace(&mut *db, placeholder);
+    let previous = std::mem::replace(db, placeholder);
     drop(previous);
 
-    let backup = match Database::replace_file_from_import(
-        std::path::Path::new(&input_path),
-        &db_path,
-    ) {
+    let backup = match Database::replace_file_from_import(input_path, db_path) {
         Ok(backup) => backup,
         Err(error) => {
-            *db = Database::open(&db_path)
-                .map_err(|restore| format!("Failed to stage and import database: {error}; failed to reopen current database: {restore}"))?;
+            *db = Database::open(db_path).map_err(|restore| {
+                format!(
+                    "Failed to stage and import database: {error}; failed to reopen current database: {restore}"
+                )
+            })?;
             return Err(format!("Failed to stage and import database: {error}"));
         }
     };
-    match Database::open(&db_path) {
+    match Database::open(db_path) {
         Ok(reloaded) => {
             *db = reloaded;
-            // 导入可能带来/抹掉 switch journal 旁车；启动式恢复一次，保持 active/配置一致。
-            if let Err(error) = switch_api::adapters::journal::recover_interrupted_switch(&db) {
+            if let Err(error) = switch_api::adapters::journal::recover_interrupted_switch(db) {
                 eprintln!("[Helio] recover after import failed: {error:#}");
             }
+            Ok(())
         }
         Err(error) => {
             if let Some(backup_path) = backup.as_ref() {
-                Database::restore_replaced_file(&db_path, backup_path).map_err(|restore| {
+                Database::restore_replaced_file(db_path, backup_path).map_err(|restore| {
                     format!(
                         "Failed to reload imported database: {error}; rollback failed: {restore}"
                     )
                 })?;
-                *db = Database::open(&db_path)
-                    .map_err(|restore| format!("Failed to reload imported database: {error}; failed to reopen restored database: {restore}"))?;
+                *db = Database::open(db_path).map_err(|restore| {
+                    format!(
+                        "Failed to reload imported database: {error}; failed to reopen restored database: {restore}"
+                    )
+                })?;
             }
-            return Err(format!("Failed to reload imported database: {error}"));
+            Err(format!("Failed to reload imported database: {error}"))
         }
     }
-
-    Ok(())
 }
 
 #[tauri::command]

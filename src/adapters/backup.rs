@@ -133,31 +133,79 @@ pub fn restore_backup(config_dir: &Path, backup_path: &Path) -> Result<PathBuf> 
     let dir = config_dir
         .canonicalize()
         .with_context(|| format!("配置目录不存在: {}", config_dir.display()))?;
-    let backup_path = backup_path
-        .canonicalize()
-        .with_context(|| format!("备份文件不存在: {}", backup_path.display()))?;
-    if !backup_path.starts_with(&dir) {
-        anyhow::bail!("备份文件不在配置目录内: {}", backup_path.display());
-    }
-
+    let backup_path = validate_backup_path(&dir, backup_path)?;
     let name = backup_path
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| anyhow::anyhow!("无效的备份文件名: {}", backup_path.display()))?;
-    let (label, stamp, ext) =
-        parse_backup_name(name).ok_or_else(|| anyhow::anyhow!("不是有效的备份文件名: {name}"))?;
-    if stamp.is_empty() || !stamp.chars().all(|c| c.is_ascii_digit() || c == '_') {
-        anyhow::bail!("备份文件名时间戳无效: {name}");
+    let (label, _, ext) = parse_valid_backup_name(name)
+        .ok_or_else(|| anyhow::anyhow!("不是有效的备份文件名: {name}"))?;
+    restore_backup_to_validated(
+        &dir,
+        &backup_path,
+        &dir.join(format!("{label}.{ext}")),
+        &label,
+    )
+}
+
+/// 恢复到已知的显式目标路径。用于备份名无法表达真实嵌套路径的受管文件。
+///
+/// 调用方必须提供配置目录内的目标路径；备份文件的归属与命名仍会完整校验。
+pub fn restore_backup_to(config_dir: &Path, backup_path: &Path, target: &Path) -> Result<PathBuf> {
+    let dir = config_dir
+        .canonicalize()
+        .with_context(|| format!("配置目录不存在: {}", config_dir.display()))?;
+    let backup_path = validate_backup_path(&dir, backup_path)?;
+    let name = backup_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| anyhow::anyhow!("无效的备份文件名: {}", backup_path.display()))?;
+    let (label, _, _) = parse_valid_backup_name(name)
+        .ok_or_else(|| anyhow::anyhow!("不是有效的备份文件名: {name}"))?;
+    let target = if target.is_absolute() {
+        target
+            .strip_prefix(config_dir)
+            .map(|relative| dir.join(relative))
+            .unwrap_or_else(|_| target.to_path_buf())
+    } else {
+        dir.join(target)
+    };
+    if !target.starts_with(&dir) {
+        anyhow::bail!("恢复目标不在配置目录内: {}", target.display());
     }
+    restore_backup_to_validated(&dir, &backup_path, &target, &label)
+}
 
-    let target = dir.join(format!("{label}.{ext}"));
-    backup_one(&dir, &target, &label)?;
-
-    let bytes = fs::read(&backup_path)
+fn restore_backup_to_validated(
+    dir: &Path,
+    backup_path: &Path,
+    target: &Path,
+    label: &str,
+) -> Result<PathBuf> {
+    let bytes = fs::read(backup_path)
         .with_context(|| format!("Failed to read backup {}", backup_path.display()))?;
-    atomic_write_private(&target, &bytes)
+    backup_one(dir, target, label)?;
+    atomic_write_private(target, &bytes)
         .with_context(|| format!("Failed to restore {}", target.display()))?;
-    Ok(target)
+    Ok(target.to_path_buf())
+}
+
+fn validate_backup_path(dir: &Path, backup_path: &Path) -> Result<PathBuf> {
+    let backup_path = backup_path
+        .canonicalize()
+        .with_context(|| format!("备份文件不存在: {}", backup_path.display()))?;
+    if !backup_path.starts_with(dir) {
+        anyhow::bail!("备份文件不在配置目录内: {}", backup_path.display());
+    }
+    Ok(backup_path)
+}
+
+fn parse_valid_backup_name(name: &str) -> Option<(String, String, String)> {
+    let (label, stamp, ext) = parse_backup_name(name)?;
+    if stamp.is_empty() || !stamp.chars().all(|c| c.is_ascii_digit() || c == '_') {
+        return None;
+    }
+    Some((label, stamp, ext))
 }
 
 /// 判定备份文件的时间（见 [`cleanup_prefix`] 的说明）。
@@ -320,6 +368,23 @@ mod tests {
             .filter(|n| n.starts_with("settings.backup."))
             .collect();
         assert_eq!(current_backups.len(), 2);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restore_backup_to_writes_nested_target() {
+        let dir = temp_dir();
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("agents/main/agent/models.json");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, b"current").unwrap();
+        let backup = dir.join("models.backup.20260101_000000_000001.json");
+        fs::write(&backup, b"restored").unwrap();
+
+        let restored = restore_backup_to(&dir, &backup, &target).unwrap();
+        assert_eq!(restored, target.canonicalize().unwrap());
+        assert_eq!(fs::read(&target).unwrap(), b"restored");
+        assert!(!dir.join("models.json").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 

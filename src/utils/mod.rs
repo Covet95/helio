@@ -2,6 +2,7 @@ use anyhow::Result;
 use colored::Colorize;
 use std::io::{self, Write};
 
+pub mod portable_backup;
 pub mod secure_fs;
 pub mod skills_backup;
 

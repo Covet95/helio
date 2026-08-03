@@ -1,5 +1,5 @@
 use crate::models::{ApiProfile, TargetApp};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
 
@@ -245,6 +245,50 @@ pub fn apply_profile_switch(
     }
 }
 
+/// 读取所有已注册工具的当前共享配置并持久化到 Helio 数据库。
+///
+/// API profile 仍是 URL/Key 的唯一来源；这里只同步 permissions、hooks、MCP 等
+/// adapter 提取出的非档案配置，供便携备份取得导出瞬间的真实状态。
+pub fn sync_all_shared_configs(db: &crate::db::Database) -> Result<()> {
+    for target_app in TargetApp::all() {
+        let adapter = get_adapter(target_app);
+        sync_shared_config_for_adapter(db, target_app, adapter.as_ref())?;
+    }
+    Ok(())
+}
+
+fn sync_shared_config_for_adapter(
+    db: &crate::db::Database,
+    target_app: TargetApp,
+    adapter: &dyn ConfigAdapter,
+) -> Result<()> {
+    let config = adapter.read_config().with_context(|| {
+        format!("Failed to read {target_app} configuration before portable export")
+    })?;
+    db.save_shared_config(target_app, adapter.extract_shared_config(&config))
+        .with_context(|| format!("Failed to save {target_app} shared configuration"))
+}
+
+/// 将导入数据库中的 active profile 写回对应工具。使用数据库内的 shared config
+/// 作为事实源，避免目标机现有文件把备份中的 MCP 配置覆盖掉。
+pub fn materialize_active_profiles(db: &crate::db::Database) -> Result<Vec<TargetApp>> {
+    let mut restored = Vec::new();
+    for target_app in TargetApp::all() {
+        let Some(mut profile) = db.get_active_profile_full(target_app)? else {
+            continue;
+        };
+        profile.normalize_keys();
+        let shared_config = db
+            .get_shared_config(target_app)?
+            .map(|shared| shared.config)
+            .unwrap_or_else(|| serde_json::json!({}));
+        apply_profile_switch(db, target_app, &profile, &shared_config, true)
+            .with_context(|| format!("Failed to restore imported {target_app} configuration"))?;
+        restored.push(target_app);
+    }
+    Ok(restored)
+}
+
 #[cfg(test)]
 mod switch_journal_tests {
     use super::*;
@@ -392,7 +436,8 @@ pub fn get_adapter(target_app: TargetApp) -> Box<dyn ConfigAdapter> {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_profile_transaction, ConfigAdapter};
+    use super::{apply_profile_transaction, sync_shared_config_for_adapter, ConfigAdapter};
+    use crate::db::Database;
     use crate::models::ApiProfile;
     use anyhow::Result;
     use std::fs;
@@ -571,5 +616,51 @@ mod tests {
         let previous = serde_json::json!({ "mcp_servers": "nope" });
         super::backfill_mcp_entries(&mut live, &previous);
         assert!(live.get("mcp_servers").is_none());
+    }
+
+    struct SharedConfigAdapter {
+        config: serde_json::Value,
+    }
+
+    impl ConfigAdapter for SharedConfigAdapter {
+        fn config_path(&self) -> PathBuf {
+            PathBuf::from("unused")
+        }
+        fn read_config(&self) -> Result<serde_json::Value> {
+            Ok(self.config.clone())
+        }
+        fn extract_shared_config(&self, config: &serde_json::Value) -> serde_json::Value {
+            config.clone()
+        }
+        fn merge_config(&self, _: &ApiProfile, shared: &serde_json::Value) -> serde_json::Value {
+            shared.clone()
+        }
+        fn write_config(&self, _: &serde_json::Value) -> Result<()> {
+            Ok(())
+        }
+        fn backup_config(&self) -> Result<PathBuf> {
+            Ok(PathBuf::from("unused"))
+        }
+        fn cleanup_old_backups(&self, _: usize) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn portable_sync_persists_current_mcp_config() -> Result<()> {
+        let db = Database::open(":memory:")?;
+        let adapter = SharedConfigAdapter {
+            config: serde_json::json!({
+                "mcp_servers": { "new-server": { "command": "npx" } }
+            }),
+        };
+        sync_shared_config_for_adapter(&db, crate::models::TargetApp::Codex, &adapter)?;
+        assert_eq!(
+            db.get_shared_config(crate::models::TargetApp::Codex)?
+                .unwrap()
+                .config["mcp_servers"]["new-server"]["command"],
+            "npx"
+        );
+        Ok(())
     }
 }

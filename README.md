@@ -22,7 +22,7 @@ AI CLI 工具的 API 配置切换器。把 API 凭据与共享配置（权限 / 
 | macOS | `.dmg`（Apple Silicon / Intel） |
 | Linux | `.deb` / AppImage |
 
-维护者发版：改版本号 → 推 `main` → `git tag vX.Y.Z && git push origin vX.Y.Z`（工作流 [release.yml](.github/workflows/release.yml)）。
+维护者发版：同步更新 `Cargo.toml`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json`、`gui/package.json` 与 `gui/package-lock.json` 的版本号 → 推 `main` → `git tag vX.Y.Z && git push origin vX.Y.Z`（工作流 [release.yml](.github/workflows/release.yml)）。
 
 > **macOS 提示「已损坏」？** 当前发版包未做 Apple 公证（省钱路线）。装好后执行 `xattr -cr /Applications/Helio.app`，或右键 → 打开。详见 [docs/MACOS.md](docs/MACOS.md)。
 
@@ -127,9 +127,13 @@ switch-api import backup.db
 
 ### 备份与恢复
 
+「备份 / 恢复」页面的**便携备份**是迁移 Helio 管理的 API 档案、共享配置（含 MCP）与 Skills 的推荐方式。导出前会从全部已支持工具读取当前共享配置并写回数据库，然后把数据库一致性快照与 Skills 归档封装进一个私有 `tar.gz` 文件。恢复先校验归档和组件哈希，再导入数据库、恢复 Skills，并把导入档案中已激活的工具配置写回本机。
+
+同名 Skills 在恢复时仍会跳过而不是覆盖；不在 Helio profile 中的原始工具凭据不会被自动收集。单独的「导出数据库」与「导出 Skills」保留给高级恢复和排查场景。
+
 导出是**一致性快照**（`VACUUM INTO`），单文件、含尚未落盘到主文件的已提交写入，权限固定为仅当前用户可读写（0600），且不会改动你选择的导出目录本身的权限。
 
-导入只接受 Helio 自己的数据库：先只读校验（完整性 + `api_profiles` schema 特征），再在私有 staging 副本上跑一遍 schema 迁移，全部通过才原子替换现有库。任一步失败都中止，现有数据不受影响。旧版本导出的备份可以直接导入，替换时自动升级 schema。
+导入只接受 Helio 自己的数据库：先只读校验（完整性 + `api_profiles` schema 特征），再在私有 staging 副本上跑一遍 schema 迁移，全部通过才原子替换现有库。任一步失败都中止，现有数据不受影响。旧版本导出的备份可以直接导入，替换时自动升级 schema；导入完成后会把其中已激活的档案写回对应工具配置。
 
 替换前会把现有库快照成 `db.backup.<时间戳>.sqlite`（与数据库同目录），最多保留 10 份，超出自动清理；schema 迁移前的 `*.premigrate.*` 备份同样保留 10 份。**这些备份含明文 API Key**，与数据库一样是 0600，转存前请注意。
 

@@ -62,6 +62,8 @@ pub fn run() {
             commands::main_cmds::get_status,
             commands::main_cmds::export_database,
             commands::main_cmds::import_database,
+            commands::main_cmds::export_portable_backup,
+            commands::main_cmds::import_portable_backup,
             commands::main_cmds::export_skills,
             commands::main_cmds::import_skills,
             commands::main_cmds::scan_local_mcp_servers,

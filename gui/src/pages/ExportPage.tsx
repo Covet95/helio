@@ -8,11 +8,14 @@ import { humanizeError } from '../lib/utils';
 type Feedback = { text: string; kind: 'success' | 'error' | 'info' };
 
 export default function ExportPage() {
+  const [portableImporting, setPortableImporting] = useState(false);
+  const [portableExporting, setPortableExporting] = useState(false);
   const [importing, setImporting] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [skillsImporting, setSkillsImporting] = useState(false);
   const [skillsExporting, setSkillsExporting] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
+  const [confirmPortableImport, setConfirmPortableImport] = useState(false);
   const [confirmImport, setConfirmImport] = useState(false);
   const [confirmSkillsImport, setConfirmSkillsImport] = useState(false);
 
@@ -36,6 +39,68 @@ export default function ExportPage() {
     }
   };
 
+  const refreshAppData = async () => {
+    try {
+      const { useStore } = await import('../store');
+      await useStore.getState().fetchProfiles();
+      await useStore.getState().fetchStatus();
+    } catch {
+      window.location.reload();
+    }
+  };
+
+  const handlePortableExport = async () => {
+    try {
+      setPortableExporting(true);
+      setFeedback(null);
+      const { save } = await import('@tauri-apps/plugin-dialog');
+      const filePath = await save({
+        defaultPath: `helio-portable-${Date.now()}.tar.gz`,
+        filters: [{ name: 'Helio 便携备份', extensions: ['tar.gz', 'tgz'] }],
+      });
+      if (!filePath) { setFeedback({ text: '导出已取消', kind: 'info' }); return; }
+      const { tauriApi } = await import('../lib/tauri');
+      const result = await tauriApi.exportPortableBackup(filePath);
+      setFeedback({
+        text: `便携备份导出成功：Skills ${result.skills.total} 个`,
+        kind: 'success',
+      });
+    } catch (err) {
+      setFeedback({ text: `便携备份导出失败: ${humanizeError(err)}`, kind: 'error' });
+    } finally {
+      setPortableExporting(false);
+    }
+  };
+
+  const handlePortableImport = async () => {
+    try {
+      setPortableImporting(true);
+      setConfirmPortableImport(false);
+      setFeedback(null);
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const filePath = await open({
+        multiple: false,
+        filters: [{ name: 'Helio 便携备份', extensions: ['tar.gz', 'tgz'] }],
+      });
+      if (!filePath) { setFeedback({ text: '导入已取消', kind: 'info' }); return; }
+      const { tauriApi } = await import('../lib/tauri');
+      const result = await tauriApi.importPortableBackup(filePath as string);
+      const targets = result.restored_targets.length > 0
+        ? `，已恢复 ${result.restored_targets.length} 个工具配置`
+        : '';
+      const skipped = result.skills.skipped > 0 ? `，跳过同名 Skills ${result.skills.skipped} 个` : '';
+      setFeedback({
+        text: `便携备份恢复完成：Skills ${result.skills.restored} 个${skipped}${targets}`,
+        kind: 'success',
+      });
+      await refreshAppData();
+    } catch (err) {
+      setFeedback({ text: `便携备份恢复失败: ${humanizeError(err)}`, kind: 'error' });
+    } finally {
+      setPortableImporting(false);
+    }
+  };
+
   const handleImport = async () => {
     try {
       setImporting(true);
@@ -50,14 +115,7 @@ export default function ExportPage() {
       const { tauriApi } = await import('../lib/tauri');
       await tauriApi.importDatabase(filePath as string);
       setFeedback({ text: '数据库导入成功，正在刷新…', kind: 'success' });
-      // soft reload app data (avoid full document reload in Tauri)
-      try {
-        const { useStore } = await import('../store');
-        await useStore.getState().fetchProfiles();
-        await useStore.getState().fetchStatus();
-      } catch {
-        window.location.reload();
-      }
+      await refreshAppData();
     } catch (err) {
       setFeedback({ text: `导入失败: ${humanizeError(err)}`, kind: 'error' });
     } finally {
@@ -136,6 +194,21 @@ export default function ExportPage() {
         <div className="overflow-hidden rounded-lg border border-line bg-card">
           <ActionRow
             icon={<Download size={20} className="text-accent" />}
+            title="导出便携备份"
+            meta="数据库 + Skills"
+            button={<Button onClick={handlePortableExport} disabled={portableExporting}><Download size={16} />{portableExporting ? '导出中…' : '导出'}</Button>}
+          />
+          <ActionRow
+            icon={<Upload size={20} className="text-opencode" />}
+            title="恢复便携备份"
+            meta="校验后恢复数据库、Skills 与激活配置"
+            button={<Button variant="secondary" onClick={() => setConfirmPortableImport(true)} disabled={portableImporting}><Upload size={16} />{portableImporting ? '恢复中…' : '恢复'}</Button>}
+          />
+        </div>
+
+        <div className="mt-4 overflow-hidden rounded-lg border border-line bg-card">
+          <ActionRow
+            icon={<Download size={20} className="text-accent" />}
             title="导出数据库"
             meta=".db / .sqlite"
             button={<Button onClick={handleExport} disabled={exporting}><Download size={16} />{exporting ? '导出中…' : '导出'}</Button>}
@@ -162,9 +235,20 @@ export default function ExportPage() {
             button={<Button variant="secondary" onClick={() => setConfirmSkillsImport(true)} disabled={skillsImporting}><Upload size={16} />{skillsImporting ? '导入中…' : '导入'}</Button>}
           />
         </div>
-      </div>
+        </div>
 
-      {confirmImport && (
+        {confirmPortableImport && (
+          <ConfirmDialog
+            title="恢复便携备份"
+            message="当前数据库会被覆盖。归档校验通过后会恢复 Skills，并把导入档案中已激活的工具配置写回本机。目标端同名 Skill 不会覆盖。"
+            confirmText="恢复"
+            danger
+            onCancel={() => setConfirmPortableImport(false)}
+            onConfirm={handlePortableImport}
+          />
+        )}
+
+        {confirmImport && (
         <ConfirmDialog
           title="导入数据库"
           message="当前数据库会被覆盖。仅接受 Helio 导出的备份文件，校验不通过则不会改动现有数据。导入前自动备份当前库（带时间戳，最多保留 10 份，可回退）。"
