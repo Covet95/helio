@@ -183,7 +183,6 @@ fn chat_completions_url_compat(api_url: &str) -> String {
     join_openai_path(&openai_compat_base(api_url), "chat/completions")
 }
 
-#[cfg(test)]
 fn responses_url_compat(api_url: &str) -> String {
     join_openai_path(&openai_compat_base(api_url), "responses")
 }
@@ -381,13 +380,22 @@ fn resolve_probe_plan(
                 })
             }
         }
-        "opencode" => Ok(ProbePlan {
-            protocol: ProbeProtocol::ChatCompletions,
-            endpoint: chat_completions_url_compat(api_url),
-            headers: bearer_headers(key),
-            body: chat_body(model),
-            success: SuccessCheck::ChatChoices,
-        }),
+        "opencode" => match normalize_hermes_openclaw_mode(api_mode) {
+            "responses" => Ok(ProbePlan {
+                protocol: ProbeProtocol::Responses,
+                endpoint: responses_url_compat(api_url),
+                headers: bearer_headers(key),
+                body: responses_body(model),
+                success: SuccessCheck::ResponsesOutputOrStatus,
+            }),
+            _ => Ok(ProbePlan {
+                protocol: ProbeProtocol::ChatCompletions,
+                endpoint: chat_completions_url_compat(api_url),
+                headers: bearer_headers(key),
+                body: chat_body(model),
+                success: SuccessCheck::ChatChoices,
+            }),
+        },
         "hermes" | "openclaw" => match normalize_hermes_openclaw_mode(api_mode) {
             "anthropic_messages" => Ok(ProbePlan {
                 protocol: ProbeProtocol::AnthropicMessages,
@@ -909,6 +917,22 @@ mod tests {
             plan.endpoint,
             "https://api.deepseek.com/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn opencode_responses_mode_uses_responses_endpoint() {
+        let plan = resolve_probe_plan(
+            "opencode",
+            "https://api.deepseek.com/anthropic",
+            "sk",
+            "deepseek-chat",
+            None,
+            Some("responses"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.protocol, ProbeProtocol::Responses);
+        assert_eq!(plan.endpoint, "https://api.deepseek.com/v1/responses");
     }
 
     #[test]

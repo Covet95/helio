@@ -6,6 +6,7 @@ import { PageHeader } from '../components/common/PageHeader';
 import { RefreshCw, HardDrive, Layers, FolderOpen, Activity } from 'lucide-react';
 import { formatBytes, humanizeError } from '../lib/utils';
 import { contextBadgeLabel, statusKeyFor } from '../lib/contextWindow';
+import { tauriApi } from '../lib/tauri';
 import { SUPPORTED_TOOLS } from '../types';
 import type { StatusInfo, TargetApp, TargetStatus, ToolInfo, ToolProbeResult } from '../types';
 
@@ -31,7 +32,6 @@ export default function StatusPage() {
     setProbing(true);
     setProbeErr('');
     try {
-      const { tauriApi } = await import('../lib/tauri');
       const list = await tauriApi.probeActiveProfiles();
       const map: Record<string, ToolProbeResult> = {};
       for (const r of list) map[r.target_app] = r as ToolProbeResult;
@@ -141,6 +141,7 @@ function ToolCard({
   }
   const p = status?.profile;
   const ctx = p ? contextBadgeLabel(p.context_1m, p.model, { tool: tool.id as TargetApp }) : null;
+  const protocol = p && tool.id === 'opencode' ? p.opencode_api_mode : p?.api_mode;
   return (
     <div
       className="group relative border-b border-line bg-card px-3.5 py-3 transition-colors duration-150 last:border-b-0 hover:bg-elevated/45"
@@ -170,7 +171,13 @@ function ToolCard({
           <Row label="Provider" value={p.provider} />
           <Row label="Model" value={p.model || '—'} mono />
           <Row label="Context" value={ctx ? `ctx ${ctx}` : '—'} />
-          {p.api_mode && <Row label="api_mode" value={p.api_mode} mono />}
+          {protocol && (
+            <Row
+              label={tool.id === 'opencode' ? 'opencode_api_mode' : 'api_mode'}
+              value={protocol}
+              mono
+            />
+          )}
           <Row label="URL" value={p.api_url} mono />
           {probe?.http_status != null && (
             <Row label="HTTP" value={String(probe.http_status)} mono />

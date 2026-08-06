@@ -195,6 +195,11 @@ pub fn apply_profile_switch(
         .id
         .ok_or_else(|| anyhow::anyhow!("Profile '{}' has no id", api_profile.name))?;
     let adapter = get_adapter(target_app);
+    let previous_opencode_state = if target_app == TargetApp::OpenCode {
+        Some(db.get_opencode_managed_models()?)
+    } else {
+        None
+    };
     let journal = journal::begin_switch(
         db,
         adapter.as_ref(),
@@ -204,6 +209,21 @@ pub fn apply_profile_switch(
     )?;
 
     let result = (|| -> Result<ProfileApplicationResult> {
+        let (effective_shared_config, next_opencode_state) = if target_app == TargetApp::OpenCode {
+            let previous = previous_opencode_state
+                .as_ref()
+                .cloned()
+                .unwrap_or_default();
+            let (config, next_state) = opencode::OpenCodeAdapter::prepare_shared_config_for_switch(
+                shared_config,
+                api_profile,
+                &previous,
+            );
+            (config, Some(next_state))
+        } else {
+            (shared_config.clone(), None)
+        };
+
         // 制造 `active != target` 窗口：仅当当前 active 已是目标时需要。
         // 不同 profile 之间切换时 active 本来就不是目标，无需动。
         let already_active = db
@@ -213,9 +233,16 @@ pub fn apply_profile_switch(
         if already_active {
             db.clear_active_profile(target_app)?;
         }
-        db.save_shared_config(target_app, shared_config.clone())?;
-        let applied =
-            apply_profile_configuration(target_app, api_profile, shared_config, create_backup)?;
+        db.save_shared_config(target_app, effective_shared_config.clone())?;
+        let applied = apply_profile_configuration(
+            target_app,
+            api_profile,
+            &effective_shared_config,
+            create_backup,
+        )?;
+        if let Some(state) = next_opencode_state {
+            db.replace_opencode_managed_models(&state)?;
+        }
         db.set_active_profile(target_app, profile_id)?;
         Ok(applied)
     })();

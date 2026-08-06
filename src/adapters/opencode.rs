@@ -2,6 +2,7 @@ use super::{backup, ConfigAdapter};
 use crate::models::ApiProfile;
 use crate::utils::secure_fs::atomic_write_private;
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -150,32 +151,34 @@ impl OpenCodeAdapter {
         self.write_config(&next)
     }
 
-    /// Helio 删掉某 OpenCode 档案后：若库里已无同 provider 的档案，同步清本地 provider 块。
-    pub fn cleanup_local_provider_if_unused(
-        db: &crate::db::Database,
-        provider: &str,
-    ) -> Result<()> {
-        let remaining = db.list_profiles()?;
-        if Self::provider_still_used(&remaining, provider) {
-            return Ok(());
-        }
-        Self::new().remove_provider(provider)
-    }
-
-    /// 删除 OpenCode 档案的统一入口：先删 DB，再按需清本地 provider。
+    /// 删除 OpenCode 档案的统一入口：先确保不再使用的本地 provider 可清理，
+    /// 再删除 DB 档案，避免清理失败后留下无法重试的档案状态。
     /// CLI / GUI 共用，避免删前取 provider 的逻辑分叉。
     ///
     /// 返回值：档案是否存在并已删除。
     pub fn delete_profile_and_cleanup_local(db: &crate::db::Database, name: &str) -> Result<bool> {
-        let provider = db
-            .get_profile_by_name_and_target(name, crate::models::TargetApp::OpenCode)
-            .ok()
-            .map(|p| p.provider);
+        let profiles = db.list_profiles()?;
+        let Some(profile) = profiles
+            .into_iter()
+            .find(|p| p.target_app == Some(crate::models::TargetApp::OpenCode) && p.name == name)
+        else {
+            return Ok(false);
+        };
+        let provider = profile.provider;
+        let provider_still_used = db.list_profiles()?.into_iter().any(|p| {
+            p.id != profile.id
+                && p.target_app == Some(crate::models::TargetApp::OpenCode)
+                && Self::normalize_provider_id(&p.provider)
+                    == Self::normalize_provider_id(&provider)
+        });
+
+        if !provider_still_used {
+            Self::new().remove_provider(&provider)?;
+        }
+
         let deleted = db.delete_profile(name, crate::models::TargetApp::OpenCode)?;
-        if deleted {
-            if let Some(provider) = provider {
-                Self::cleanup_local_provider_if_unused(db, &provider)?;
-            }
+        if deleted && !provider_still_used {
+            db.clear_opencode_managed_provider(&provider)?;
         }
         Ok(deleted)
     }
@@ -196,6 +199,106 @@ impl OpenCodeAdapter {
             return base.to_string();
         }
         format!("{base}/v1")
+    }
+
+    pub fn normalize_api_mode(mode: Option<&str>) -> Result<Option<&'static str>> {
+        match mode.map(str::trim).filter(|m| !m.is_empty()) {
+            None => Ok(None),
+            Some("chat_completions") => Ok(Some("chat_completions")),
+            Some("responses") => Ok(Some("responses")),
+            Some(other) => anyhow::bail!(
+                "OpenCode api mode must be chat_completions or responses, got `{other}`"
+            ),
+        }
+    }
+
+    fn npm_for_api_mode(mode: &str) -> &'static str {
+        match mode {
+            "responses" => "@ai-sdk/openai",
+            _ => "@ai-sdk/openai-compatible",
+        }
+    }
+
+    /// Resolve the complete model set managed by the profile.
+    ///
+    /// The legacy list remains readable, while the default model and
+    /// model-config keys are included so a config-only model is not omitted.
+    pub fn resolve_model_ids(api_profile: &ApiProfile) -> Vec<String> {
+        let mut model_ids = Vec::new();
+        let mut push = |model: &str| {
+            let model = model.trim();
+            if !model.is_empty() && !model_ids.iter().any(|m| m == model) {
+                model_ids.push(model.to_string());
+            }
+        };
+
+        if let Some(list) = api_profile.opencode.models.as_ref() {
+            for model in list {
+                push(model);
+            }
+        }
+        if let Some(model) = api_profile.model.as_deref() {
+            push(model);
+        }
+        if let Some(configs) = api_profile.opencode.model_configs.as_ref() {
+            let mut config_ids: Vec<&String> = configs.keys().collect();
+            config_ids.sort();
+            for model in config_ids {
+                push(model);
+            }
+        }
+        model_ids
+    }
+
+    /// Remove only models previously written by Helio for this provider.
+    pub fn prepare_shared_config_for_switch(
+        shared_config: &serde_json::Value,
+        api_profile: &ApiProfile,
+        previous_state: &HashMap<String, Vec<String>>,
+    ) -> (serde_json::Value, HashMap<String, Vec<String>>) {
+        let provider_id = Self::provider_id(api_profile);
+        let desired = Self::resolve_model_ids(api_profile);
+        let mut config = shared_config.clone();
+
+        if let Some(previous_ids) = previous_state.get(&provider_id) {
+            if let Some(models) = config
+                .get_mut("provider")
+                .and_then(|providers| providers.as_object_mut())
+                .and_then(|providers| providers.get_mut(&provider_id))
+                .and_then(|provider| provider.get_mut("models"))
+                .and_then(|models| models.as_object_mut())
+            {
+                for model_id in previous_ids {
+                    if !desired.iter().any(|model| model == model_id) {
+                        models.remove(model_id);
+                    }
+                }
+            }
+        }
+
+        let mut next_state = previous_state.clone();
+        if desired.is_empty() {
+            next_state.remove(&provider_id);
+        } else {
+            next_state.insert(provider_id, desired);
+        }
+        (config, next_state)
+    }
+
+    fn merge_json_objects(
+        target: &mut serde_json::Map<String, serde_json::Value>,
+        patch: &serde_json::Map<String, serde_json::Value>,
+    ) {
+        for (key, value) in patch {
+            match (target.get_mut(key), value) {
+                (Some(serde_json::Value::Object(existing)), serde_json::Value::Object(next)) => {
+                    Self::merge_json_objects(existing, next);
+                }
+                _ => {
+                    target.insert(key.clone(), value.clone());
+                }
+            }
+        }
     }
 }
 
@@ -259,6 +362,11 @@ impl ConfigAdapter for OpenCodeAdapter {
         serde_json::from_str(&stripped).context("Failed to parse OpenCode config")
     }
 
+    fn validate_profile(&self, api_profile: &ApiProfile) -> Result<()> {
+        Self::normalize_api_mode(api_profile.opencode.opencode_api_mode.as_deref())?;
+        Ok(())
+    }
+
     fn extract_shared_config(&self, config: &serde_json::Value) -> serde_json::Value {
         // 凭据不落 shared_configs（key 只存 api_profiles 表，避免明文冗余 + 回传前端）。
         // merge_config 时会从磁盘补回其他 provider 的 key，共存语义不受影响。
@@ -299,6 +407,14 @@ impl ConfigAdapter for OpenCodeAdapter {
                     p.entry("name".to_string())
                         .or_insert_with(|| serde_json::Value::String(provider_id.clone()));
                 }
+                if let Ok(Some(mode)) =
+                    Self::normalize_api_mode(api_profile.opencode.opencode_api_mode.as_deref())
+                {
+                    p.insert(
+                        "npm".to_string(),
+                        serde_json::Value::String(Self::npm_for_api_mode(mode).to_string()),
+                    );
+                }
                 let options = p
                     .entry("options".to_string())
                     .or_insert_with(|| serde_json::json!({}));
@@ -315,36 +431,32 @@ impl ConfigAdapter for OpenCodeAdapter {
                     );
                 }
 
-                // 模型列表：把 profile.models（多选）里的每个模型写进 provider 的
-                // models 声明，加上默认模型 model（OpenCode 要列出/切换这些模型）。
-                let mut model_ids: Vec<String> = Vec::new();
-                if let Some(list) = api_profile.opencode.models.as_ref() {
-                    for m in list {
-                        let m = m.trim();
-                        if !m.is_empty() {
-                            model_ids.push(m.to_string());
-                        }
-                    }
-                }
-                if let Some(default_model) = api_profile
-                    .model
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|m| !m.is_empty())
-                {
-                    if !model_ids.iter().any(|m| m == default_model) {
-                        model_ids.push(default_model.to_string());
-                    }
-                }
+                // 模型列表：把 profile.models、默认模型和模型配置里的每个模型写进
+                // provider 的 models 声明，加上 per-model OpenCode 配置。
+                let model_ids = Self::resolve_model_ids(api_profile);
                 if !model_ids.is_empty() {
                     let models = p
                         .entry("models".to_string())
                         .or_insert_with(|| serde_json::json!({}));
                     if let Some(models_obj) = models.as_object_mut() {
                         for m in &model_ids {
-                            models_obj
+                            let model = models_obj
                                 .entry(m.clone())
                                 .or_insert_with(|| serde_json::json!({ "name": m }));
+                            if let Some(model_obj) = model.as_object_mut() {
+                                model_obj
+                                    .entry("name".to_string())
+                                    .or_insert_with(|| serde_json::Value::String(m.clone()));
+                                if let Some(model_config) = api_profile
+                                    .opencode
+                                    .model_configs
+                                    .as_ref()
+                                    .and_then(|configs| configs.get(m))
+                                    .and_then(|config| config.as_object())
+                                {
+                                    Self::merge_json_objects(model_obj, model_config);
+                                }
+                            }
                         }
                     }
                 }
@@ -360,14 +472,7 @@ impl ConfigAdapter for OpenCodeAdapter {
             .map(str::trim)
             .filter(|m| !m.is_empty())
             .map(|m| m.to_string())
-            .or_else(|| {
-                api_profile.opencode.models.as_ref().and_then(|list| {
-                    list.iter()
-                        .map(|m| m.trim())
-                        .find(|m| !m.is_empty())
-                        .map(|m| m.to_string())
-                })
-            });
+            .or_else(|| Self::resolve_model_ids(api_profile).into_iter().next());
 
         match default_model {
             Some(model) => {
@@ -417,6 +522,7 @@ impl ConfigAdapter for OpenCodeAdapter {
 mod tests {
     use super::*;
     use crate::models::OpenCodeProfileFields;
+    use std::collections::HashMap;
 
     fn sample_profile() -> ApiProfile {
         ApiProfile {
@@ -475,6 +581,150 @@ mod tests {
             OpenCodeAdapter::normalize_openai_compatible_base_url("   "),
             ""
         );
+    }
+
+    #[test]
+    fn test_protocol_mode_maps_to_provider_npm() {
+        let adapter = OpenCodeAdapter::new();
+        let profile = ApiProfile {
+            provider: "openai".into(),
+            opencode: OpenCodeProfileFields {
+                opencode_api_mode: Some("responses".into()),
+                ..Default::default()
+            },
+            ..sample_profile()
+        };
+        let merged = adapter.merge_config(&profile, &serde_json::json!({}));
+        assert_eq!(merged["provider"]["openai"]["npm"], "@ai-sdk/openai");
+
+        let existing = serde_json::json!({
+            "provider": {
+                "openai": {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "options": {}
+                }
+            }
+        });
+        let changed = adapter.merge_config(&profile, &existing);
+        assert_eq!(changed["provider"]["openai"]["npm"], "@ai-sdk/openai");
+
+        let invalid = ApiProfile {
+            opencode: OpenCodeProfileFields {
+                opencode_api_mode: Some("invalid".into()),
+                ..Default::default()
+            },
+            ..sample_profile()
+        };
+        assert!(adapter.validate_profile(&invalid).is_err());
+    }
+
+    #[test]
+    fn test_merge_writes_model_config_and_preserves_unknown_fields() {
+        let adapter = OpenCodeAdapter::new();
+        let profile = ApiProfile {
+            provider: "openai".into(),
+            model: Some("gpt-5".into()),
+            opencode: OpenCodeProfileFields {
+                model_configs: Some(HashMap::from([(
+                    "gpt-5".into(),
+                    serde_json::json!({
+                        "limit": { "context": 200000, "output": 65536 },
+                        "options": { "reasoningEffort": "high" },
+                        "variants": {
+                            "low": { "reasoningEffort": "low" },
+                            "max": { "reasoningEffort": "xhigh" }
+                        }
+                    }),
+                )])),
+                ..Default::default()
+            },
+            ..sample_profile()
+        };
+        let shared = serde_json::json!({
+            "provider": {
+                "openai": {
+                    "models": {
+                        "gpt-5": {
+                            "customField": "keep",
+                            "options": { "existing": true }
+                        }
+                    }
+                }
+            }
+        });
+        let merged = adapter.merge_config(&profile, &shared);
+        let model = &merged["provider"]["openai"]["models"]["gpt-5"];
+        assert_eq!(model["customField"], "keep");
+        assert_eq!(model["limit"]["output"], 65536);
+        assert_eq!(model["options"]["existing"], true);
+        assert_eq!(model["options"]["reasoningEffort"], "high");
+        assert_eq!(model["variants"]["low"]["reasoningEffort"], "low");
+        assert_eq!(model["variants"]["max"]["reasoningEffort"], "xhigh");
+    }
+
+    #[test]
+    fn test_reconcile_removes_only_previous_helio_models() {
+        let profile = ApiProfile {
+            provider: "cpa".into(),
+            model: Some("new".into()),
+            opencode: OpenCodeProfileFields {
+                models: Some(vec!["new".into()]),
+                ..Default::default()
+            },
+            ..sample_profile()
+        };
+        let shared = serde_json::json!({
+            "provider": {
+                "cpa": {
+                    "models": {
+                        "old": { "name": "old" },
+                        "manual": { "name": "manual", "custom": true }
+                    }
+                },
+                "other": {
+                    "models": {
+                        "keep": { "name": "keep" }
+                    }
+                }
+            }
+        });
+        let previous = HashMap::from([
+            ("cpa".into(), vec!["old".into()]),
+            ("other".into(), vec!["keep".into()]),
+        ]);
+        let (pruned, next) =
+            OpenCodeAdapter::prepare_shared_config_for_switch(&shared, &profile, &previous);
+        assert!(pruned["provider"]["cpa"]["models"].get("old").is_none());
+        assert!(pruned["provider"]["cpa"]["models"].get("manual").is_some());
+        assert!(pruned["provider"]["other"]["models"].get("keep").is_some());
+        assert_eq!(next["cpa"], vec!["new"]);
+        assert_eq!(next["other"], vec!["keep"]);
+    }
+
+    #[test]
+    fn test_reconcile_empty_set_removes_managed_only() {
+        let profile = ApiProfile {
+            provider: "cpa".into(),
+            ..sample_profile()
+        };
+        let shared = serde_json::json!({
+            "provider": {
+                "cpa": {
+                    "models": {
+                        "old": { "name": "old" },
+                        "manual": { "name": "manual" }
+                    }
+                }
+            },
+            "model": "cpa/old"
+        });
+        let previous = HashMap::from([("cpa".into(), vec!["old".into()])]);
+        let (pruned, next) =
+            OpenCodeAdapter::prepare_shared_config_for_switch(&shared, &profile, &previous);
+
+        assert!(pruned["provider"]["cpa"]["models"].get("old").is_none());
+        assert!(pruned["provider"]["cpa"]["models"].get("manual").is_some());
+        assert!(!next.contains_key("cpa"));
     }
 
     #[test]
@@ -644,6 +894,7 @@ mod tests {
                     "claude-sonnet-4-6".to_string(),
                     "claude-haiku-4-5".to_string(),
                 ]),
+                ..Default::default()
             },
             ..sample_profile()
         };
@@ -707,6 +958,7 @@ mod tests {
                     "claude-sonnet-4-6".to_string(),
                     "claude-haiku-4-5".to_string(),
                 ]),
+                ..Default::default()
             },
             ..sample_profile()
         };

@@ -855,6 +855,11 @@ pub struct ScannedApi {
     pub aws_region: Option<String>,
     /// Hermes / OpenClaw 协议模式（独立字段，不再借用 wire_api）
     pub api_mode: Option<String>,
+    /// OpenCode provider SDK mode.
+    pub opencode_api_mode: Option<String>,
+    /// OpenCode provider model declarations and per-model config.
+    pub opencode_models: Option<Vec<String>>,
+    pub opencode_model_configs: Option<std::collections::HashMap<String, serde_json::Value>>,
     /// OpenClaw models[].maxTokens
     pub max_tokens: Option<i64>,
     /// 来源配置文件路径，便于用户确认
@@ -885,6 +890,10 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
     let mut claude_mapping: Option<std::collections::HashMap<String, String>> = None;
     // Hermes / OpenClaw
     let mut api_mode: Option<String> = None;
+    let mut opencode_api_mode: Option<String> = None;
+    let mut opencode_models: Option<Vec<String>> = None;
+    let mut opencode_model_configs: Option<std::collections::HashMap<String, serde_json::Value>> =
+        None;
     let mut max_tokens: Option<i64> = None;
     let mut context_1m: Option<bool> = None;
 
@@ -1038,6 +1047,24 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
                     if let Some(opts) = pv.get("options") {
                         url = str_field(opts, "baseURL");
                         key = str_field(opts, "apiKey");
+                    }
+                    opencode_api_mode = match str_field(pv, "npm").as_str() {
+                        "@ai-sdk/openai" => Some("responses".to_string()),
+                        "@ai-sdk/openai-compatible" => Some("chat_completions".to_string()),
+                        _ => None,
+                    };
+                    if let Some(models) = pv.get("models").and_then(|v| v.as_object()) {
+                        let mut ids = Vec::with_capacity(models.len());
+                        let mut configs = std::collections::HashMap::new();
+                        for (model_id, model_config) in models {
+                            ids.push(model_id.clone());
+                            if model_config.is_object() {
+                                configs.insert(model_id.clone(), model_config.clone());
+                            }
+                        }
+                        ids.sort();
+                        opencode_models = (!ids.is_empty()).then_some(ids);
+                        opencode_model_configs = (!configs.is_empty()).then_some(configs);
                     }
                 }
             }
@@ -1260,6 +1287,9 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
         aws_profile,
         aws_region,
         api_mode,
+        opencode_api_mode,
+        opencode_models,
+        opencode_model_configs,
         max_tokens,
         source,
     })
@@ -1534,6 +1564,7 @@ pub async fn get_status(state: State<'_, AppState>) -> Result<StatusInfo, String
 
 fn profile_protocol_fields(profile: &ApiProfile) -> Option<String> {
     match profile.target_app {
+        Some(TargetApp::OpenCode) => profile.opencode.opencode_api_mode.clone(),
         Some(TargetApp::Hermes) => profile.hermes.api_mode.clone(),
         Some(TargetApp::OpenClaw) => profile.openclaw.api_mode.clone(),
         _ => profile

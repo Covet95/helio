@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { emptyProfileForTool, normalizeCodexCatalogModels, providerTint } from './helpers';
+import {
+  emptyProfileForTool,
+  normalizeCodexCatalogModels,
+  normalizeOpenCodeModelConfigs,
+  providerTint,
+} from './helpers';
 import { humanizeError } from '../../lib/utils';
 
 describe('profile helpers', () => {
@@ -14,6 +19,10 @@ describe('profile helpers', () => {
       target_app: 'hermes',
       context_1m: false,
       api_mode: 'chat_completions',
+    });
+    expect(emptyProfileForTool('opencode')).toMatchObject({
+      target_app: 'opencode',
+      opencode_api_mode: 'chat_completions',
     });
   });
 
@@ -41,5 +50,28 @@ describe('profile helpers', () => {
         supports_web_search: true,
       },
     ]);
+  });
+
+  it('normalizes OpenCode model configs and keeps variants', () => {
+    expect(normalizeOpenCodeModelConfigs({
+      '  gpt-5  ': {
+        options: { reasoningEffort: 'high' },
+        variants: {
+          low: { reasoningEffort: 'low' },
+          max: { thinking: { type: 'enabled', budgetTokens: 32000 } },
+        },
+      },
+      '   ': {},
+      empty: {},
+    })).toEqual({
+      'gpt-5': {
+        options: { reasoningEffort: 'high' },
+        variants: {
+          low: { reasoningEffort: 'low' },
+          max: { thinking: { type: 'enabled', budgetTokens: 32000 } },
+        },
+      },
+    });
+    expect(normalizeOpenCodeModelConfigs(undefined)).toBeUndefined();
   });
 });

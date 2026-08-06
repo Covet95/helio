@@ -3,6 +3,8 @@ import { Button } from '../components/common/Button';
 import { PageHeader } from '../components/common/PageHeader';
 import { Download, Upload, FolderCog } from 'lucide-react';
 import { ConfirmDialog } from '../components/common/Modal';
+import { tauriApi } from '../lib/tauri';
+import { useStore } from '../store';
 import { humanizeError } from '../lib/utils';
 
 type Feedback = { text: string; kind: 'success' | 'error' | 'info' };
@@ -29,7 +31,6 @@ export default function ExportPage() {
         filters: [{ name: 'Database', extensions: ['db', 'sqlite'] }],
       });
       if (!filePath) { setFeedback({ text: '导出已取消', kind: 'info' }); return; }
-      const { tauriApi } = await import('../lib/tauri');
       await tauriApi.exportDatabase(filePath);
       setFeedback({ text: '数据库导出成功', kind: 'success' });
     } catch (err) {
@@ -41,7 +42,6 @@ export default function ExportPage() {
 
   const refreshAppData = async () => {
     try {
-      const { useStore } = await import('../store');
       await useStore.getState().fetchProfiles();
       await useStore.getState().fetchStatus();
     } catch {
@@ -59,7 +59,6 @@ export default function ExportPage() {
         filters: [{ name: 'Helio 便携备份', extensions: ['tar.gz', 'tgz'] }],
       });
       if (!filePath) { setFeedback({ text: '导出已取消', kind: 'info' }); return; }
-      const { tauriApi } = await import('../lib/tauri');
       const result = await tauriApi.exportPortableBackup(filePath);
       setFeedback({
         text: `便携备份导出成功：Skills ${result.skills.total} 个`,
@@ -83,7 +82,6 @@ export default function ExportPage() {
         filters: [{ name: 'Helio 便携备份', extensions: ['tar.gz', 'tgz'] }],
       });
       if (!filePath) { setFeedback({ text: '导入已取消', kind: 'info' }); return; }
-      const { tauriApi } = await import('../lib/tauri');
       const result = await tauriApi.importPortableBackup(filePath as string);
       const targets = result.restored_targets.length > 0
         ? `，已恢复 ${result.restored_targets.length} 个工具配置`
@@ -112,7 +110,6 @@ export default function ExportPage() {
         filters: [{ name: 'Database', extensions: ['db', 'sqlite'] }],
       });
       if (!filePath) { setFeedback({ text: '导入已取消', kind: 'info' }); return; }
-      const { tauriApi } = await import('../lib/tauri');
       await tauriApi.importDatabase(filePath as string);
       setFeedback({ text: '数据库导入成功，正在刷新…', kind: 'success' });
       await refreshAppData();
@@ -133,7 +130,6 @@ export default function ExportPage() {
         filters: [{ name: 'Skills 备份', extensions: ['tar.gz', 'tgz'] }],
       });
       if (!filePath) { setFeedback({ text: '导出已取消', kind: 'info' }); return; }
-      const { tauriApi } = await import('../lib/tauri');
       const result = await tauriApi.exportSkills(filePath);
       setFeedback({
         text: result.total > 0
@@ -159,7 +155,6 @@ export default function ExportPage() {
         filters: [{ name: 'Skills 备份', extensions: ['tar.gz', 'tgz'] }],
       });
       if (!filePath) { setFeedback({ text: '导入已取消', kind: 'info' }); return; }
-      const { tauriApi } = await import('../lib/tauri');
       const result = await tauriApi.importSkills(filePath as string);
       if (result.skipped > 0) {
         setFeedback({

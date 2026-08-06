@@ -123,7 +123,7 @@ pub enum ProfileCommands {
         /// 启用 1M 上下文窗口
         #[arg(long)]
         context_1m: bool,
-        /// 协议模式（Hermes/OpenClaw：chat_completions / anthropic_messages / codex_responses）
+        /// 协议模式（OpenCode/Hermes/OpenClaw：chat_completions / responses / anthropic_messages / codex_responses）
         #[arg(long)]
         api_mode: Option<String>,
         /// OpenClaw models[].maxTokens
@@ -539,7 +539,7 @@ fn cmd_profile_add(db: &Database, request: ProfileAddRequest) -> Result<()> {
         model_mapping_map,
     );
     profile.model = model.filter(|value| !value.trim().is_empty());
-    profile.codex.reasoning_effort = reasoning_effort.filter(|value| !value.trim().is_empty());
+    let requested_reasoning_effort = reasoning_effort.filter(|value| !value.trim().is_empty());
     if context_1m {
         profile.context_1m = Some(true);
     }
@@ -549,7 +549,7 @@ fn cmd_profile_add(db: &Database, request: ProfileAddRequest) -> Result<()> {
     }
     if profile.target_app == Some(TargetApp::Codex) {
         profile.codex = CodexProfileFields {
-            reasoning_effort: profile.codex.reasoning_effort.take(),
+            reasoning_effort: requested_reasoning_effort,
             env_key: env_key.filter(|value| !value.trim().is_empty()),
             supports_standalone_web_search: supports_standalone_web_search.then_some(true),
             aws_profile: aws_profile.filter(|value| !value.trim().is_empty()),
@@ -557,10 +557,16 @@ fn cmd_profile_add(db: &Database, request: ProfileAddRequest) -> Result<()> {
             ..Default::default()
         };
     }
-    validate_profile_input(&profile)?;
-
     let mode = api_mode.filter(|v| !v.trim().is_empty());
     match profile.target_app {
+        Some(TargetApp::OpenCode) => {
+            profile.opencode.opencode_api_mode =
+                switch_api::adapters::opencode::OpenCodeAdapter::normalize_api_mode(
+                    mode.as_deref(),
+                )?
+                .map(str::to_string);
+            let _ = max_tokens;
+        }
         Some(TargetApp::Hermes) => {
             profile.hermes = HermesProfileFields { api_mode: mode };
         }
@@ -576,6 +582,7 @@ fn cmd_profile_add(db: &Database, request: ProfileAddRequest) -> Result<()> {
             let _ = max_tokens;
         }
     }
+    validate_profile_input(&profile)?;
 
     db.add_profile(&profile)?;
 
@@ -695,6 +702,14 @@ fn cmd_profile_show(db: &Database, name: String, target_app: Option<String>) -> 
         );
     }
     match profile.target_app {
+        Some(TargetApp::OpenCode) => {
+            if let Some(mode) = profile.opencode.opencode_api_mode {
+                println!("  API Mode (OpenCode): {}", mode);
+            }
+            if let Some(models) = profile.opencode.models {
+                println!("  Models (OpenCode): {}", models.join(", "));
+            }
+        }
         Some(TargetApp::Hermes) => {
             if let Some(mode) = profile.hermes.api_mode {
                 println!("  API Mode (Hermes): {}", mode);
@@ -821,6 +836,14 @@ fn cmd_profile_update(db: &Database, request: ProfileUpdateRequest) -> Result<()
     if let Some(mode) = api_mode {
         let mode = mode.trim().to_string();
         match target {
+            TargetApp::OpenCode => {
+                profile.opencode.opencode_api_mode =
+                    switch_api::adapters::opencode::OpenCodeAdapter::normalize_api_mode(
+                        (!mode.is_empty()).then_some(mode.as_str()),
+                    )?
+                    .map(str::to_string);
+                updated = true;
+            }
             TargetApp::Hermes => {
                 profile.hermes.api_mode = if mode.is_empty() { None } else { Some(mode) };
                 updated = true;
@@ -830,7 +853,7 @@ fn cmd_profile_update(db: &Database, request: ProfileUpdateRequest) -> Result<()
                 updated = true;
             }
             _ => {
-                utils::warning("--api-mode 仅对 hermes / openclaw 生效，已忽略");
+                utils::warning("--api-mode 仅对 opencode / hermes / openclaw 生效，已忽略");
             }
         }
     }

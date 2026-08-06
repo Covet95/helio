@@ -8,8 +8,8 @@ import {
   Search, FileDown, KeyRound, Boxes, Sparkles, Webhook, ShieldCheck, Check, FileWarning,
 } from 'lucide-react';
 import { SUPPORTED_TOOLS } from '../types';
-import type { TargetApp } from '../types';
-import type { CcSwitchProvider } from '../lib/tauri';
+import type { OpenCodeModelConfig, TargetApp } from '../types';
+import { tauriApi, type CcSwitchProvider } from '../lib/tauri';
 import { cn, humanizeError, maskApiKey } from '../lib/utils';
 
 interface Scanned {
@@ -30,6 +30,9 @@ interface Scanned {
   aws_profile?: string;
   aws_region?: string;
   api_mode?: string;
+  opencode_api_mode?: string;
+  opencode_models?: string[];
+  opencode_model_configs?: Record<string, OpenCodeModelConfig>;
   max_tokens?: number;
   source: string;
 }
@@ -59,7 +62,6 @@ export default function ImportPage() {
   const scanCc = async () => {
     setCcScanning(true); setFeedback(null); setCcProviders(null); setCcSelected(new Set());
     try {
-      const { tauriApi } = await import('../lib/tauri');
       const appType = tool === 'claude-code' ? 'claude' : tool;
       const list = await tauriApi.scanCcSwitch(appType);
       setCcProviders(list);
@@ -76,7 +78,6 @@ export default function ImportPage() {
     const chosen = ccProviders.filter((_, i) => ccSelected.has(i));
     if (chosen.length === 0) { setFeedback({ text: '请至少选择一个', kind: 'info' }); return; }
     try {
-      const { tauriApi } = await import('../lib/tauri');
       const n = await tauriApi.importCcSwitch(tool, chosen);
       setFeedback({ text: `已从 cc-switch 导入 ${n} 个配置档案`, kind: 'success' });
       setCcProviders(null);
@@ -88,7 +89,6 @@ export default function ImportPage() {
   const scan = async () => {
     setScanning(true); setFeedback(null); setApi(null); setInfo(null); setImportedShared(false);
     try {
-      const { tauriApi } = await import('../lib/tauri');
       const [a, i] = await Promise.all([
         tauriApi.scanLocalApi(tool),
         tauriApi.getLocalConfigInfo(tool),
@@ -116,6 +116,9 @@ export default function ImportPage() {
         context_1m: api.context_1m,
         env_key: tool === 'codex' ? api.env_key : undefined,
         api_mode: tool === 'hermes' || tool === 'openclaw' ? api.api_mode : undefined,
+        opencode_api_mode: tool === 'opencode' ? api.opencode_api_mode : undefined,
+        models: tool === 'opencode' ? api.opencode_models : undefined,
+        model_configs: tool === 'opencode' ? api.opencode_model_configs : undefined,
         max_tokens: tool === 'openclaw' ? api.max_tokens : undefined,
         service_tier: api.service_tier,
         supports_standalone_web_search: api.supports_standalone_web_search,
@@ -135,7 +138,6 @@ export default function ImportPage() {
 
   const importShared = async () => {
     try {
-      const { tauriApi } = await import('../lib/tauri');
       await tauriApi.importSharedConfig(tool);
       setImportedShared(true);
       setFeedback({ text: `已导入 ${meta.displayName} 的共享配置`, kind: 'success' });

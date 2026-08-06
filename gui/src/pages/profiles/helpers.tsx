@@ -1,4 +1,10 @@
-import type { ApiProfile, CodexCatalogModel, StatusInfo, TargetApp } from '../../types';
+import type {
+  ApiProfile,
+  CodexCatalogModel,
+  OpenCodeModelConfig,
+  StatusInfo,
+  TargetApp,
+} from '../../types';
 import { SUPPORTED_TOOLS } from '../../types';
 import { PROVIDER_PRESETS } from '../../lib/presets';
 import { cn } from '../../lib/utils';
@@ -93,6 +99,12 @@ export function emptyProfileForTool(tool: TargetApp): ApiProfile {
       api_mode: 'chat_completions',
     };
   }
+  if (tool === 'opencode') {
+    return {
+      ...base,
+      opencode_api_mode: 'chat_completions',
+    };
+  }
   if (tool === 'hermes') {
     return {
       ...base,
@@ -101,6 +113,17 @@ export function emptyProfileForTool(tool: TargetApp): ApiProfile {
     };
   }
   return base;
+}
+
+export function normalizeOpenCodeModelConfigs(
+  configs: Record<string, OpenCodeModelConfig> | undefined,
+): Record<string, OpenCodeModelConfig> | undefined {
+  const cleaned = Object.fromEntries(
+    Object.entries(configs || {})
+      .map(([model, config]) => [model.trim(), config] as const)
+      .filter(([model, config]) => model.length > 0 && config && Object.keys(config).length > 0),
+  );
+  return Object.keys(cleaned).length > 0 ? cleaned : undefined;
 }
 
 export function normalizeCodexCatalogModels(

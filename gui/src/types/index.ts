@@ -10,6 +10,40 @@ export interface CodexCatalogModel {
   supports_web_search?: boolean;
 }
 
+export interface OpenCodeModelLimit {
+  context?: number;
+  input?: number;
+  output?: number;
+}
+
+export interface OpenCodeThinkingOptions {
+  type?: 'enabled' | 'disabled' | string;
+  budgetTokens?: number;
+}
+
+export interface OpenCodeModelOptions {
+  reasoningEffort?: string;
+  textVerbosity?: string;
+  reasoningSummary?: string;
+  include?: string[];
+  thinking?: OpenCodeThinkingOptions;
+  temperature?: number;
+  topP?: number;
+  [key: string]: unknown;
+}
+
+export interface OpenCodeVariantConfig extends OpenCodeModelOptions {
+  disabled?: boolean;
+}
+
+export interface OpenCodeModelConfig {
+  name?: string;
+  limit?: OpenCodeModelLimit;
+  options?: OpenCodeModelOptions;
+  variants?: Record<string, OpenCodeVariantConfig>;
+  [key: string]: unknown;
+}
+
 export interface ApiProfile {
   id?: number;
   name: string;
@@ -24,6 +58,10 @@ export interface ApiProfile {
   model?: string;
   /** OpenCode 专用：provider 下挂载的模型列表（多选） */
   models?: string[];
+  /** OpenCode provider SDK mode */
+  opencode_api_mode?: 'chat_completions' | 'responses' | string;
+  /** OpenCode per-model config: limit/options/variants */
+  model_configs?: Record<string, OpenCodeModelConfig>;
   /** Codex：写入 model_catalog.json 的模型目录（/model 列表） */
   catalog_models?: CodexCatalogModel[];
   /** 推理强度 minimal/low/medium/high/xhigh */

@@ -154,6 +154,9 @@ export const tauriApi = {
       aws_profile?: string;
       aws_region?: string;
       api_mode?: string;
+      opencode_api_mode?: string;
+      opencode_models?: string[];
+      opencode_model_configs?: Record<string, import('@/types').OpenCodeModelConfig>;
       max_tokens?: number;
       source: string;
     }>('scan_local_api', { targetApp }, {
@@ -174,6 +177,9 @@ export const tauriApi = {
       aws_profile: undefined,
       aws_region: undefined,
       api_mode: undefined,
+      opencode_api_mode: undefined,
+      opencode_models: undefined,
+      opencode_model_configs: undefined,
       max_tokens: undefined,
       source: `${targetApp} config`,
     }),

@@ -18,7 +18,7 @@
 
 use crate::adapters::{restore_snapshots, ConfigAdapter, FileSnapshot};
 use crate::db::Database;
-use crate::models::TargetApp;
+use crate::models::{OpenCodeManagedModelState, TargetApp};
 use crate::utils::secure_fs::atomic_write_private;
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -49,6 +49,9 @@ struct Journal {
     /// `#[serde(default)]`：兼容旧 journal（缺字段按 None，不强制回滚 active）。
     #[serde(default)]
     previous_active_profile_id: Option<i64>,
+    /// OpenCode model ownership before the switch.
+    #[serde(default)]
+    previous_opencode_model_state: Option<OpenCodeManagedModelState>,
     snapshots: Vec<SnapshotEntry>,
 }
 
@@ -90,6 +93,11 @@ pub fn begin_switch(
         .context("Failed to snapshot managed config files before switch")?;
     let previous_shared_config = db.get_shared_config(target_app)?.map(|sc| sc.config);
     let previous_active_profile_id = db.get_active_profile(target_app)?.map(|a| a.profile_id);
+    let previous_opencode_model_state = if target_app == TargetApp::OpenCode {
+        Some(db.get_opencode_managed_models()?)
+    } else {
+        None
+    };
     let journal = Journal {
         version: JOURNAL_VERSION,
         app: target_app.as_str().to_string(),
@@ -98,6 +106,7 @@ pub fn begin_switch(
         created_at: chrono::Utc::now().timestamp(),
         previous_shared_config,
         previous_active_profile_id,
+        previous_opencode_model_state,
         snapshots: snapshots
             .iter()
             .map(|s| SnapshotEntry {
@@ -231,6 +240,20 @@ pub fn recover_interrupted_switch(db: &Database) -> Result<()> {
         );
         return Ok(());
     }
+    if app == TargetApp::OpenCode {
+        let state = journal
+            .previous_opencode_model_state
+            .as_ref()
+            .cloned()
+            .unwrap_or_default();
+        if let Err(error) = db.replace_opencode_managed_models(&state) {
+            tracing::warn!(
+                "回滚 OpenCode model ownership 失败({error})，保留 journal {} 待下次重试",
+                path.display()
+            );
+            return Ok(());
+        }
+    }
     // 恢复切换前的 active：重复切换同一 profile 时事务中会 clear_active，
     // 若不写回，回滚后 UI/状态会显示「无活动档案」。
     if let Err(error) = restore_previous_active(db, app, journal.previous_active_profile_id) {
@@ -304,7 +327,8 @@ fn hex_decode(input: &str) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::adapters::{apply_profile_transaction, ConfigAdapter};
-    use crate::models::ApiProfile;
+    use crate::models::{ApiProfile, OpenCodeManagedModelState};
+    use std::collections::HashMap;
     use std::fs;
 
     struct FakeAdapter {
@@ -384,6 +408,34 @@ mod tests {
         assert_eq!(fs::read(&adapter.credentials)?, b"old secret");
         assert_eq!(
             db.get_shared_config(TargetApp::ClaudeCode)?
+                .map(|sc| sc.config),
+            Some(serde_json::json!({"old": true}))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn incomplete_opencode_switch_restores_model_ownership() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let db_path = dir.path().join("db.sqlite");
+        let (db, adapter, _profile) = setup(&db_path)?;
+        db.save_shared_config(TargetApp::OpenCode, serde_json::json!({"old": true}))?;
+        let old_state = OpenCodeManagedModelState::from([("cpa".into(), vec!["old-model".into()])]);
+        db.replace_opencode_managed_models(&old_state)?;
+
+        let journal = begin_switch(&db, &adapter, TargetApp::OpenCode, 7, "work")?
+            .expect("file-backed db must journal");
+        db.save_shared_config(TargetApp::OpenCode, serde_json::json!({"new": true}))?;
+        db.replace_opencode_managed_models(&HashMap::from([(
+            "cpa".into(),
+            vec!["new-model".into()],
+        )]))?;
+        drop(journal);
+
+        recover_interrupted_switch(&db)?;
+        assert_eq!(db.get_opencode_managed_models()?, old_state);
+        assert_eq!(
+            db.get_shared_config(TargetApp::OpenCode)?
                 .map(|sc| sc.config),
             Some(serde_json::json!({"old": true}))
         );

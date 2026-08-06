@@ -1,17 +1,29 @@
 import { useState } from 'react';
-import type { ApiKeyEntry, ApiProfile, FetchedModel, TargetApp } from '../../types';
+import type {
+  ApiKeyEntry,
+  ApiProfile,
+  FetchedModel,
+  OpenCodeModelConfig,
+  OpenCodeVariantConfig,
+  TargetApp,
+} from '../../types';
 import { SUPPORTED_TOOLS } from '../../types';
 import { Button } from '../../components/common/Button';
 import { Modal, Field } from '../../components/common/Modal';
 import { PROVIDER_PRESETS, REASONING_LEVELS } from '../../lib/presets';
 import { cn, maskApiKey, humanizeError } from '../../lib/utils';
+import { tauriApi } from '../../lib/tauri';
 import {
   contextModeFromBool,
   contextModeToBool,
   contextPreviewLine,
   type ContextMode,
 } from '../../lib/contextWindow';
-import { emptyProfileForTool, normalizeCodexCatalogModels } from './helpers';
+import {
+  emptyProfileForTool,
+  normalizeCodexCatalogModels,
+  normalizeOpenCodeModelConfigs,
+} from './helpers';
 
 function newKeyId(): string {
   return `k${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
@@ -74,6 +86,8 @@ export function ProfileModal({
   const [multiKeyMode, setMultiKeyMode] = useState(
     () => (initialProfile?.api_keys?.length ?? 0) > 1,
   );
+  const [variantDrafts, setVariantDrafts] = useState<Record<string, string>>({});
+  const [variantNameDrafts, setVariantNameDrafts] = useState<Record<string, string>>({});
 
   const keys = form.api_keys && form.api_keys.length > 0 ? form.api_keys : ensureKeyPool(form);
   const activeKey =
@@ -97,7 +111,6 @@ export function ProfileModal({
     setLoadingModels(true);
     setModelErr('');
     try {
-      const { tauriApi } = await import('../../lib/tauri');
       const list = await tauriApi.fetchModels(form.api_url, activeKey);
       setModels(list);
       if (list.length === 0) setModelErr('该端点没有返回模型');
@@ -110,7 +123,6 @@ export function ProfileModal({
   };
 
   const runProbe = async (apiKey: string, keyLabel?: string) => {
-    const { tauriApi } = await import('../../lib/tauri');
     const model = form.model?.trim() || form.models?.[0]?.trim() || '';
     if (isBedrock) {
       throw new Error('Amazon Bedrock 使用 Codex 内置 AWS 认证，Helio 无法执行 HTTP 模型探活');
@@ -128,7 +140,7 @@ export function ProfileModal({
       model,
       envKey: form.env_key,
       wireApi: form.wire_api,
-      apiMode: form.api_mode,
+      apiMode: tool === 'opencode' ? form.opencode_api_mode : form.api_mode,
       experimentalBearerToken: form.experimental_bearer_token,
       keyLabel,
     });
@@ -191,7 +203,6 @@ export function ProfileModal({
     setCheckingApi(true);
     setApiHealth(null);
     try {
-      const { tauriApi } = await import('../../lib/tauri');
       // 未保存的多 key 先保存由用户负责；这里对 DB 中档案 failover
       const r = await tauriApi.failoverProfileKeys(tool, form.name);
       if (r.success) {
@@ -218,6 +229,11 @@ export function ProfileModal({
 
   const presets = PROVIDER_PRESETS[tool];
   const showModelParams = tool === 'codex' || tool === 'claude-code' || tool === 'pi' || tool === 'opencode' || tool === 'hermes' || tool === 'openclaw';
+  const openCodeModelIds = Array.from(new Set([
+    ...(form.models || []),
+    form.model?.trim() || '',
+    ...Object.keys(form.model_configs || {}),
+  ].filter(Boolean)));
 
   const applyPreset = (p: typeof presets[number]) => {
     setForm((f) => ({
@@ -243,6 +259,9 @@ export function ProfileModal({
     } else if (tool !== 'codex') {
       catalog_models = undefined;
     }
+    const model_configs = tool === 'opencode'
+      ? normalizeOpenCodeModelConfigs(normalized.model_configs)
+      : undefined;
     onSave({
       ...normalized,
       api_url: usesBedrock ? '' : normalized.api_url,
@@ -254,6 +273,10 @@ export function ProfileModal({
         : normalized.supports_standalone_web_search || undefined,
       target_app: tool,
       catalog_models,
+      model_configs,
+      opencode_api_mode: tool === 'opencode'
+        ? normalized.opencode_api_mode || 'chat_completions'
+        : undefined,
     });
   };
 
@@ -527,9 +550,14 @@ export function ProfileModal({
                       const selected = (form.models || []).includes(m.id);
                       const toggle = () => {
                         const cur = form.models || [];
+                        const nextConfigs = { ...(form.model_configs || {}) };
+                        if (selected && m.id !== form.model?.trim()) {
+                          delete nextConfigs[m.id];
+                        }
                         setForm({
                           ...form,
                           models: selected ? cur.filter((x) => x !== m.id) : [...cur, m.id],
+                          model_configs: Object.keys(nextConfigs).length > 0 ? nextConfigs : undefined,
                         });
                       };
                       return (
@@ -539,6 +567,283 @@ export function ProfileModal({
                         </label>
                       );
                     })}
+                  </div>
+                </div>
+              )}
+
+              {tool === 'opencode' && (
+                <div className="space-y-3 rounded-lg border border-line/80 bg-card/40 p-3">
+                  <div className="text-[12px] font-semibold text-ink-dim">OpenCode 模型配置</div>
+                  <div>
+                    <span className="mb-1.5 block text-[12px] font-medium text-ink-dim">协议模式</span>
+                    <div className="flex gap-1.5">
+                      {[
+                        { value: 'chat_completions', label: 'Chat Completions' },
+                        { value: 'responses', label: 'Responses' },
+                      ].map((mode) => (
+                        <button
+                          key={mode.value}
+                          type="button"
+                          onClick={() => setForm({ ...form, opencode_api_mode: mode.value })}
+                          className={`flex-1 rounded-md border px-2 py-1.5 text-[12px] font-medium transition-all ${
+                            (form.opencode_api_mode || 'chat_completions') === mode.value
+                              ? 'border-accent bg-accent/8 text-accent'
+                              : 'border-line text-ink-dim hover:border-line-strong'
+                          }`}
+                        >
+                          {mode.label}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="mt-1 text-[11px] text-ink-faint">
+                      Chat 使用 <code className="font-mono">@ai-sdk/openai-compatible</code>；
+                      Responses 使用 <code className="font-mono">@ai-sdk/openai</code>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="text-[12px] font-medium text-ink-dim">
+                      模型行为 <span className="font-normal text-ink-faint">（默认模型、勾选模型和配置模型都会写入）</span>
+                    </div>
+                    {openCodeModelIds.length === 0 ? (
+                      <div className="rounded-md border border-dashed border-line px-3 py-2 text-[11px] text-ink-faint">
+                        先填写默认模型，或加载模型列表后勾选模型
+                      </div>
+                    ) : (
+                      openCodeModelIds.map((modelId) => {
+                        const config: OpenCodeModelConfig = form.model_configs?.[modelId] || {};
+                        const options = config.options || {};
+                        const limit = config.limit || {};
+                        const variants = config.variants || {};
+                        const setConfig = (patch: Partial<OpenCodeModelConfig>) => {
+                          setForm({
+                            ...form,
+                            model_configs: {
+                              ...(form.model_configs || {}),
+                              [modelId]: { ...config, ...patch },
+                            },
+                          });
+                        };
+                        const setOption = (key: string, value: unknown) => {
+                          const next = { ...options };
+                          if (value === undefined || value === '') delete next[key];
+                          else next[key] = value;
+                          setConfig({ options: Object.keys(next).length > 0 ? next : undefined });
+                        };
+                        const setLimit = (key: 'context' | 'output', value: string) => {
+                          const n = Number(value);
+                          const next = { ...limit };
+                          if (!value || !Number.isFinite(n) || n <= 0) delete next[key];
+                          else next[key] = Math.floor(n);
+                          setConfig({ limit: Object.keys(next).length > 0 ? next : undefined });
+                        };
+                        const updateVariant = (
+                          variantId: string,
+                          patch: Partial<OpenCodeVariantConfig>,
+                        ) => {
+                          setConfig({
+                            variants: {
+                              ...variants,
+                              [variantId]: { ...variants[variantId], ...patch },
+                            },
+                          });
+                        };
+                        const renameVariant = (oldId: string, rawId: string) => {
+                          const nextId = rawId.trim();
+                          if (!nextId || nextId === oldId || variants[nextId]) return;
+                          const next = { ...variants, [nextId]: variants[oldId] };
+                          delete next[oldId];
+                          setConfig({ variants: next });
+                        };
+                        const setVariantReasoning = (variantId: string, value: string) => {
+                          const variant = { ...variants[variantId] };
+                          if (value) variant.reasoningEffort = value;
+                          else delete variant.reasoningEffort;
+                          updateVariant(variantId, variant);
+                        };
+                        const setVariantThinking = (variantId: string, value: string) => {
+                          const variant = { ...variants[variantId] };
+                          const n = Number(value);
+                          if (value && Number.isFinite(n) && n > 0) {
+                            variant.thinking = { type: 'enabled', budgetTokens: Math.floor(n) };
+                          } else {
+                            delete variant.thinking;
+                          }
+                          updateVariant(variantId, variant);
+                        };
+                        const addVariant = (variantId: string) => {
+                          const id = variantId.trim();
+                          if (!id || variants[id]) return;
+                          setConfig({
+                            variants: {
+                              ...variants,
+                              [id]: {},
+                            },
+                          });
+                        };
+                        return (
+                          <div key={modelId} className="space-y-2 rounded-md border border-line bg-card/50 p-2.5">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-ink">{modelId}</span>
+                              <input
+                                value={config.name || ''}
+                                onChange={(e) => setConfig({ name: e.target.value || undefined })}
+                                placeholder="显示名"
+                                className="h-7 w-32 rounded border border-line bg-surface px-1.5 text-[11px] text-ink outline-none focus:border-accent/50"
+                              />
+                            </div>
+                            <div className="flex flex-wrap items-center gap-2 text-[11px] text-ink-dim">
+                              <span>限制</span>
+                              <input
+                                type="number"
+                                min={1}
+                                value={limit.context ?? ''}
+                                onChange={(e) => setLimit('context', e.target.value)}
+                                placeholder="context"
+                                className="h-7 w-24 rounded border border-line bg-surface px-1.5 font-mono"
+                              />
+                              <input
+                                type="number"
+                                min={1}
+                                value={limit.output ?? ''}
+                                onChange={(e) => setLimit('output', e.target.value)}
+                                placeholder="output"
+                                className="h-7 w-24 rounded border border-line bg-surface px-1.5 font-mono"
+                              />
+                            </div>
+                            <div className="flex flex-wrap items-center gap-2 text-[11px] text-ink-dim">
+                              <span>默认推理</span>
+                              <select
+                                value={String(options.reasoningEffort || '')}
+                                onChange={(e) => setOption('reasoningEffort', e.target.value || undefined)}
+                                className="h-7 rounded border border-line bg-surface px-1.5 text-[11px]"
+                              >
+                                <option value="">不设置</option>
+                                {['minimal', 'low', 'medium', 'high', 'xhigh'].map((level) => (
+                                  <option key={level} value={level}>{level}</option>
+                                ))}
+                              </select>
+                              <input
+                                type="number"
+                                min={1}
+                                value={options.thinking?.budgetTokens ?? ''}
+                                onChange={(e) => {
+                                  const n = Number(e.target.value);
+                                  setOption(
+                                    'thinking',
+                                    e.target.value && Number.isFinite(n) && n > 0
+                                      ? { type: 'enabled', budgetTokens: Math.floor(n) }
+                                      : undefined,
+                                  );
+                                }}
+                                placeholder="thinking budget"
+                                className="h-7 w-32 rounded border border-line bg-surface px-1.5 font-mono"
+                              />
+                            </div>
+                            <div className="space-y-1.5">
+                              <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-medium text-ink-dim">
+                                <span>Variants</span>
+                                {['low', 'medium', 'high', 'max'].map((variantId) => (
+                                  <button
+                                    key={variantId}
+                                    type="button"
+                                    onClick={() => addVariant(variantId)}
+                                    disabled={Boolean(variants[variantId])}
+                                    className="rounded border border-line px-1.5 py-0.5 disabled:opacity-40"
+                                  >
+                                    + {variantId}
+                                  </button>
+                                ))}
+                              </div>
+                              {Object.entries(variants).map(([variantId, variant]) => (
+                                <div key={variantId} className="flex flex-wrap items-center gap-1.5">
+                                  <input
+                                    value={variantNameDrafts[`${modelId}:${variantId}`] ?? variantId}
+                                    onChange={(e) => setVariantNameDrafts({
+                                      ...variantNameDrafts,
+                                      [`${modelId}:${variantId}`]: e.target.value,
+                                    })}
+                                    onBlur={(e) => {
+                                      const draftKey = `${modelId}:${variantId}`;
+                                      renameVariant(variantId, e.target.value);
+                                      setVariantNameDrafts((drafts) => {
+                                        const next = { ...drafts };
+                                        delete next[draftKey];
+                                        return next;
+                                      });
+                                    }}
+                                    className="h-7 w-20 rounded border border-line bg-surface px-1.5 font-mono text-[11px]"
+                                    aria-label={`Variant ${variantId} 名称`}
+                                  />
+                                  <select
+                                    value={String(variant.reasoningEffort || '')}
+                                    onChange={(e) => setVariantReasoning(variantId, e.target.value)}
+                                    className="h-7 rounded border border-line bg-surface px-1.5 text-[11px]"
+                                  >
+                                    <option value="">reasoning 不设置</option>
+                                    {['minimal', 'low', 'medium', 'high', 'xhigh'].map((level) => (
+                                      <option key={level} value={level}>{level}</option>
+                                    ))}
+                                  </select>
+                                  <input
+                                    type="number"
+                                    min={1}
+                                    value={variant.thinking?.budgetTokens ?? ''}
+                                    onChange={(e) => setVariantThinking(variantId, e.target.value)}
+                                    placeholder="budget"
+                                    className="h-7 w-24 rounded border border-line bg-surface px-1.5 font-mono text-[11px]"
+                                  />
+                                  <label className="flex items-center gap-1 text-[11px] text-ink-dim">
+                                    <input
+                                      type="checkbox"
+                                      checked={variant.disabled === true}
+                                      onChange={(e) => updateVariant(variantId, { disabled: e.target.checked || undefined })}
+                                    />
+                                    disabled
+                                  </label>
+                                  <button
+                                    type="button"
+                                    title="删除 Variant"
+                                    onClick={() => {
+                                      const next = { ...variants };
+                                      delete next[variantId];
+                                      setConfig({ variants: Object.keys(next).length > 0 ? next : undefined });
+                                      setVariantNameDrafts((drafts) => {
+                                        const nextDrafts = { ...drafts };
+                                        delete nextDrafts[`${modelId}:${variantId}`];
+                                        return nextDrafts;
+                                      });
+                                    }}
+                                    className="text-[11px] text-danger hover:underline"
+                                  >
+                                    删除
+                                  </button>
+                                </div>
+                              ))}
+                              <div className="flex items-center gap-1.5">
+                                <input
+                                  value={variantDrafts[modelId] || ''}
+                                  onChange={(e) => setVariantDrafts({ ...variantDrafts, [modelId]: e.target.value })}
+                                  placeholder="自定义 Variant 名称"
+                                  className="h-7 w-40 rounded border border-line bg-surface px-1.5 text-[11px]"
+                                />
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => {
+                                    addVariant(variantDrafts[modelId] || '');
+                                    setVariantDrafts({ ...variantDrafts, [modelId]: '' });
+                                  }}
+                                >
+                                  添加
+                                </Button>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
                   </div>
                 </div>
               )}

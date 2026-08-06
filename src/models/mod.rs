@@ -65,7 +65,19 @@ pub struct CodexProfileFields {
 pub struct OpenCodeProfileFields {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<Vec<String>>,
+    /// OpenCode provider SDK mode: chat_completions or responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode_api_mode: Option<String>,
+    /// Per-model OpenCode config written beneath provider.<id>.models.<model>.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_configs: Option<HashMap<String, serde_json::Value>>,
 }
+
+/// Model IDs last written by Helio for each OpenCode provider.
+///
+/// This state is kept in the Helio database rather than opencode.json so manual
+/// model entries can be distinguished from entries managed by a profile.
+pub type OpenCodeManagedModelState = HashMap<String, Vec<String>>;
 
 /// Hermes 专用字段（JSON flatten → IPC 仍为顶层键）
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -578,6 +590,7 @@ mod tests {
             },
             opencode: OpenCodeProfileFields {
                 models: Some(vec!["a".into()]),
+                ..Default::default()
             },
             hermes: HermesProfileFields {
                 api_mode: Some("chat_completions".into()),

@@ -148,7 +148,7 @@ switch-api import backup.db
 | Claude Code | Anthropic Messages（`x-api-key`，**不**剥 `/anthropic` 后缀改打 OpenAI） |
 | Codex | 固定使用 Responses；旧 `wire_api=chat` 会迁移为 Responses |
 | Pi | 官方 Google host → generateContent；自定义默认 chat；可按 api_mode/wire_api 走 anthropic/responses |
-| OpenCode | OpenAI-compatible chat |
+| OpenCode | Chat Completions（`@ai-sdk/openai-compatible`）或 Responses（`@ai-sdk/openai`），按 Profile 配置 |
 | Hermes / OpenClaw | `api_mode`：chat / anthropic_messages / responses |
 
 「加载模型列表」仍偏 OpenAI `/models`，列表失败不代表对话不可用。
@@ -193,7 +193,7 @@ Hermes switch 时会把 profile 多 key **镜像**到 `~/.hermes/auth.json` 的 
 工具特定说明：
 
 - **Pi**：凭据写 `~/.pi/agent/auth.json`（按 provider id merge api_key，保留其它 OAuth/key）。官方 base 只动 auth + `settings.json` 的 `defaultProvider`/`defaultModel`；自定义 `api_url` 会 upsert `models.json.providers.<id>`（`baseUrl`/`api`/`apiKey`/model）。不改 skills/extensions/themes/trust。
-- **OpenCode**：profile 的 `provider` 字段（小写）作为 provider id，写入 `provider.<id>.options`。切换某个 provider 不影响其他 provider，mcp/permission/tools/agent 全部保留。
+- **OpenCode**：profile 的 `provider` 字段（小写）作为 provider id，写入 `provider.<id>.options`。`opencode_api_mode` 可选 `chat_completions` 或 `responses`，分别使用 `@ai-sdk/openai-compatible` / `@ai-sdk/openai`。模型列表写入 `provider.<id>.models`；`model_configs` 可配置每个模型的 `name`、`limit`、`options` 与 `variants`（例如 `low`、`high`、`max` 或自定义名称），思考强度/预算分别位于 `options.reasoningEffort` / `options.thinking` 和 Variant 对象中。切换时只清理 Helio 上次管理、但已从 Profile 移除的模型，手动添加的模型与字段保留；切换某个 provider 不影响其他 provider，mcp/permission/tools/agent 全部保留。
 - **Codex**：自定义 provider 固定生成 Responses 配置。档案设置 `env_key` 时，`model_providers.<id>.env_key` 指向该环境变量、`requires_openai_auth=false`，且 Helio 不修改 `auth.json`；未设置时，Helio 使用文件凭据模式，将活跃 key 写入 `~/.codex/auth.json`，并设置 `auth_mode=apikey`、`cli_auth_credentials_store=file`。`openai`、`ollama`、`lmstudio` 等保留 ID 自动加 `-custom`。**Amazon Bedrock 是内置 provider**：Helio 写入 `model_provider = "amazon-bedrock"`，可选 AWS 覆盖项写入 `[model_providers.amazon-bedrock.aws]` 的 `profile` / `region`，不要求 API URL/Key，也不修改 `auth.json`。模型目录的推理能力使用 `reasoning_levels`（`minimal` / `low` / `medium` / `high` / `xhigh`）；历史 `supports_reasoning=true` 仅用于导入兼容。自定义 provider 的联网搜索需要同时声明 provider 的 `supports_standalone_web_search=true` 与模型目录的联网搜索能力。切换 config/auth/catalog 任一步失败都会回滚全部受管文件。TOML 往返会规范化格式并丢失注释，时间戳备份仍可用于人工恢复。
 
 > 迁移提示：历史 `wire_api=chat`、`requires_openai_auth=false`（但没有 `env_key`）和 Bearer Token 配置在下次读取/切换时会归一化为 Responses + 文件 API Key 鉴权。数据库、导出、备份及 Codex 凭据文件在 Unix 上会修复为仅当前用户可读写。

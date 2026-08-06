@@ -8,7 +8,7 @@ import {
 import type { TargetApp } from '../types';
 import { SUPPORTED_TOOLS } from '../types';
 import { cn, humanizeError } from '../lib/utils';
-import type { ConfigBackupInfo } from '../lib/tauri';
+import { tauriApi, type ConfigBackupInfo } from '../lib/tauri';
 
 interface McpServerCfg {
   command?: string;
@@ -38,7 +38,6 @@ export default function ConfigPage() {
     setLoading(true);
     setError('');
     try {
-      const { tauriApi } = await import('../lib/tauri');
       const result = (await tauriApi.getLocalConfigInfo(targetApp)) as LocalInfo;
       setInfo(result);
     } catch (err) {
@@ -315,7 +314,6 @@ function CodexBehaviorSettings({
 
     setSaving(true);
     try {
-      const { tauriApi } = await import('../lib/tauri');
       await tauriApi.updateCodexFields(fields);
       setSaved(true);
       onSaved();
@@ -410,7 +408,6 @@ function ConfigBackups({ targetApp }: { targetApp: TargetApp }) {
     setLoading(true);
     setErr('');
     try {
-      const { tauriApi } = await import('../lib/tauri');
       setBackups(await tauriApi.listConfigBackups(targetApp));
     } catch (e) {
       setErr('读取配置备份失败: ' + humanizeError(e));
@@ -437,7 +434,6 @@ function ConfigBackups({ targetApp }: { targetApp: TargetApp }) {
     setErr('');
     setMsg('');
     try {
-      const { tauriApi } = await import('../lib/tauri');
       await tauriApi.restoreConfigBackup(targetApp, b.path);
       setMsg('恢复完成');
       load();
@@ -549,7 +545,6 @@ function CodexConfigEditor({ onSaved }: { onSaved: () => void }) {
     setSaved(false);
     setLoadingRaw(true);
     try {
-      const { tauriApi } = await import('../lib/tauri');
       const raw = await tauriApi.readCodexConfigRaw();
       setContent(raw);
       setEditing(true);
@@ -564,7 +559,6 @@ function CodexConfigEditor({ onSaved }: { onSaved: () => void }) {
     setErr('');
     setSaving(true);
     try {
-      const { tauriApi } = await import('../lib/tauri');
       await tauriApi.saveCodexConfigRaw(content);
       setEditing(false);
       setSaved(true);

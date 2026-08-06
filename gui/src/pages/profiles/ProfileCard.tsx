@@ -68,6 +68,11 @@ export function ProfileCard({
                 {profile.api_mode}
               </span>
             )}
+            {tool === 'opencode' && profile.opencode_api_mode && (
+              <span className="rounded border border-line bg-surface px-1.5 py-0.5 font-mono text-[10px] text-ink-faint">
+                {profile.opencode_api_mode}
+              </span>
+            )}
             {keyN > 1 && (
               <span className="rounded border border-line bg-surface px-1.5 py-0.5 text-[10px] text-ink-faint">
                 keys {keyN}{keyLabel ? `·${keyLabel}` : ''}

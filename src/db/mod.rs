@@ -1,6 +1,7 @@
 use crate::models::{
     ActiveProfile, ApiProfile, ClaudeProfileFields, CodexProfileFields, HermesProfileFields,
-    OpenClawProfileFields, OpenCodeProfileFields, SharedConfig, TargetApp,
+    OpenClawProfileFields, OpenCodeManagedModelState, OpenCodeProfileFields, SharedConfig,
+    TargetApp,
 };
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
@@ -109,6 +110,8 @@ impl Database {
                 max_tokens INTEGER,
                 api_keys_json TEXT,
                 catalog_models TEXT,
+                opencode_api_mode TEXT,
+                opencode_model_configs TEXT,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
                 UNIQUE(name, target_app)
@@ -118,6 +121,12 @@ impl Database {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 target_app TEXT NOT NULL UNIQUE,
                 config_json TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS opencode_model_state (
+                provider_id TEXT PRIMARY KEY,
+                model_ids_json TEXT NOT NULL,
                 updated_at INTEGER NOT NULL
             );
 
@@ -197,6 +206,8 @@ impl Database {
             "ALTER TABLE api_profiles ADD COLUMN max_tokens INTEGER",
             "ALTER TABLE api_profiles ADD COLUMN api_keys_json TEXT",
             "ALTER TABLE api_profiles ADD COLUMN catalog_models TEXT",
+            "ALTER TABLE api_profiles ADD COLUMN opencode_api_mode TEXT",
+            "ALTER TABLE api_profiles ADD COLUMN opencode_model_configs TEXT",
         ] {
             self.try_add_column(ddl)?;
         }
@@ -239,6 +250,7 @@ impl Database {
                 service_tier TEXT, experimental_bearer_token TEXT,
                 supports_standalone_web_search INTEGER, aws_profile TEXT, aws_region TEXT,
                 api_mode TEXT, max_tokens INTEGER, api_keys_json TEXT, catalog_models TEXT,
+                opencode_api_mode TEXT, opencode_model_configs TEXT,
                 created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
                 UNIQUE(name, target_app)
             );
@@ -247,13 +259,14 @@ impl Database {
                 context_1m, target_app, models, wire_api, env_key, requires_openai_auth,
                 service_tier, experimental_bearer_token, api_mode, max_tokens,
                 supports_standalone_web_search, aws_profile, aws_region, api_keys_json,
-                catalog_models, created_at, updated_at
+                catalog_models, opencode_api_mode, opencode_model_configs, created_at, updated_at
             )
             SELECT id, name, provider, api_url, api_key, model_mapping, model, reasoning_effort,
                 context_1m, target_app, models, wire_api, env_key, requires_openai_auth,
                 service_tier, experimental_bearer_token,
                 api_mode, max_tokens, supports_standalone_web_search, aws_profile, aws_region,
-                api_keys_json, catalog_models, created_at, updated_at
+                api_keys_json, catalog_models, opencode_api_mode, opencode_model_configs,
+                created_at, updated_at
             FROM api_profiles;
             DROP TABLE api_profiles;
             ALTER TABLE api_profiles_no_effort RENAME TO api_profiles;
@@ -299,6 +312,7 @@ impl Database {
                 service_tier TEXT, experimental_bearer_token TEXT,
                 supports_standalone_web_search INTEGER, aws_profile TEXT, aws_region TEXT,
                 api_mode TEXT, max_tokens INTEGER, api_keys_json TEXT, catalog_models TEXT,
+                opencode_api_mode TEXT, opencode_model_configs TEXT,
                 created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
                 UNIQUE(name, target_app)
             );
@@ -307,13 +321,13 @@ impl Database {
                 context_1m, target_app, models, wire_api, env_key, requires_openai_auth,
                 service_tier, experimental_bearer_token, supports_standalone_web_search,
                 aws_profile, aws_region, api_mode, max_tokens, api_keys_json, catalog_models,
-                created_at, updated_at
+                opencode_api_mode, opencode_model_configs, created_at, updated_at
             )
             SELECT id, name, provider, api_url, api_key, model_mapping, model, reasoning_effort,
                 context_1m, target_app, models, wire_api, env_key, requires_openai_auth,
                 service_tier, experimental_bearer_token, supports_standalone_web_search,
                 aws_profile, aws_region, api_mode, max_tokens, api_keys_json, catalog_models,
-                created_at, updated_at
+                opencode_api_mode, opencode_model_configs, created_at, updated_at
             FROM api_profiles;
             DROP TABLE api_profiles;
             ALTER TABLE api_profiles_no_thinking RENAME TO api_profiles;
@@ -403,16 +417,20 @@ impl Database {
                 max_tokens INTEGER,
                 api_keys_json TEXT,
                 catalog_models TEXT,
+                opencode_api_mode TEXT,
+                opencode_model_configs TEXT,
                 UNIQUE(name, target_app)
             );
 
             INSERT INTO api_profiles_new
                 (id,name,provider,api_url,api_key,model_mapping,created_at,updated_at,model,reasoning_effort,context_1m,target_app,models,
                  wire_api,env_key,requires_openai_auth,service_tier,experimental_bearer_token,
-                 supports_standalone_web_search,aws_profile,aws_region,api_mode,max_tokens,api_keys_json,catalog_models)
+                 supports_standalone_web_search,aws_profile,aws_region,api_mode,max_tokens,api_keys_json,
+                 catalog_models,opencode_api_mode,opencode_model_configs)
             SELECT id,name,provider,api_url,api_key,model_mapping,created_at,updated_at,model,reasoning_effort,context_1m,target_app,models,
                  wire_api,env_key,requires_openai_auth,service_tier,experimental_bearer_token,
-                 supports_standalone_web_search,aws_profile,aws_region,api_mode,max_tokens,api_keys_json,catalog_models
+                 supports_standalone_web_search,aws_profile,aws_region,api_mode,max_tokens,api_keys_json,
+                 catalog_models,opencode_api_mode,opencode_model_configs
             FROM api_profiles;
 
             UPDATE api_profiles_new
@@ -752,13 +770,21 @@ impl Database {
             .as_ref()
             .map(serde_json::to_string)
             .transpose()?;
+        let opencode_model_configs_json = profile
+            .opencode
+            .model_configs
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
         let api_keys_json = Self::serialize_api_keys_json(&profile)?;
-        let (api_mode, max_tokens) = match profile.target_app {
+        let (api_mode, max_tokens, opencode_api_mode) = match profile.target_app {
             Some(TargetApp::OpenClaw) => (
                 profile.openclaw.api_mode.as_ref(),
                 profile.openclaw.max_tokens,
+                None,
             ),
-            Some(TargetApp::Hermes) => (profile.hermes.api_mode.as_ref(), None),
+            Some(TargetApp::Hermes) => (profile.hermes.api_mode.as_ref(), None, None),
+            Some(TargetApp::OpenCode) => (None, None, profile.opencode.opencode_api_mode.as_ref()),
             _ => (
                 profile
                     .hermes
@@ -766,12 +792,13 @@ impl Database {
                     .as_ref()
                     .or(profile.openclaw.api_mode.as_ref()),
                 profile.openclaw.max_tokens,
+                None,
             ),
         };
 
         self.conn.execute(
-            "INSERT INTO api_profiles (name, provider, api_url, api_key, model_mapping, model, reasoning_effort, context_1m, target_app, models, wire_api, env_key, requires_openai_auth, service_tier, experimental_bearer_token, supports_standalone_web_search, aws_profile, aws_region, api_mode, max_tokens, api_keys_json, catalog_models, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+            "INSERT INTO api_profiles (name, provider, api_url, api_key, model_mapping, model, reasoning_effort, context_1m, target_app, models, wire_api, env_key, requires_openai_auth, service_tier, experimental_bearer_token, supports_standalone_web_search, aws_profile, aws_region, api_mode, max_tokens, api_keys_json, catalog_models, opencode_api_mode, opencode_model_configs, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
             params![
                 &profile.name,
                 &profile.provider,
@@ -795,6 +822,8 @@ impl Database {
                 max_tokens,
                 api_keys_json,
                 catalog_models_json,
+                opencode_api_mode,
+                opencode_model_configs_json,
                 now,
                 now
             ],
@@ -809,7 +838,7 @@ impl Database {
         "reasoning_effort, context_1m, created_at, updated_at, target_app, models, ",
         "wire_api, env_key, requires_openai_auth, service_tier, experimental_bearer_token, ",
         "supports_standalone_web_search, aws_profile, aws_region, api_mode, max_tokens, ",
-        "api_keys_json, catalog_models"
+        "api_keys_json, catalog_models, opencode_api_mode, opencode_model_configs"
     );
 
     fn row_to_profile(row: &rusqlite::Row) -> rusqlite::Result<ApiProfile> {
@@ -847,6 +876,14 @@ impl Database {
             .map(serde_json::from_str)
             .transpose()
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        let opencode_model_configs_str: Option<String> = row.get("opencode_model_configs")?;
+        let opencode_model_configs = opencode_model_configs_str
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        let opencode_api_mode: Option<String> = row.get("opencode_api_mode")?;
 
         // 工具字段按 target_app 归属，避免 Hermes/OpenClaw 互相污染
         let (hermes_api_mode, openclaw_api_mode, openclaw_max_tokens) = match target_app {
@@ -880,7 +917,11 @@ impl Database {
                 aws_region: row.get("aws_region")?,
                 catalog_models,
             },
-            opencode: OpenCodeProfileFields { models },
+            opencode: OpenCodeProfileFields {
+                models,
+                opencode_api_mode,
+                model_configs: opencode_model_configs,
+            },
             hermes: HermesProfileFields {
                 api_mode: hermes_api_mode,
             },
@@ -973,13 +1014,21 @@ impl Database {
             .as_ref()
             .map(serde_json::to_string)
             .transpose()?;
+        let opencode_model_configs_json = profile
+            .opencode
+            .model_configs
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
         let api_keys_json = Self::serialize_api_keys_json(&profile)?;
-        let (api_mode, max_tokens) = match profile.target_app {
+        let (api_mode, max_tokens, opencode_api_mode) = match profile.target_app {
             Some(TargetApp::OpenClaw) => (
                 profile.openclaw.api_mode.as_ref(),
                 profile.openclaw.max_tokens,
+                None,
             ),
-            Some(TargetApp::Hermes) => (profile.hermes.api_mode.as_ref(), None),
+            Some(TargetApp::Hermes) => (profile.hermes.api_mode.as_ref(), None, None),
+            Some(TargetApp::OpenCode) => (None, None, profile.opencode.opencode_api_mode.as_ref()),
             _ => (
                 profile
                     .hermes
@@ -987,6 +1036,7 @@ impl Database {
                     .as_ref()
                     .or(profile.openclaw.api_mode.as_ref()),
                 profile.openclaw.max_tokens,
+                None,
             ),
         };
 
@@ -994,7 +1044,7 @@ impl Database {
             Some(id) => {
                 self.conn.execute(
                     "UPDATE api_profiles SET name = ?1, provider = ?2, api_url = ?3, api_key = ?4,
-                     model_mapping = ?5, model = ?6, reasoning_effort = ?7, context_1m = ?8, target_app = ?9, models = ?10, wire_api = ?11, env_key = ?12, requires_openai_auth = ?13, service_tier = ?14, experimental_bearer_token = ?15, supports_standalone_web_search = ?16, aws_profile = ?17, aws_region = ?18, api_mode = ?19, max_tokens = ?20, api_keys_json = ?21, catalog_models = ?22, updated_at = ?23 WHERE id = ?24",
+                     model_mapping = ?5, model = ?6, reasoning_effort = ?7, context_1m = ?8, target_app = ?9, models = ?10, wire_api = ?11, env_key = ?12, requires_openai_auth = ?13, service_tier = ?14, experimental_bearer_token = ?15, supports_standalone_web_search = ?16, aws_profile = ?17, aws_region = ?18, api_mode = ?19, max_tokens = ?20, api_keys_json = ?21, catalog_models = ?22, opencode_api_mode = ?23, opencode_model_configs = ?24, updated_at = ?25 WHERE id = ?26",
                     params![
                         &profile.name,
                         &profile.provider,
@@ -1018,6 +1068,8 @@ impl Database {
                         max_tokens,
                         api_keys_json,
                         catalog_models_json,
+                        opencode_api_mode,
+                        opencode_model_configs_json,
                         now,
                         id
                     ],
@@ -1027,7 +1079,7 @@ impl Database {
                 // 无 id：按 name 定位，不改名
                 self.conn.execute(
                     "UPDATE api_profiles SET provider = ?1, api_url = ?2, api_key = ?3,
-                     model_mapping = ?4, model = ?5, reasoning_effort = ?6, context_1m = ?7, target_app = ?8, models = ?9, wire_api = ?10, env_key = ?11, requires_openai_auth = ?12, service_tier = ?13, experimental_bearer_token = ?14, supports_standalone_web_search = ?15, aws_profile = ?16, aws_region = ?17, api_mode = ?18, max_tokens = ?19, api_keys_json = ?20, catalog_models = ?21, updated_at = ?22 WHERE name = ?23",
+                     model_mapping = ?4, model = ?5, reasoning_effort = ?6, context_1m = ?7, target_app = ?8, models = ?9, wire_api = ?10, env_key = ?11, requires_openai_auth = ?12, service_tier = ?13, experimental_bearer_token = ?14, supports_standalone_web_search = ?15, aws_profile = ?16, aws_region = ?17, api_mode = ?18, max_tokens = ?19, api_keys_json = ?20, catalog_models = ?21, opencode_api_mode = ?22, opencode_model_configs = ?23, updated_at = ?24 WHERE name = ?25",
                     params![
                         &profile.provider,
                         &profile.api_url,
@@ -1050,6 +1102,8 @@ impl Database {
                         max_tokens,
                         api_keys_json,
                         catalog_models_json,
+                        opencode_api_mode,
+                        opencode_model_configs_json,
                         now,
                         &profile.name
                     ],
@@ -1134,6 +1188,51 @@ impl Database {
             .optional()?;
 
         Ok(result)
+    }
+
+    /// Return the model IDs last written by Helio for each OpenCode provider.
+    pub fn get_opencode_managed_models(&self) -> Result<OpenCodeManagedModelState> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT provider_id, model_ids_json FROM opencode_model_state")?;
+        let mut state = OpenCodeManagedModelState::new();
+        let rows = stmt.query_map([], |row| {
+            let provider_id: String = row.get(0)?;
+            let model_ids_json: String = row.get(1)?;
+            let model_ids = serde_json::from_str(&model_ids_json)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            Ok((provider_id, model_ids))
+        })?;
+        for row in rows {
+            let (provider_id, model_ids) = row?;
+            state.insert(provider_id, model_ids);
+        }
+        Ok(state)
+    }
+
+    /// Replace the complete OpenCode model ownership snapshot atomically.
+    pub fn replace_opencode_managed_models(&self, state: &OpenCodeManagedModelState) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM opencode_model_state", [])?;
+        let now = chrono::Utc::now().timestamp();
+        for (provider_id, model_ids) in state {
+            tx.execute(
+                "INSERT INTO opencode_model_state (provider_id, model_ids_json, updated_at)
+                 VALUES (?1, ?2, ?3)",
+                params![provider_id, serde_json::to_string(model_ids)?, now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Remove ownership metadata for a provider that is no longer used.
+    pub fn clear_opencode_managed_provider(&self, provider_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM opencode_model_state WHERE provider_id = ?1",
+            params![provider_id.to_lowercase()],
+        )?;
+        Ok(())
     }
 
     // ========== 活动 Profile 操作 ==========
@@ -1834,6 +1933,54 @@ mod tests {
             Some(vec!["minimal".into(), "xhigh".into()])
         );
         assert_eq!(cm[0].supports_images, Some(true));
+        Ok(())
+    }
+
+    #[test]
+    fn test_opencode_fields_and_model_state_roundtrip() -> Result<()> {
+        let db = Database::open(":memory:")?;
+        let id = db.add_profile(&ApiProfile {
+            name: "opencode".into(),
+            provider: "cpa".into(),
+            api_url: "https://example.test/v1".into(),
+            api_key: "key".into(),
+            model: Some("gpt-5".into()),
+            target_app: Some(TargetApp::OpenCode),
+            opencode: OpenCodeProfileFields {
+                models: Some(vec!["gpt-5".into(), "gpt-5-mini".into()]),
+                opencode_api_mode: Some("responses".into()),
+                model_configs: Some(std::collections::HashMap::from([(
+                    "gpt-5".into(),
+                    serde_json::json!({
+                        "options": {
+                            "reasoningEffort": "high"
+                        },
+                        "variants": {
+                            "max": {
+                                "reasoningEffort": "xhigh"
+                            }
+                        }
+                    }),
+                )])),
+            },
+            ..Default::default()
+        })?;
+        let got = db.get_profile_by_id(id)?.unwrap();
+        assert_eq!(got.opencode.opencode_api_mode.as_deref(), Some("responses"));
+        assert_eq!(
+            got.opencode.model_configs.as_ref().unwrap()["gpt-5"]["variants"]["max"]
+                ["reasoningEffort"],
+            "xhigh"
+        );
+
+        let state = OpenCodeManagedModelState::from([(
+            "cpa".into(),
+            vec!["gpt-5".into(), "gpt-5-mini".into()],
+        )]);
+        db.replace_opencode_managed_models(&state)?;
+        assert_eq!(db.get_opencode_managed_models()?, state);
+        db.clear_opencode_managed_provider("cpa")?;
+        assert!(db.get_opencode_managed_models()?.is_empty());
         Ok(())
     }
 
