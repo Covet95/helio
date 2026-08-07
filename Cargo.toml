@@ -3,7 +3,7 @@ members = [".", "src-tauri"]
 
 [package]
 name = "switch-api"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 authors = ["Switch API Team"]
 description = "智能 AI CLI 工具 API 配置切换器"

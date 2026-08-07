@@ -137,7 +137,11 @@ export function normalizeCodexCatalogModels(
         ? entry.context_window
         : undefined,
       reasoning_levels: Array.from(new Set(
-        (entry.reasoning_levels ?? (entry.supports_reasoning ? ['low', 'medium', 'high'] : []))
+        (entry.reasoning_levels ?? (
+          entry.supports_reasoning
+            ? ['minimal', 'low', 'medium', 'high', 'xhigh']
+            : []
+        ))
           .map((level) => level.trim().toLowerCase())
           .filter((level) => ['minimal', 'low', 'medium', 'high', 'xhigh'].includes(level)),
       )),

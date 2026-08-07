@@ -42,12 +42,20 @@ describe('profile helpers', () => {
         reasoning_levels: ['XHIGH', 'low', 'xhigh', 'unsupported'],
         supports_web_search: true,
       },
+      {
+        slug: 'legacy-model',
+        supports_reasoning: true,
+      },
       { slug: '   ' },
     ])).toEqual([
       {
         slug: 'proxy-model',
         reasoning_levels: ['xhigh', 'low'],
         supports_web_search: true,
+      },
+      {
+        slug: 'legacy-model',
+        reasoning_levels: ['minimal', 'low', 'medium', 'high', 'xhigh'],
       },
     ]);
   });

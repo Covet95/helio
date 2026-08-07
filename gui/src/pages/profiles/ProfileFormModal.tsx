@@ -960,7 +960,11 @@ export function ProfileModal({
                           <span>推理等级</span>
                           {['minimal', 'low', 'medium', 'high', 'xhigh'].map((level) => {
                             const levels = entry.reasoning_levels
-                              ?? (entry.supports_reasoning ? ['low', 'medium', 'high'] : []);
+                              ?? (
+                                entry.supports_reasoning
+                                  ? ['minimal', 'low', 'medium', 'high', 'xhigh']
+                                  : []
+                              );
                             const checked = levels.includes(level);
                             return (
                               <label key={level} className="flex items-center gap-1">

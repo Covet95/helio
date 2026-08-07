@@ -8,7 +8,7 @@ use std::path::PathBuf;
 /// 非 1M 时 catalog 条目默认上下文（与常见 Codex 内置条目对齐）
 const CATALOG_CONTEXT_STANDARD: i64 = 272_000;
 const CATALOG_CONTEXT_1M: i64 = 1_000_000;
-const LEGACY_REASONING_LEVELS: &[&str] = &["low", "medium", "high"];
+const LEGACY_REASONING_LEVELS: &[&str] = &["minimal", "low", "medium", "high", "xhigh"];
 const CODEX_REASONING_LEVELS: &[&str] = &["minimal", "low", "medium", "high", "xhigh"];
 
 const FALLBACK_BASE_INSTRUCTIONS: &str = "You are Codex, a coding agent based on GPT-5. You and the user share one workspace, and your job is to collaborate with them until their goal is genuinely handled.";
@@ -1536,6 +1536,33 @@ command = "npx"
         assert_eq!(
             model["input_modalities"],
             serde_json::json!(["text", "image"])
+        );
+    }
+
+    #[test]
+    fn test_catalog_migrates_legacy_reasoning_support_to_all_documented_levels() {
+        let catalog = CodexAdapter::build_catalog_json(
+            &[CodexCatalogModel {
+                slug: "legacy-capable".into(),
+                supports_reasoning: Some(true),
+                ..Default::default()
+            }],
+            None,
+            "base",
+        );
+        let model = &catalog["models"][0];
+
+        assert_eq!(model["supports_reasoning_summaries"], true);
+        assert_eq!(model["default_reasoning_level"], "minimal");
+        assert_eq!(
+            model["supported_reasoning_levels"],
+            serde_json::json!([
+                {"effort": "minimal", "description": "minimal reasoning effort"},
+                {"effort": "low", "description": "low reasoning effort"},
+                {"effort": "medium", "description": "medium reasoning effort"},
+                {"effort": "high", "description": "high reasoning effort"},
+                {"effort": "xhigh", "description": "xhigh reasoning effort"}
+            ])
         );
     }
 
