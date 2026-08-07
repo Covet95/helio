@@ -135,13 +135,11 @@ jobs:
             xattr -cr /Applications/Helio.app
             ```
 
-            或右键 Helio → 打开。完整说明：[docs/MACOS.md](https://github.com/Covet95/helio/blob/main/docs/MACOS.md)
+            或右键 Helio → 打开。
 
             ### 说明
 
             - 配置目录均相对**用户主目录**（Windows 即 `%USERPROFILE%\.claude` 等）
-            - Windows 细节：[docs/WINDOWS.md](https://github.com/Covet95/helio/blob/main/docs/WINDOWS.md)
-            - macOS 细节：[docs/MACOS.md](https://github.com/Covet95/helio/blob/main/docs/MACOS.md)
             - 源码与变更见对应 tag 的 commit 历史
           releaseDraft: false
           prerelease: false

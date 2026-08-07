@@ -24,7 +24,7 @@ AI CLI 工具的 API 配置切换器。把 API 凭据与共享配置（权限 / 
 
 维护者发版：同步更新 `Cargo.toml`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json`、`gui/package.json` 与 `gui/package-lock.json` 的版本号 → 推 `main` → `git tag vX.Y.Z && git push origin vX.Y.Z`（工作流 [release.yml](.github/workflows/release.yml)）。
 
-> **macOS 提示「已损坏」？** 当前发版包未做 Apple 公证（省钱路线）。装好后执行 `xattr -cr /Applications/Helio.app`，或右键 → 打开。详见 [docs/MACOS.md](docs/MACOS.md)。
+> **macOS 提示「已损坏」？** 当前发版包未做 Apple 公证（省钱路线）。装好后执行 `xattr -cr /Applications/Helio.app`，或右键 → 打开。
 
 ### 前置依赖
 
@@ -46,8 +46,6 @@ AI CLI 工具的 API 配置切换器。把 API 凭据与共享配置（权限 / 
 ```bash
 xattr -cr /Applications/Helio.app
 ```
-
-更多绕过方式与发版说明见 [docs/MACOS.md](docs/MACOS.md)。
 
 本机构建：
 
@@ -79,8 +77,7 @@ cargo tauri build --bundles nsis
 # 绿色版：      target\release\Helio.exe
 ```
 
-> 注意：不要对同一台机器同时安装 NSIS 与 MSI，否则桌面会出现**两个 Helio**。  
-> 细节见 [docs/WINDOWS.md](docs/WINDOWS.md)。
+> 注意：不要对同一台机器同时安装 NSIS 与 MSI，否则桌面会出现**两个 Helio**。
 
 开发模式（热重载前端）：
 
@@ -224,8 +221,6 @@ Shared Config (permissions, hooks, MCP, skills)
 - [x] Codex 模型目录（model_catalog_json / `/model` 第三方模型名）
 - [x] Windows 支持（托盘、NSIS 打包、`run.ps1`）
 - [ ] MCP 统一管理面板 / Proxy 模式 / Usage 统计
-
-Windows 细节见 [docs/WINDOWS.md](docs/WINDOWS.md)。
 
 ## 许可证
 
