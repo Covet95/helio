@@ -3,23 +3,17 @@ members = [".", "src-tauri"]
 
 [package]
 name = "switch-api"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2021"
 authors = ["Switch API Team"]
-description = "智能 AI CLI 工具 API 配置切换器"
+description = "Helio 桌面应用 API 配置管理核心库"
 license = "MIT"
 
 [lib]
 name = "switch_api"
 path = "src/lib.rs"
 
-[[bin]]
-name = "switch-api"
-path = "src/main.rs"
-
 [dependencies]
-# CLI
-clap = { version = "4.5", features = ["derive", "env", "color"] }
 anyhow = "1.0"
 thiserror = "1.0"
 
@@ -37,14 +31,11 @@ chrono = { version = "0.4", features = ["serde"] }
 tempfile = "3.10"
 dirs = "5.0"
 
-# Logging and output
+# Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-colored = "2.1"
 
 # HTTP (probe / failover)
 reqwest = { version = "0.12", features = ["json"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 # Utilities
 uuid = { version = "1.10", features = ["v4", "serde"] }
@@ -56,6 +47,7 @@ sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = "3.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [features]
 tauri-gui = []

@@ -1,6 +1,6 @@
 # Helio
 
-Helio 是一个用于管理 AI CLI API 配置的桌面应用和命令行工具。
+Helio 是一个用于管理 AI API 配置的桌面应用。
 
 它把 API 凭据与共享配置分开管理。切换 API 时，只更新受管的 API 配置，尽量保留权限、Hooks、MCP、Skills 等现有设置。
 
@@ -11,7 +11,7 @@ Helio 是一个用于管理 AI CLI API 配置的桌面应用和命令行工具�
 - 保留权限、Hooks、MCP、Skills 等共享配置
 - 配置切换使用原子写入、事务回滚和自动备份
 - 支持数据库备份、便携备份与恢复
-- 支持桌面 GUI 和 CLI
+- 提供桌面 GUI，集中管理各工具的 API 配置
 
 ## 安装
 
@@ -38,22 +38,6 @@ xattr -cr /Applications/Helio.app
 3. 保存后使用「切换」应用配置。
 4. 使用「测试模型」确认当前 API 可用。
 
-### CLI
-
-```bash
-switch-api init claude-code
-switch-api profile add official --url https://api.anthropic.com --key YOUR_KEY
-switch-api switch claude-code official
-switch-api status
-```
-
-常用备份命令：
-
-```bash
-switch-api export --output backup.db
-switch-api import backup.db
-```
-
 ## 支持的工具
 
 - Claude Code
@@ -62,6 +46,7 @@ switch-api import backup.db
 - OpenCode
 - Hermes
 - OpenClaw
+- ZCode
 
 不同工具的 API 协议和模型配置由 Helio 按工具类型处理。模型探活失败时，先检查 API 地址、协议类型、模型名称和 API Key。
 

@@ -47,6 +47,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::main_cmds::list_profiles,
+            commands::main_cmds::assign_legacy_profile,
+            commands::main_cmds::delete_legacy_profile,
             commands::main_cmds::get_profile,
             commands::main_cmds::add_profile,
             commands::main_cmds::update_profile,

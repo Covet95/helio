@@ -327,7 +327,7 @@ fn hex_decode(input: &str) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::adapters::{apply_profile_transaction, ConfigAdapter};
-    use crate::models::{ApiProfile, OpenCodeManagedModelState};
+    use crate::models::{ApiProfile, OpenCodeManagedModelState, TargetApp};
     use std::collections::HashMap;
     use std::fs;
 
@@ -376,6 +376,7 @@ mod tests {
         let profile = ApiProfile {
             id: Some(7),
             name: "work".to_string(),
+            target_app: Some(TargetApp::ClaudeCode),
             ..ApiProfile::default()
         };
         Ok((db, adapter, profile))
@@ -520,6 +521,7 @@ mod tests {
         let (db, adapter, profile) = setup(&db_path)?;
         let old_id = db.add_profile(&ApiProfile {
             name: "old".into(),
+            target_app: Some(TargetApp::ClaudeCode),
             ..ApiProfile::default()
         })?;
         let new_id = db.add_profile(&profile)?;

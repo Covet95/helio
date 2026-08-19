@@ -63,10 +63,11 @@ function withActiveKey(p: ApiProfile, keys: ApiKeyEntry[]): ApiProfile {
 }
 
 export function ProfileModal({
-  profile, initialTool, onClose, onSave,
+  profile, initialTool, seedFrom, onClose, onSave,
 }: {
   profile: ApiProfile | null;
   initialTool: TargetApp;
+  seedFrom?: ApiProfile;
   onClose: () => void;
   onSave: (p: ApiProfile) => void;
 }) {
@@ -74,7 +75,7 @@ export function ProfileModal({
   const initialModalTool = initialProfile?.target_app ?? initialTool;
   const [tool, setTool] = useState<TargetApp>(initialModalTool);
   const [form, setForm] = useState<ApiProfile>(() => {
-    const base = initialProfile || emptyProfileForTool(initialModalTool);
+    const base = initialProfile || emptyProfileForTool(initialModalTool, seedFrom);
     return withActiveKey(base, ensureKeyPool(base));
   });
   const [models, setModels] = useState<FetchedModel[]>([]);
@@ -104,14 +105,29 @@ export function ProfileModal({
       setModelErr('Amazon Bedrock 使用 Codex 内置 AWS 认证，Helio 无法加载其模型列表');
       return;
     }
-    if (!form.api_url.trim() || !activeKey) {
-      setModelErr('先填 API URL 和 API Key');
+    const hasDiscoveryCredential =
+      Boolean(activeKey)
+      || (tool === 'codex' && Boolean(form.env_key?.trim()))
+      || (tool === 'codex' && Boolean(form.experimental_bearer_token?.trim()));
+    if (!form.api_url.trim() || !hasDiscoveryCredential) {
+      setModelErr('先填 API URL 和 API Key、环境变量名或 Bearer Token');
       return;
     }
     setLoadingModels(true);
     setModelErr('');
     try {
-      const list = await tauriApi.fetchModels(form.api_url, activeKey);
+      const list = await tauriApi.fetchModels({
+        targetApp: tool,
+        provider: form.provider,
+        apiUrl: form.api_url,
+        apiKey: activeKey,
+        envKey: form.env_key,
+        wireApi: form.wire_api,
+        apiMode: tool === 'opencode' ? form.opencode_api_mode : form.api_mode,
+        experimentalBearerToken: form.experimental_bearer_token,
+        awsProfile: form.aws_profile,
+        awsRegion: form.aws_region,
+      });
       setModels(list);
       if (list.length === 0) setModelErr('该端点没有返回模型');
     } catch (e) {
@@ -228,7 +244,7 @@ export function ProfileModal({
   };
 
   const presets = PROVIDER_PRESETS[tool];
-  const showModelParams = tool === 'codex' || tool === 'claude-code' || tool === 'pi' || tool === 'opencode' || tool === 'hermes' || tool === 'openclaw';
+  const showModelParams = tool === 'codex' || tool === 'claude-code' || tool === 'pi' || tool === 'opencode' || tool === 'hermes' || tool === 'openclaw' || tool === 'zcode';
   const openCodeModelIds = Array.from(new Set([
     ...(form.models || []),
     form.model?.trim() || '',
@@ -313,7 +329,7 @@ export function ProfileModal({
                     onClick={() => {
                       setTool(t.id);
                       if (!initialProfile) {
-                        const base = emptyProfileForTool(t.id);
+                        const base = emptyProfileForTool(t.id, seedFrom);
                         setForm(withActiveKey(base, ensureKeyPool(base)));
                         setModels([]);
                         setModelErr('');
@@ -1048,10 +1064,10 @@ export function ProfileModal({
                 </div>
               )}
 
-              {tool === 'claude-code' && (
+              {(tool === 'claude-code' || tool === 'zcode') && (
                 <div className="space-y-2">
                   <div className="text-[12px] font-medium text-ink-dim">
-                    模型角色映射 <span className="font-normal text-ink-faint">（Sonnet/Opus/Fable/Haiku → 实际模型；写入 ANTHROPIC_DEFAULT_*_MODEL）</span>
+                    模型角色映射 <span className="font-normal text-ink-faint">（Sonnet/Opus/Fable/Haiku → 实际模型；Claude Code 写 env，ZCode 写入 provider.models）</span>
                   </div>
                   {(['sonnet', 'opus', 'fable', 'haiku'] as const).map((role) => {
                     const labels: Record<string, string> = { sonnet: 'Sonnet', opus: 'Opus', fable: 'Fable', haiku: 'Haiku' };
@@ -1292,7 +1308,7 @@ export function ProfileModal({
               )}
 
               {/* Claude Code / Codex only — not shared with Hermes/OpenClaw */}
-              {(tool === 'claude-code' || tool === 'codex') && (
+              {(tool === 'claude-code' || tool === 'codex' || tool === 'zcode') && (
                 <div>
                   <div className="mb-1.5 text-[13px] font-medium text-ink">1M 上下文窗口</div>
                   <div className="mb-1 flex gap-1.5">
@@ -1318,7 +1334,14 @@ export function ProfileModal({
                       );
                     })}
                   </div>
-                  <div className="text-[11px] text-ink-faint">model_context_window · {contextPreviewLine(form.context_1m, form.model, tool)}</div>
+                  <div className="text-[11px] text-ink-faint">
+                    {tool === 'zcode'
+                      ? 'provider.models.*.limit.context · '
+                      : tool === 'claude-code'
+                        ? 'Claude env [1M] 后缀 · '
+                        : 'model_context_window · '}
+                    {contextPreviewLine(form.context_1m, form.model, tool)}
+                  </div>
                 </div>
               )}
             </div>

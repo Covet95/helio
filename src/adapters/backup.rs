@@ -1,6 +1,6 @@
 //! 配置备份公共逻辑：微秒时间戳命名 + 按前缀清理。
 //! 各 adapter 的 `backup_config` / `cleanup_old_backups` 均委托到此模块，
-//! 避免 6 处重复实现且行为不一（如 `%Y%m%d_%H%M%S` 秒级时间戳同秒互覆盖）。
+//! 避免各 adapter 重复实现且行为不一（如 `%Y%m%d_%H%M%S` 秒级时间戳同秒互覆盖）。
 
 use crate::utils::secure_fs::atomic_write_private;
 use anyhow::{Context, Result};

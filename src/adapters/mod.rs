@@ -114,6 +114,17 @@ pub fn restore_snapshots(snapshots: &[FileSnapshot]) -> Result<()> {
     first_error.map_or(Ok(()), Err)
 }
 
+/// Snapshot every adapter-managed file so multi-target imports can restore the
+/// complete pre-import filesystem state after a later phase fails.
+pub fn snapshot_all_managed_files() -> Result<Vec<FileSnapshot>> {
+    let mut snapshots = Vec::new();
+    for target_app in TargetApp::all() {
+        let adapter = get_adapter(target_app);
+        snapshots.extend(adapter.snapshot_files()?);
+    }
+    Ok(snapshots)
+}
+
 pub fn apply_profile_transaction(
     adapter: &dyn ConfigAdapter,
     api_profile: &ApiProfile,
@@ -175,7 +186,7 @@ pub fn apply_profile_configuration(
     })
 }
 
-/// 一次完整的配置切换（CLI / GUI / 托盘共用入口）：
+/// 一次完整的配置切换（GUI / 托盘共用入口）：
 /// 写 journal（意图 + 前镜像 + 旧 active）→ 若已是目标 profile 则先清 active →
 /// DB 写 shared_config → 写配置文件（含备份）→ 记 active_profile → 删 journal。
 ///
@@ -199,6 +210,28 @@ pub fn apply_profile_switch(
         Some(db.get_opencode_managed_models()?)
     } else {
         None
+    };
+    let provider_ownership = match target_app {
+        TargetApp::OpenCode => {
+            let provider_id =
+                opencode::OpenCodeAdapter::normalize_provider_id(&api_profile.provider);
+            let exists = shared_config
+                .get("provider")
+                .and_then(|value| value.as_object())
+                .map(|providers| providers.contains_key(&provider_id))
+                .unwrap_or(false);
+            Some((provider_id, !exists))
+        }
+        TargetApp::ZCode => {
+            let provider_id = zcode::ZCodeAdapter::normalize_provider_id(&api_profile.provider);
+            let exists = shared_config
+                .get("provider")
+                .and_then(|value| value.as_object())
+                .map(|providers| providers.contains_key(&provider_id))
+                .unwrap_or(false);
+            Some((provider_id, !exists))
+        }
+        _ => None,
     };
     let journal = journal::begin_switch(
         db,
@@ -244,6 +277,9 @@ pub fn apply_profile_switch(
             db.replace_opencode_managed_models(&state)?;
         }
         db.set_active_profile(target_app, profile_id)?;
+        if let Some((provider_id, managed_by_helio)) = provider_ownership.as_ref() {
+            db.record_provider_ownership_if_missing(target_app, provider_id, *managed_by_helio)?;
+        }
         Ok(applied)
     })();
 
@@ -448,6 +484,7 @@ pub mod journal;
 pub mod openclaw;
 pub mod opencode;
 pub mod pi;
+pub mod zcode;
 
 /// 获取适配器
 pub fn get_adapter(target_app: TargetApp) -> Box<dyn ConfigAdapter> {
@@ -458,6 +495,7 @@ pub fn get_adapter(target_app: TargetApp) -> Box<dyn ConfigAdapter> {
         TargetApp::OpenCode => Box::new(opencode::OpenCodeAdapter::new()),
         TargetApp::Hermes => Box::new(hermes::HermesAdapter::new()),
         TargetApp::OpenClaw => Box::new(openclaw::OpenClawAdapter::new()),
+        TargetApp::ZCode => Box::new(zcode::ZCodeAdapter::new()),
     }
 }
 

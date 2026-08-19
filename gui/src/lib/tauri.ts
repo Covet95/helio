@@ -24,6 +24,12 @@ export const tauriApi = {
   listProfiles: () =>
     command<ApiProfile[]>('list_profiles', undefined, []),
 
+  assignLegacyProfile: (profileId: number, targetApp: TargetApp) =>
+    command<void>('assign_legacy_profile', { profileId, targetApp }),
+
+  deleteLegacyProfile: (profileId: number) =>
+    command<boolean>('delete_legacy_profile', { profileId }),
+
   addProfile: (profile: ApiProfile) =>
     command<number>('add_profile', { profile }),
 
@@ -62,9 +68,20 @@ export const tauriApi = {
   copyText: (text: string) =>
     command<void>('copy_text', { text }),
 
-  // 模型列表加载（OpenAI 兼容 /v1/models）
-  fetchModels: (apiUrl: string, apiKey: string) =>
-    command<FetchedModel[]>('fetch_models', { apiUrl, apiKey }),
+  // 协议感知的模型列表加载
+  fetchModels: (args: {
+    targetApp: TargetApp;
+    provider?: string;
+    apiUrl: string;
+    apiKey: string;
+    envKey?: string;
+    wireApi?: string;
+    apiMode?: string;
+    experimentalBearerToken?: string;
+    awsProfile?: string;
+    awsRegion?: string;
+  }) =>
+    command<FetchedModel[]>('fetch_models', { request: args }),
 
   testModel: (args: {
     targetApp: TargetApp | string;
@@ -257,6 +274,7 @@ export interface SkillsImportResult {
   restored: number;
   skipped: number;
   skipped_names: string[];
+  restored_names?: string[];
 }
 
 export interface PortableBackupExportResult {

@@ -125,7 +125,11 @@ function ToolCard({
   let dotClass = configured ? 'bg-ok' : 'bg-ink-faint/40';
   if (probe) {
     const ms = probe.latency_ms != null ? ` ${probe.latency_ms}ms` : '';
-    if (probe.ok && probe.status === 'degraded') {
+    if (probe.managed) {
+      badge = '工具托管';
+      badgeClass = 'text-ok';
+      dotClass = 'bg-ok';
+    } else if (probe.ok && probe.status === 'degraded') {
       badge = `较慢${ms}`;
       badgeClass = 'text-warn';
       dotClass = 'bg-warn';

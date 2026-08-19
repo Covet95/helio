@@ -58,8 +58,13 @@ export default function ImportPage() {
   const [ccSelected, setCcSelected] = useState<Set<number>>(new Set());
 
   const meta = SUPPORTED_TOOLS.find((t) => t.id === tool)!;
+  const canImportCcSwitch = tool === 'claude-code' || tool === 'codex';
 
   const scanCc = async () => {
+    if (!canImportCcSwitch) {
+      setFeedback({ text: '当前仅支持从 cc-switch 导入 Claude Code 和 Codex provider', kind: 'info' });
+      return;
+    }
     setCcScanning(true); setFeedback(null); setCcProviders(null); setCcSelected(new Set());
     try {
       const appType = tool === 'claude-code' ? 'claude' : tool;
@@ -115,6 +120,9 @@ export default function ImportPage() {
         reasoning_effort: api.reasoning_effort,
         context_1m: api.context_1m,
         env_key: tool === 'codex' ? api.env_key : undefined,
+        wire_api: tool === 'codex' ? api.wire_api : undefined,
+        requires_openai_auth: tool === 'codex' ? api.requires_openai_auth : undefined,
+        experimental_bearer_token: tool === 'codex' ? api.experimental_bearer_token : undefined,
         api_mode: tool === 'hermes' || tool === 'openclaw' ? api.api_mode : undefined,
         opencode_api_mode: tool === 'opencode' ? api.opencode_api_mode : undefined,
         models: tool === 'opencode' ? api.opencode_models : undefined,
@@ -183,7 +191,7 @@ export default function ImportPage() {
           })}
         </div>
 
-        <section className="overflow-hidden rounded-lg border border-line bg-card">
+        {canImportCcSwitch && <section className="overflow-hidden rounded-lg border border-line bg-card">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-4 py-3">
             <div className="flex min-w-0 items-center gap-2">
               <Boxes size={15} className="text-accent" />
@@ -244,7 +252,7 @@ export default function ImportPage() {
               )}
             </div>
           )}
-        </section>
+        </section>}
 
         {feedback && (
           <div className={`rounded-md border px-3 py-2 text-[13px] animate-fade-up ${
@@ -299,7 +307,10 @@ export default function ImportPage() {
                     </div>
                     <div className="flex flex-wrap items-center justify-between gap-3">
                       <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink-faint">{api.source}</span>
-                      <Button onClick={importProfile} disabled={!name.trim() || !api.api_url}>
+                      <Button
+                        onClick={importProfile}
+                        disabled={!name.trim() || (!api.api_url && !(tool === 'codex' && api.provider === 'amazon-bedrock'))}
+                      >
                         <FileDown size={15} />导入为配置档案
                       </Button>
                     </div>

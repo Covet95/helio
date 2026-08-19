@@ -25,8 +25,19 @@ pub struct CcSwitchProvider {
     pub is_current: bool,
 }
 
+fn supported_cc_switch_app_type(app_type: &str) -> Result<&'static str, String> {
+    match app_type.trim().to_ascii_lowercase().as_str() {
+        "claude" | "claude-code" => Ok("claude"),
+        "codex" => Ok("codex"),
+        other => Err(format!(
+            "当前仅支持导入 cc-switch 的 Claude Code 和 Codex provider，不支持 `{other}`"
+        )),
+    }
+}
+
 #[tauri::command]
 pub async fn scan_cc_switch(target_app: String) -> Result<Vec<CcSwitchProvider>, String> {
+    let app_type = supported_cc_switch_app_type(&target_app)?;
     let home = dirs::home_dir().ok_or("无法获取主目录")?;
     let db_path = home.join(".cc-switch").join("cc-switch.db");
     if !db_path.exists() {
@@ -40,7 +51,7 @@ pub async fn scan_cc_switch(target_app: String) -> Result<Vec<CcSwitchProvider>,
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map([&target_app], |row| {
+        .query_map([app_type], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -51,9 +62,9 @@ pub async fn scan_cc_switch(target_app: String) -> Result<Vec<CcSwitchProvider>,
     let mut out = Vec::new();
     for r in rows {
         let (name, settings, is_current) = r.map_err(|e| e.to_string())?;
-        let mut parsed = parse_cc_provider(&target_app, &settings);
+        let mut parsed = parse_cc_provider(app_type, &settings);
         parsed.name = name;
-        parsed.app_type = target_app.clone();
+        parsed.app_type = app_type.to_string();
         parsed.is_current = is_current;
         out.push(parsed);
     }
@@ -66,6 +77,7 @@ pub async fn import_cc_switch(
     providers: Vec<CcSwitchProvider>,
     state: State<'_, AppState>,
 ) -> Result<usize, String> {
+    let _ = supported_cc_switch_app_type(&target_app)?;
     let target = TargetApp::parse(&target_app)
         .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
@@ -88,8 +100,12 @@ pub async fn import_cc_switch(
             },
             codex: CodexProfileFields {
                 reasoning_effort: p.reasoning_effort,
-                wire_api: (target == TargetApp::Codex).then(|| "responses".to_string()),
+                wire_api: (target == TargetApp::Codex)
+                    .then(|| p.wire_api.clone())
+                    .flatten(),
                 env_key: p.env_key,
+                requires_openai_auth: p.requires_openai_auth,
+                experimental_bearer_token: p.experimental_bearer_token,
                 service_tier: p.service_tier,
                 ..Default::default()
             },

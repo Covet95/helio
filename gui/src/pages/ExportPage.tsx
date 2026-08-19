@@ -220,7 +220,7 @@ export default function ExportPage() {
           <ActionRow
             icon={<FolderCog size={20} className="text-accent" />}
             title="导出 Skills"
-            meta="claude-code / codex / opencode / pi / hermes / openclaw 全部 Skills 目录"
+            meta="claude-code / codex / opencode / pi / hermes / openclaw / zcode 全部 Skills 目录"
             button={<Button onClick={handleSkillsExport} disabled={skillsExporting}><Download size={16} />{skillsExporting ? '导出中…' : '导出'}</Button>}
           />
           <ActionRow

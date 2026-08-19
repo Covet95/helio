@@ -24,7 +24,7 @@ use std::io::{self, Read, Seek};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
-/// 进程内导入互斥：GUI/CLI 并发导入会争用 home 下 staging 与目标 skill 目录。
+/// 进程内导入互斥：多个 GUI 进程并发导入会争用 home 下 staging 与目标 skill 目录。
 static IMPORT_LOCK: Mutex<()> = Mutex::new(());
 
 /// 归档条目上限:对齐 cc-switch 同款保护量级,防止压缩炸弹塞满磁盘。
@@ -49,6 +49,7 @@ fn target_dir_for_app(home: &Path, app: TargetApp) -> PathBuf {
         TargetApp::OpenCode => home.join(".config").join("opencode").join("skills"),
         TargetApp::Hermes => home.join(".hermes").join("skills"),
         TargetApp::OpenClaw => home.join(".openclaw").join("skills"),
+        TargetApp::ZCode => home.join(".zcode").join("skills"),
     }
 }
 
@@ -67,6 +68,10 @@ fn source_dirs_for_app(home: &Path, app: TargetApp) -> Vec<PathBuf> {
         TargetApp::OpenClaw => vec![
             home.join(".openclaw").join("skills"),
             home.join(".openclaw").join("workspace").join("skills"),
+        ],
+        TargetApp::ZCode => vec![
+            home.join(".zcode").join("skills"),
+            home.join(".agents").join("skills"),
         ],
     }
 }
@@ -150,6 +155,10 @@ pub struct SkillsImportResult {
     pub restored: usize,
     pub skipped: usize,
     pub skipped_names: Vec<String>,
+    /// Newly created skill directories, used to compensate a later portable
+    /// import failure. This is also useful to the GUI for precise reporting.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub restored_names: Vec<String>,
 }
 
 /// 打包 `home` 下全部 skills 到 `archive_path`(tar.gz)。
@@ -363,6 +372,41 @@ fn validate_entry_path(path: &Path) -> Result<Option<(TargetApp, String)>> {
         anyhow::bail!("invalid skill name in archive: {}", path.display());
     }
     Ok(Some((app, skill)))
+}
+
+fn validate_destination_boundary(home: &Path, target: &Path) -> Result<()> {
+    if !target.starts_with(home) {
+        anyhow::bail!("skill destination escapes home: {}", target.display());
+    }
+
+    let mut current = home.to_path_buf();
+    let relative = target
+        .strip_prefix(home)
+        .map_err(|_| anyhow!("skill destination is outside home"))?;
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            anyhow::bail!("skill destination contains a non-normal component");
+        };
+        current.push(name);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                anyhow::bail!(
+                    "skill destination crosses a symlink, refusing to restore: {}",
+                    current.display()
+                );
+            }
+            Ok(metadata) if !metadata.is_dir() && current != target => {
+                anyhow::bail!(
+                    "skill destination parent is not a directory: {}",
+                    current.display()
+                );
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 /// 解析后的 manifest:`apps`(app -> skill 列表)与可选 `files`(条目 -> sha256)。
@@ -641,12 +685,20 @@ fn import_skills_locked(home: &Path, archive_path: &Path) -> Result<SkillsImport
         let mut restored = 0usize;
         let mut skipped = 0usize;
         let mut skipped_names = Vec::new();
+        let mut restored_names = Vec::new();
         let mut committed: Vec<PathBuf> = Vec::new();
         let mut commit_error: Option<anyhow::Error> = None;
 
         'commit: for group in &groups {
             let target = target_dir_for_app(home, group.app).join(&group.skill);
+            validate_destination_boundary(home, &target)?;
             if target.exists() {
+                if !fs::symlink_metadata(&target)?.is_dir() {
+                    anyhow::bail!(
+                        "existing skill destination is not a directory: {}",
+                        target.display()
+                    );
+                }
                 skipped += 1;
                 skipped_names.push(format!("{}/{}", group.app.as_str(), group.skill));
                 continue;
@@ -680,6 +732,7 @@ fn import_skills_locked(home: &Path, archive_path: &Path) -> Result<SkillsImport
             match group_result {
                 Ok(true) => {
                     committed.push(target);
+                    restored_names.push(format!("{}/{}", group.app.as_str(), group.skill));
                     restored += 1;
                 }
                 Err(error) => {
@@ -702,12 +755,67 @@ fn import_skills_locked(home: &Path, archive_path: &Path) -> Result<SkillsImport
             restored,
             skipped,
             skipped_names,
+            restored_names,
         })
     })();
 
     // staging 无论成败整体清掉(提交失败的目录已在错误路径内回滚)。
     let _ = fs::remove_dir_all(&staging_root);
     result
+}
+
+/// Remove only the skill directories created by a successful import. The
+/// destination boundary is checked again so rollback cannot follow a symlink
+/// introduced after the import completed.
+pub fn remove_restored_skills(home: &Path, result: &SkillsImportResult) -> Result<()> {
+    let mut first_error = None;
+    for name in &result.restored_names {
+        let Some((app, skill)) = name.split_once('/') else {
+            continue;
+        };
+        let Some(app) = TargetApp::parse(app) else {
+            continue;
+        };
+        let target = target_dir_for_app(home, app).join(skill);
+        if let Err(error) = validate_destination_boundary(home, &target) {
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+            continue;
+        }
+        match fs::symlink_metadata(&target) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                if first_error.is_none() {
+                    first_error = Some(anyhow!(
+                        "refusing to remove symlinked imported skill: {}",
+                        target.display()
+                    ));
+                }
+            }
+            Ok(metadata) if metadata.is_dir() => {
+                if let Err(error) = fs::remove_dir_all(&target) {
+                    if first_error.is_none() {
+                        first_error = Some(error.into());
+                    }
+                }
+            }
+            Ok(_) => {
+                if first_error.is_none() {
+                    first_error = Some(anyhow!(
+                        "imported skill path is no longer a directory: {}",
+                        target.display()
+                    ));
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error.into());
+                }
+            }
+        }
+    }
+    first_error.map_or(Ok(()), Err)
 }
 
 /// 清除 home 下残留的旧 staging 目录(上次导入崩溃的残留,含明文 skill 内容)。
@@ -776,6 +884,20 @@ mod tests {
         let target = dir.join(file);
         fs::create_dir_all(target.parent().unwrap()).unwrap();
         fs::write(target, content).unwrap();
+    }
+
+    #[test]
+    fn export_packs_zcode_skills() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let home = dir.path().join("home");
+        make_skill(&home, ".zcode/skills", "skill-z", "SKILL.md", "# z");
+        let arc = dir.path().join("out.tar.gz");
+        let result = export_skills(&home, &arc)?;
+        assert_eq!(result.total, 1);
+        assert_eq!(result.apps.len(), 1);
+        assert_eq!(result.apps[0].app, "zcode");
+        assert_eq!(result.apps[0].count, 1);
+        Ok(())
     }
 
     #[test]
@@ -1053,6 +1175,42 @@ mod tests {
         builder.finish().unwrap();
 
         assert!(import_skills(&dir.path().join("dst"), &arc).is_err());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_rejects_symlinked_skill_destination() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir()?;
+        let home = dir.path().join("home");
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(&home)?;
+        fs::create_dir_all(&outside)?;
+        fs::create_dir_all(home.join(".claude"))?;
+        symlink(&outside, home.join(".claude/skills"))?;
+
+        let arc = dir.path().join("destination-link.tar.gz");
+        build_archive(
+            &arc,
+            &json!({
+                "version": 1,
+                "created_at": 0,
+                "apps": { "claude-code": ["skill-a"] }
+            }),
+            &[("claude-code/skill-a/SKILL.md", b"must not escape")],
+        );
+
+        let error = import_skills(&home, &arc).unwrap_err();
+        assert!(
+            error.to_string().contains("symlink"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !outside.join("skill-a").exists(),
+            "导入不得跟随目标目录 symlink 写到 home 外"
+        );
         Ok(())
     }
 

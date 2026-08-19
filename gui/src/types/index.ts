@@ -70,13 +70,13 @@ export interface ApiProfile {
   context_1m?: boolean;
   /** OpenClaw: models[].maxTokens（仅 OpenClaw 使用，不与 Hermes 共用语义） */
   max_tokens?: number;
-  /** Codex legacy import compatibility; generated config always uses Responses. */
+  /** Codex provider wire protocol, e.g. responses or chat. */
   wire_api?: string;
   /** Codex provider-scoped API key environment variable. */
   env_key?: string;
-  /** Codex legacy import compatibility. */
+  /** Codex provider authentication mode. */
   requires_openai_auth?: boolean;
-  /** Codex legacy import compatibility. */
+  /** Codex provider-specific bearer token. */
   experimental_bearer_token?: string;
   /** Codex 顶层 service_tier（如 fast） */
   service_tier?: string;
@@ -91,7 +91,7 @@ export interface ApiProfile {
    * OpenClaw → models.providers.<id>.api。各工具独立解释，不共用适配逻辑。
    */
   api_mode?: string;
-  /** 归属工具；undefined = 通用（所有工具下都显示）*/
+  /** 归属工具；旧数据库可能为 undefined，但新建/更新时必须填写。 */
   target_app?: TargetApp;
   created_at?: number;
   updated_at?: number;
@@ -100,6 +100,9 @@ export interface ApiProfile {
 export interface FetchedModel {
   id: string;
   owned_by?: string;
+  display_name?: string;
+  context_window?: number;
+  capabilities?: string[];
 }
 
 export interface ModelTestResult {
@@ -121,7 +124,7 @@ export interface ApiKeyEntry {
   created_at?: number;
 }
 
-export type TargetApp = 'claude-code' | 'codex' | 'pi' | 'opencode' | 'hermes' | 'openclaw';
+export type TargetApp = 'claude-code' | 'codex' | 'pi' | 'opencode' | 'hermes' | 'openclaw' | 'zcode';
 
 /// 已注册工具的元数据，用于动态生成 UI
 export interface ToolInfo {
@@ -142,6 +145,7 @@ export const SUPPORTED_TOOLS: ToolInfo[] = [
   { id: 'opencode', displayName: 'OpenCode', short: 'OC', color: '#4B5563', format: 'JSON' },
   { id: 'hermes', displayName: 'Hermes', short: 'HM', color: '#7C3AED', format: 'YAML' },
   { id: 'openclaw', displayName: 'OpenClaw', short: 'OCW', color: '#0EA5E9', format: 'JSON' },
+  { id: 'zcode', displayName: 'ZCode', short: 'ZC', color: '#2563EB', format: 'JSON' },
 ];
 
 export function toolById(id: TargetApp | string): ToolInfo | undefined {
@@ -176,6 +180,8 @@ export interface ToolProbeResult {
   endpoint?: string;
   latency_ms?: number;
   http_status?: number;
+  /** Provider is managed by the target tool and has no probe URL. */
+  managed?: boolean;
   probed_at: number;
 }
 
@@ -192,6 +198,7 @@ export interface StatusInfo {
   opencode?: TargetStatus;
   hermes?: TargetStatus;
   openclaw?: TargetStatus;
+  zcode?: TargetStatus;
   database: DatabaseInfo;
 }
 

@@ -13,6 +13,12 @@ pub struct FetchedModel {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owned_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -25,6 +31,22 @@ struct ModelEntry {
     id: String,
     #[serde(default)]
     owned_by: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GeminiModelsResponse {
+    models: Option<Vec<GeminiModelEntry>>,
+}
+
+#[derive(Deserialize)]
+struct GeminiModelEntry {
+    name: String,
+    #[serde(default, rename = "displayName")]
+    display_name: Option<String>,
+    #[serde(default, rename = "inputTokenLimit")]
+    input_token_limit: Option<i64>,
+    #[serde(default, rename = "supportedGenerationMethods")]
+    supported_generation_methods: Option<Vec<String>>,
 }
 
 const COMPAT_SUFFIXES: &[&str] = &[
@@ -66,6 +88,21 @@ pub struct TestModelRequest {
     pub key_label: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchModelsRequest {
+    pub target_app: String,
+    pub provider: Option<String>,
+    pub api_url: String,
+    pub api_key: String,
+    pub env_key: Option<String>,
+    pub wire_api: Option<String>,
+    pub api_mode: Option<String>,
+    pub experimental_bearer_token: Option<String>,
+    pub aws_profile: Option<String>,
+    pub aws_region: Option<String>,
+}
+
 fn provider_models_url(api_url: &str) -> Option<String> {
     let lower = api_url.to_lowercase();
     PROVIDER_MODELS_URLS
@@ -100,43 +137,239 @@ fn http_client(api_url: &str) -> Result<reqwest::Client, String> {
     builder.build().map_err(|e| e.to_string())
 }
 
-/// 拉取供应商可用模型列表
-#[tauri::command]
-pub async fn fetch_models(api_url: String, api_key: String) -> Result<Vec<FetchedModel>, String> {
-    if api_key.trim().is_empty() {
-        return Err("需要 API Key 才能加载模型".to_string());
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiscoveryProtocol {
+    OpenAiCompatible,
+    Anthropic,
+    Gemini,
+}
+
+fn discovery_protocol(request: &FetchModelsRequest) -> DiscoveryProtocol {
+    let app = request.target_app.trim().to_ascii_lowercase();
+    let provider = request
+        .provider
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let mode = request
+        .api_mode
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let wire = request
+        .wire_api
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if app == "codex" && matches!(wire.as_str(), "chat" | "chat_completions" | "responses") {
+        return DiscoveryProtocol::OpenAiCompatible;
     }
-    let mut urls: Vec<String> = Vec::new();
-    if let Some(u) = provider_models_url(&api_url) {
+    if request
+        .api_url
+        .to_ascii_lowercase()
+        .contains("generativelanguage.googleapis.com")
+        || matches!(provider.as_str(), "google" | "gemini" | "gemini-api")
+        || (app == "pi" && mode.contains("gemini"))
+    {
+        DiscoveryProtocol::Gemini
+    } else if matches!(app.as_str(), "claude-code" | "zcode")
+        || matches!(provider.as_str(), "anthropic" | "claude")
+        || mode.contains("anthropic")
+        || mode == "anthropic-messages"
+    {
+        DiscoveryProtocol::Anthropic
+    } else {
+        DiscoveryProtocol::OpenAiCompatible
+    }
+}
+
+fn is_bedrock_request(request: &FetchModelsRequest) -> bool {
+    request.target_app.eq_ignore_ascii_case("codex")
+        && request
+            .provider
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|provider| provider.eq_ignore_ascii_case("amazon-bedrock"))
+}
+
+fn choose_non_empty_env_value(env_value: Option<String>, fallback: String) -> String {
+    env_value
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(fallback)
+}
+
+fn bedrock_auth_context(request: &FetchModelsRequest) -> String {
+    let mut fields = Vec::new();
+    if let Some(profile) = request
+        .aws_profile
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        fields.push(format!("AWS Profile: {profile}"));
+    }
+    if let Some(region) = request
+        .aws_region
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        fields.push(format!("AWS Region: {region}"));
+    }
+    if fields.is_empty() {
+        String::new()
+    } else {
+        format!("（{}）", fields.join("，"))
+    }
+}
+
+fn resolved_api_key(request: &FetchModelsRequest) -> Result<String, String> {
+    let env_key = request
+        .env_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .and_then(|name| std::env::var(name).ok())
+        .unwrap_or_default();
+    let key = if request.target_app.eq_ignore_ascii_case("codex") {
+        request
+            .experimental_bearer_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| {
+                if env_key.trim().is_empty() {
+                    request.api_key.trim()
+                } else {
+                    env_key.trim()
+                }
+            })
+    } else if env_key.trim().is_empty() {
+        request.api_key.trim()
+    } else {
+        env_key.trim()
+    };
+    if key.is_empty() {
+        Err("需要 API Key、Bearer Token 或环境变量才能加载模型".to_string())
+    } else {
+        Ok(key.to_string())
+    }
+}
+
+fn discovery_headers(protocol: DiscoveryProtocol, api_key: &str) -> Vec<(&'static str, String)> {
+    match protocol {
+        DiscoveryProtocol::OpenAiCompatible => vec![("Authorization", format!("Bearer {api_key}"))],
+        DiscoveryProtocol::Anthropic => vec![
+            ("x-api-key", api_key.to_string()),
+            ("anthropic-version", "2023-06-01".to_string()),
+        ],
+        DiscoveryProtocol::Gemini => vec![("x-goog-api-key", api_key.to_string())],
+    }
+}
+
+fn discovery_urls(api_url: &str, protocol: DiscoveryProtocol) -> Vec<String> {
+    if protocol == DiscoveryProtocol::Gemini {
+        let base = api_url.trim().trim_end_matches('/');
+        if base.contains("/models/") {
+            return vec![base.to_string()];
+        }
+        return vec![if base.ends_with("/v1beta") || base.ends_with("/v1") {
+            format!("{base}/models")
+        } else {
+            format!("{base}/v1beta/models")
+        }];
+    }
+
+    let mut urls = Vec::new();
+    if let Some(u) = provider_models_url(api_url) {
         urls.push(u);
     }
-    urls.extend(candidates(&api_url));
-    let client = http_client(&api_url)?;
+    urls.extend(candidates(api_url));
+    urls
+}
+
+fn parse_models_response(
+    body: &str,
+    protocol: DiscoveryProtocol,
+) -> Result<Vec<FetchedModel>, String> {
+    match protocol {
+        DiscoveryProtocol::Gemini => {
+            let parsed: GeminiModelsResponse =
+                serde_json::from_str(body).map_err(|error| error.to_string())?;
+            Ok(parsed
+                .models
+                .unwrap_or_default()
+                .into_iter()
+                .map(|model| FetchedModel {
+                    id: model
+                        .name
+                        .strip_prefix("models/")
+                        .unwrap_or(&model.name)
+                        .to_string(),
+                    owned_by: Some("google".to_string()),
+                    display_name: model.display_name,
+                    context_window: model.input_token_limit,
+                    capabilities: model.supported_generation_methods,
+                })
+                .collect())
+        }
+        DiscoveryProtocol::OpenAiCompatible | DiscoveryProtocol::Anthropic => {
+            let parsed: ModelsResponse =
+                serde_json::from_str(body).map_err(|error| error.to_string())?;
+            Ok(parsed
+                .data
+                .unwrap_or_default()
+                .into_iter()
+                .map(|model| FetchedModel {
+                    id: model.id,
+                    owned_by: model.owned_by,
+                    display_name: None,
+                    context_window: None,
+                    capabilities: None,
+                })
+                .collect())
+        }
+    }
+}
+
+/// 拉取供应商可用模型列表
+#[tauri::command]
+pub async fn fetch_models(request: FetchModelsRequest) -> Result<Vec<FetchedModel>, String> {
+    if is_bedrock_request(&request) {
+        return Err(format!(
+            "Amazon Bedrock 使用 Codex 内置 AWS 认证，模型列表由 Codex 管理{}",
+            bedrock_auth_context(&request)
+        ));
+    }
+    if request.api_url.trim().is_empty() {
+        return Err("需要 API URL 才能加载模型".to_string());
+    }
+    let protocol = discovery_protocol(&request);
+    let api_key = resolved_api_key(&request)?;
+    let urls = discovery_urls(&request.api_url, protocol);
+    let client = http_client(&request.api_url)?;
     let mut last_err = String::from("无候选端点");
     for url in &urls {
-        let res = client
-            .get(url)
-            .header("Authorization", format!("Bearer {}", api_key))
-            .send()
-            .await;
+        let mut builder = client.get(url);
+        for (name, value) in discovery_headers(protocol, &api_key) {
+            builder = builder.header(name, value);
+        }
+        let res = builder.send().await;
         match res {
-            Ok(r) if r.status().is_success() => match r.json::<ModelsResponse>().await {
-                Ok(parsed) => {
-                    let mut models: Vec<FetchedModel> = parsed
-                        .data
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|m| FetchedModel {
-                            id: m.id,
-                            owned_by: m.owned_by,
-                        })
-                        .collect();
-                    let mut seen = std::collections::HashSet::new();
-                    models.retain(|m| seen.insert(m.id.clone()));
-                    models.sort_by(|a, b| a.id.cmp(&b.id));
-                    return Ok(models);
-                }
-                Err(e) => last_err = format!("{} 解析失败: {}", url, e),
+            Ok(r) if r.status().is_success() => match r.text().await {
+                Ok(body) => match parse_models_response(&body, protocol) {
+                    Ok(mut models) => {
+                        let mut seen = std::collections::HashSet::new();
+                        models.retain(|m| seen.insert(m.id.clone()));
+                        models.sort_by(|a, b| a.id.cmp(&b.id));
+                        return Ok(models);
+                    }
+                    Err(error) => last_err = format!("{} 解析失败: {}", url, error),
+                },
+                Err(error) => last_err = format!("{} 读取响应失败: {}", url, error),
             },
             Ok(r) => last_err = format!("{} 返回 {}", url, r.status()),
             Err(e) => last_err = format!("{} 请求失败: {}", url, e),
@@ -152,13 +385,15 @@ pub async fn fetch_models(api_url: String, api_key: String) -> Result<Vec<Fetche
 /// 按目标工具协议探活
 #[tauri::command]
 pub async fn test_model(request: TestModelRequest) -> Result<ModelTestResult, String> {
-    let resolved_api_key = request
-        .env_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .and_then(|name| std::env::var(name).ok())
-        .unwrap_or(request.api_key);
+    let resolved_api_key = choose_non_empty_env_value(
+        request
+            .env_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .and_then(|name| std::env::var(name).ok()),
+        request.api_key,
+    );
     probe::probe_with_params(probe::ProbeRequest {
         target_app: &request.target_app,
         api_url: &request.api_url,
@@ -174,7 +409,10 @@ pub async fn test_model(request: TestModelRequest) -> Result<ModelTestResult, St
 
 #[cfg(test)]
 mod tests {
-    use super::TestModelRequest;
+    use super::{
+        discovery_headers, discovery_protocol, is_bedrock_request, parse_models_response,
+        DiscoveryProtocol, FetchModelsRequest, TestModelRequest,
+    };
 
     #[test]
     fn test_model_request_deserializes_camel_case() {
@@ -194,5 +432,68 @@ mod tests {
         assert_eq!(request.target_app, "codex");
         assert_eq!(request.env_key.as_deref(), Some("CODEX_API_KEY"));
         assert_eq!(request.key_label.as_deref(), Some("Primary"));
+    }
+
+    #[test]
+    fn discovery_uses_protocol_specific_auth_and_metadata() {
+        let request: FetchModelsRequest = serde_json::from_value(serde_json::json!({
+            "targetApp": "claude-code",
+            "provider": "anthropic",
+            "apiUrl": "https://api.example.test",
+            "apiKey": "key",
+        }))
+        .unwrap();
+        assert_eq!(discovery_protocol(&request), DiscoveryProtocol::Anthropic);
+        assert_eq!(
+            discovery_headers(DiscoveryProtocol::Anthropic, "key")[0].0,
+            "x-api-key"
+        );
+
+        let gemini = parse_models_response(
+            r#"{"models":[{"name":"models/gemini-2.5-pro","displayName":"Gemini Pro","inputTokenLimit":1048576,"supportedGenerationMethods":["generateContent"]}]}"#,
+            DiscoveryProtocol::Gemini,
+        )
+        .unwrap();
+        assert_eq!(gemini[0].id, "gemini-2.5-pro");
+        assert_eq!(gemini[0].display_name.as_deref(), Some("Gemini Pro"));
+        assert_eq!(gemini[0].context_window, Some(1_048_576));
+    }
+
+    #[test]
+    fn bedrock_detection_requires_explicit_provider() {
+        let inferred: FetchModelsRequest = serde_json::from_value(serde_json::json!({
+            "targetApp": "codex",
+            "apiUrl": "",
+            "apiKey": "",
+        }))
+        .unwrap();
+        assert!(!is_bedrock_request(&inferred));
+
+        let explicit: FetchModelsRequest = serde_json::from_value(serde_json::json!({
+            "targetApp": "codex",
+            "provider": "amazon-bedrock",
+            "apiUrl": "",
+            "apiKey": "",
+            "awsProfile": "default",
+            "awsRegion": "us-east-1",
+        }))
+        .unwrap();
+        assert!(is_bedrock_request(&explicit));
+        assert_eq!(
+            discovery_protocol(&explicit),
+            DiscoveryProtocol::OpenAiCompatible
+        );
+    }
+
+    #[test]
+    fn empty_environment_value_does_not_replace_explicit_key() {
+        assert_eq!(
+            super::choose_non_empty_env_value(Some("   ".into()), "explicit".into()),
+            "explicit"
+        );
+        assert_eq!(
+            super::choose_non_empty_env_value(Some("from-env".into()), "explicit".into()),
+            "from-env"
+        );
     }
 }

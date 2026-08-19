@@ -322,6 +322,8 @@ pub enum TargetApp {
     Hermes,
     #[serde(rename = "openclaw")]
     OpenClaw,
+    #[serde(rename = "zcode")]
+    ZCode,
 }
 
 impl TargetApp {
@@ -333,6 +335,7 @@ impl TargetApp {
             TargetApp::OpenCode => "opencode",
             TargetApp::Hermes => "hermes",
             TargetApp::OpenClaw => "openclaw",
+            TargetApp::ZCode => "zcode",
         }
     }
 
@@ -344,6 +347,7 @@ impl TargetApp {
             "opencode" => Some(TargetApp::OpenCode),
             "hermes" => Some(TargetApp::Hermes),
             "openclaw" => Some(TargetApp::OpenClaw),
+            "zcode" => Some(TargetApp::ZCode),
             _ => None,
         }
     }
@@ -356,6 +360,7 @@ impl TargetApp {
             TargetApp::OpenCode,
             TargetApp::Hermes,
             TargetApp::OpenClaw,
+            TargetApp::ZCode,
         ]
     }
 }
@@ -520,6 +525,7 @@ mod tests {
             TargetApp::OpenCode,
             TargetApp::Hermes,
             TargetApp::OpenClaw,
+            TargetApp::ZCode,
         ] {
             assert_eq!(TargetApp::parse(app.as_str()), Some(app));
         }
@@ -533,6 +539,7 @@ mod tests {
         assert_eq!(TargetApp::parse("opencode"), Some(TargetApp::OpenCode));
         assert_eq!(TargetApp::parse("hermes"), Some(TargetApp::Hermes));
         assert_eq!(TargetApp::parse("openclaw"), Some(TargetApp::OpenClaw));
+        assert_eq!(TargetApp::parse("zcode"), Some(TargetApp::ZCode));
     }
 
     #[test]
@@ -544,6 +551,7 @@ mod tests {
             TargetApp::OpenCode,
             TargetApp::Hermes,
             TargetApp::OpenClaw,
+            TargetApp::ZCode,
         ] {
             let json = serde_json::to_string(&app).unwrap();
             assert_eq!(json, format!("\"{}\"", app.as_str()));
@@ -561,6 +569,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&TargetApp::OpenClaw).unwrap(),
             "\"openclaw\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TargetApp::ZCode).unwrap(),
+            "\"zcode\""
         );
     }
 

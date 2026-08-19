@@ -17,6 +17,7 @@ import {
   EmptyState,
   activeProfileFor,
   AppSelector,
+  profileConfigFingerprint,
 } from './profiles/helpers';
 
 export default function ProfilesPage() {
@@ -40,6 +41,8 @@ export default function ProfilesPage() {
 
   const selectedTool = toolById(targetApp)!;
   const activeProfile = activeProfileFor(status, targetApp);
+  const claudeSeed = activeProfileFor(status, 'claude-code')
+    || profiles.find((p) => p.target_app === 'claude-code');
   const normalizedQuery = query.trim().toLowerCase();
   const toolProfiles = useMemo(() => {
     return profiles.filter((p) => p.target_app === targetApp);
@@ -61,7 +64,7 @@ export default function ProfilesPage() {
   const dupPlan = useMemo(() => {
     const groups = new Map<string, ApiProfile[]>();
     for (const p of toolProfiles) {
-      const key = `${p.target_app ?? 'shared'}::${(p.api_url || '').replace(/\/+$/, '')}::${p.api_key || ''}`;
+      const key = profileConfigFingerprint(p);
       const arr = groups.get(key);
       if (arr) arr.push(p);
       else groups.set(key, [p]);
@@ -227,6 +230,7 @@ export default function ProfilesPage() {
         <ProfileModal
           profile={editing}
           initialTool={targetApp}
+          seedFrom={claudeSeed}
           onClose={() => setShowModal(false)}
           onSave={async (p) => {
             try {

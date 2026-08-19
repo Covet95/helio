@@ -64,7 +64,7 @@ impl Database {
         let conn = Connection::open(path)?;
         if path != Path::new(":memory:") {
             ensure_private_file(path)?;
-            // CLI 与 GUI 可能同时打开同一库：WAL + busy_timeout 避免 SQLITE_BUSY。
+            // 多个应用进程可能同时打开同一库：WAL + busy_timeout 避免 SQLITE_BUSY。
             // busy_timeout 让并发写等待而非直接报错。
             conn.execute_batch("PRAGMA journal_mode=WAL;")?;
             conn.busy_timeout(std::time::Duration::from_secs(5))?;
@@ -130,6 +130,14 @@ impl Database {
                 updated_at INTEGER NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS provider_ownership (
+                target_app TEXT NOT NULL,
+                provider_id TEXT NOT NULL,
+                managed_by_helio INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (target_app, provider_id)
+            );
+
             CREATE TABLE IF NOT EXISTS active_profiles (
                 target_app TEXT PRIMARY KEY,
                 profile_id INTEGER NOT NULL,
@@ -150,10 +158,6 @@ impl Database {
         self.migrate_composite_unique()?;
         self.migrate_drop_model_effort_level()?;
         self.migrate_drop_model_thinking_enabled()?;
-        self.conn.execute(
-            "UPDATE api_profiles SET wire_api = 'responses' WHERE lower(trim(wire_api)) = 'chat'",
-            [],
-        )?;
         self.record_migration("2026-07-19-profile-schema-ledger")?;
         self.migrate_drop_gemini_target()?;
 
@@ -750,6 +754,11 @@ impl Database {
     /// 添加 API Profile
     pub fn add_profile(&self, profile: &ApiProfile) -> Result<i64> {
         let mut profile = profile.clone();
+        if profile.target_app.is_none() {
+            anyhow::bail!(
+                "API Profile requires target_app; universal profiles are not supported yet"
+            );
+        }
         profile.normalize_keys();
         let now = chrono::Utc::now().timestamp();
         let model_mapping_json = profile
@@ -810,7 +819,7 @@ impl Database {
                 profile.context_1m.map(|b| b as i64),
                 profile.target_app.as_ref().map(|t| t.as_str()),
                 models_json,
-                Some("responses"),
+                &profile.codex.wire_api,
                 &profile.codex.env_key,
                 profile.codex.requires_openai_auth.map(|b| b as i64),
                 &profile.codex.service_tier,
@@ -857,6 +866,7 @@ impl Database {
             .map(serde_json::from_str)
             .transpose()
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        let wire_api: Option<String> = row.get("wire_api")?;
         let requires_openai_auth: Option<i64> = row.get("requires_openai_auth")?;
         let supports_standalone_web_search: Option<i64> =
             row.get("supports_standalone_web_search")?;
@@ -907,7 +917,7 @@ impl Database {
             claude: ClaudeProfileFields { model_mapping },
             codex: CodexProfileFields {
                 reasoning_effort: row.get("reasoning_effort")?,
-                wire_api: Some("responses".to_string()),
+                wire_api,
                 env_key: row.get("env_key")?,
                 requires_openai_auth: requires_openai_auth.map(|v| v != 0),
                 service_tier: row.get("service_tier")?,
@@ -958,8 +968,7 @@ impl Database {
 
     /// 某工具下是否已存在同名 profile(可排除某 id,用于改名校验)。
     ///
-    /// 仅 GUI(tauri-gui)的 import 流程调用;CLI bin 不走此路径,故对 CLI 编译标记 allow。
-    #[cfg_attr(not(feature = "tauri-gui"), allow(dead_code))]
+    /// GUI 导入流程使用的同名校验。
     pub fn profile_name_exists(
         &self,
         name: &str,
@@ -988,12 +997,53 @@ impl Database {
         Ok(profiles)
     }
 
+    /// Assign one legacy profile whose target_app is NULL to an explicit tool.
+    /// The caller must make the ownership decision; the database never guesses.
+    pub fn assign_legacy_profile(&self, profile_id: i64, target: TargetApp) -> Result<()> {
+        let (name, current_target): (String, Option<String>) = self
+            .conn
+            .query_row(
+                "SELECT name, target_app FROM api_profiles WHERE id = ?1",
+                params![profile_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .ok_or_else(|| anyhow::anyhow!("Profile id={profile_id} 不存在"))?;
+        if current_target.is_some() {
+            anyhow::bail!("Profile id={profile_id} 已经归属明确工具");
+        }
+        if self.profile_name_exists(&name, target, None)? {
+            anyhow::bail!("目标工具 {} 已存在同名 Profile: {}", target.as_str(), name);
+        }
+        self.conn.execute(
+            "UPDATE api_profiles SET target_app = ?1, updated_at = ?2 WHERE id = ?3 AND target_app IS NULL",
+            params![target.as_str(), chrono::Utc::now().timestamp(), profile_id],
+        )?;
+        Ok(())
+    }
+
+    /// Delete a legacy unassigned profile by id. Active rows are protected by
+    /// the foreign key cascade, but a NULL-target row cannot be a normal active
+    /// profile in the first place.
+    pub fn delete_legacy_profile(&self, profile_id: i64) -> Result<bool> {
+        let rows = self.conn.execute(
+            "DELETE FROM api_profiles WHERE id = ?1 AND target_app IS NULL",
+            params![profile_id],
+        )?;
+        Ok(rows > 0)
+    }
+
     /// 更新 API Profile
     ///
     /// 按 `id` 定位记录（而非 name），因此**支持改名**。
     /// id 为空时回退到按旧 name 定位（理论上现有 profile 都带 id）。
     pub fn update_profile(&self, profile: &ApiProfile) -> Result<()> {
         let mut profile = profile.clone();
+        if profile.target_app.is_none() {
+            anyhow::bail!(
+                "API Profile requires target_app; universal profiles are not supported yet"
+            );
+        }
         profile.normalize_keys();
         let now = chrono::Utc::now().timestamp();
         let model_mapping_json = profile
@@ -1056,7 +1106,7 @@ impl Database {
                         profile.context_1m.map(|b| b as i64),
                         profile.target_app.as_ref().map(|t| t.as_str()),
                         models_json,
-                        Some("responses"),
+                        &profile.codex.wire_api,
                         &profile.codex.env_key,
                         profile.codex.requires_openai_auth.map(|b| b as i64),
                         &profile.codex.service_tier,
@@ -1090,7 +1140,7 @@ impl Database {
                         profile.context_1m.map(|b| b as i64),
                         profile.target_app.as_ref().map(|t| t.as_str()),
                         models_json,
-                        Some("responses"),
+                        &profile.codex.wire_api,
                         &profile.codex.env_key,
                         profile.codex.requires_openai_auth.map(|b| b as i64),
                         &profile.codex.service_tier,
@@ -1231,6 +1281,53 @@ impl Database {
         self.conn.execute(
             "DELETE FROM opencode_model_state WHERE provider_id = ?1",
             params![provider_id.to_lowercase()],
+        )?;
+        Ok(())
+    }
+
+    /// Record provider ownership only once. Existing records are intentionally
+    /// preserved because a later switch cannot reliably distinguish a provider
+    /// created manually from one created by an older Helio version.
+    pub fn record_provider_ownership_if_missing(
+        &self,
+        target_app: TargetApp,
+        provider_id: &str,
+        managed_by_helio: bool,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO provider_ownership
+             (target_app, provider_id, managed_by_helio, updated_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                target_app.as_str(),
+                provider_id.trim().to_lowercase(),
+                managed_by_helio as i64,
+                chrono::Utc::now().timestamp()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn provider_managed_by_helio(
+        &self,
+        target_app: TargetApp,
+        provider_id: &str,
+    ) -> Result<Option<bool>> {
+        self.conn
+            .query_row(
+                "SELECT managed_by_helio FROM provider_ownership
+                 WHERE target_app = ?1 AND provider_id = ?2",
+                params![target_app.as_str(), provider_id.trim().to_lowercase()],
+                |row| row.get::<_, i64>(0).map(|value| value != 0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn clear_provider_ownership(&self, target_app: TargetApp, provider_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM provider_ownership WHERE target_app = ?1 AND provider_id = ?2",
+            params![target_app.as_str(), provider_id.trim().to_lowercase()],
         )?;
         Ok(())
     }
@@ -1985,6 +2082,30 @@ mod tests {
     }
 
     #[test]
+    fn test_provider_ownership_is_conservative_and_clearable() -> Result<()> {
+        let db = Database::open(":memory:")?;
+        db.record_provider_ownership_if_missing(TargetApp::ZCode, " DeepSeek ", true)?;
+        assert_eq!(
+            db.provider_managed_by_helio(TargetApp::ZCode, "deepseek")?,
+            Some(true)
+        );
+
+        // Existing ownership is never overwritten by a later observation.
+        db.record_provider_ownership_if_missing(TargetApp::ZCode, "deepseek", false)?;
+        assert_eq!(
+            db.provider_managed_by_helio(TargetApp::ZCode, "deepseek")?,
+            Some(true)
+        );
+
+        db.clear_provider_ownership(TargetApp::ZCode, "DEEPSEEK")?;
+        assert_eq!(
+            db.provider_managed_by_helio(TargetApp::ZCode, "deepseek")?,
+            None
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_legacy_effort_level_column_is_dropped() -> Result<()> {
         use std::sync::atomic::{AtomicU64, Ordering};
         static C: AtomicU64 = AtomicU64::new(0);
@@ -2230,6 +2351,60 @@ mod tests {
     }
 
     #[test]
+    fn test_legacy_null_target_profile_can_be_assigned_or_deleted() -> Result<()> {
+        let db = Database::open(":memory:")?;
+        let now = chrono::Utc::now().timestamp();
+
+        db.conn.execute(
+            "INSERT INTO api_profiles
+             (name, provider, api_url, api_key, target_app, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?5)",
+            rusqlite::params![
+                "legacy",
+                "custom",
+                "https://legacy.example",
+                "legacy-key",
+                now
+            ],
+        )?;
+        let legacy_id = db.conn.last_insert_rowid();
+
+        assert_eq!(
+            db.get_profile_by_id(legacy_id)?.and_then(|p| p.target_app),
+            None
+        );
+        db.assign_legacy_profile(legacy_id, TargetApp::Codex)?;
+        assert_eq!(
+            db.get_profile_by_id(legacy_id)?.and_then(|p| p.target_app),
+            Some(TargetApp::Codex)
+        );
+        assert!(db
+            .assign_legacy_profile(legacy_id, TargetApp::ClaudeCode)
+            .is_err());
+
+        db.conn.execute(
+            "INSERT INTO api_profiles
+             (name, provider, api_url, api_key, target_app, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?5)",
+            rusqlite::params![
+                "legacy-delete",
+                "custom",
+                "https://legacy-delete.example",
+                "legacy-delete-key",
+                now
+            ],
+        )?;
+        let delete_id = db.conn.last_insert_rowid();
+        db.set_active_profile(TargetApp::ClaudeCode, delete_id)?;
+        assert!(db.delete_legacy_profile(delete_id)?);
+        assert!(db.get_profile_by_id(delete_id)?.is_none());
+        assert!(db.get_active_profile(TargetApp::ClaudeCode)?.is_none());
+        assert!(!db.delete_legacy_profile(delete_id)?);
+
+        Ok(())
+    }
+
+    #[test]
     #[cfg(feature = "tauri-gui")]
     fn test_get_active_targets_for_profile_returns_all_matches() -> Result<()> {
         let db = Database::open(":memory:")?;
@@ -2239,6 +2414,7 @@ mod tests {
             provider: "anthropic".to_string(),
             api_url: "https://api.example.com/v1".to_string(),
             api_key: "sk-test-key".to_string(),
+            target_app: Some(TargetApp::ClaudeCode),
             ..Default::default()
         };
 

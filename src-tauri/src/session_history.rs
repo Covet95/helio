@@ -57,7 +57,17 @@ pub trait SessionReader {
 pub(crate) fn is_within_root(root: &Path, candidate: &Path) -> bool {
     let norm = normalize_lexical(candidate);
     let root_norm = normalize_lexical(root);
-    norm.starts_with(&root_norm)
+    if !norm.starts_with(&root_norm) {
+        return false;
+    }
+
+    // Lexical containment is not enough when a session file or one of its
+    // parent directories is a symlink. Canonicalize existing paths and reject
+    // links that resolve outside the session root.
+    match (root.canonicalize(), candidate.canonicalize()) {
+        (Ok(real_root), Ok(real_candidate)) => real_candidate.starts_with(real_root),
+        _ => true,
+    }
 }
 
 /// 词法归一化：解析 `.` 与 `..`，不触碰文件系统。
@@ -108,6 +118,9 @@ impl SessionReader for CodexSessionReader {
         {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            if !is_within_root(&self.root(), path) {
                 continue;
             }
             let meta = match fs::metadata(path) {
@@ -297,6 +310,9 @@ impl SessionReader for ClaudeSessionReader {
         {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            if !is_within_root(&self.root(), path) {
                 continue;
             }
             let meta = match fs::metadata(path) {
@@ -758,6 +774,27 @@ mod tests {
             Path::new("/home/u/.codex/../evil.jsonl")
         ));
         assert!(!is_within_root(root, Path::new("/etc/passwd")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_is_within_root_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let dir = temp_dir("session-symlink-escape");
+        let root = dir.join("sessions");
+        let outside = dir.join("outside");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("escape.jsonl"), b"outside").unwrap();
+        symlink(&outside, root.join("linked")).unwrap();
+
+        let candidate = root.join("linked/escape.jsonl");
+        assert!(
+            !is_within_root(&root, &candidate),
+            "session path resolving through a symlink must be rejected"
+        );
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

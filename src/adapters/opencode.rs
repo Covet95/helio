@@ -153,7 +153,7 @@ impl OpenCodeAdapter {
 
     /// 删除 OpenCode 档案的统一入口：先确保不再使用的本地 provider 可清理，
     /// 再删除 DB 档案，避免清理失败后留下无法重试的档案状态。
-    /// CLI / GUI 共用，避免删前取 provider 的逻辑分叉。
+    /// GUI / 托盘共用，避免删前取 provider 的逻辑分叉。
     ///
     /// 返回值：档案是否存在并已删除。
     pub fn delete_profile_and_cleanup_local(db: &crate::db::Database, name: &str) -> Result<bool> {
@@ -171,14 +171,18 @@ impl OpenCodeAdapter {
                 && Self::normalize_provider_id(&p.provider)
                     == Self::normalize_provider_id(&provider)
         });
+        let provider_managed = db
+            .provider_managed_by_helio(crate::models::TargetApp::OpenCode, &provider)?
+            .unwrap_or(false);
 
-        if !provider_still_used {
+        if !provider_still_used && provider_managed {
             Self::new().remove_provider(&provider)?;
         }
 
         let deleted = db.delete_profile(name, crate::models::TargetApp::OpenCode)?;
         if deleted && !provider_still_used {
             db.clear_opencode_managed_provider(&provider)?;
+            db.clear_provider_ownership(crate::models::TargetApp::OpenCode, &provider)?;
         }
         Ok(deleted)
     }

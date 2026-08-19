@@ -81,14 +81,43 @@ export function activeProfileFor(status: StatusInfo | null, targetApp: TargetApp
   return (targetStatus as { profile?: ApiProfile }).profile;
 }
 
-export function emptyProfileForTool(tool: TargetApp): ApiProfile {
+function stableValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([key, child]) => [key, stableValue(child)]),
+    );
+  }
+  return value;
+}
+
+/**
+ * Configuration identity excludes display/DB metadata and probe timestamps.
+ * Generated key-entry ids are also excluded so an import does not look unique
+ * merely because the database assigned a different id.
+ */
+export function profileConfigFingerprint(profile: ApiProfile): string {
+  const { id: _id, name: _name, created_at: _createdAt, updated_at: _updatedAt, api_keys, ...config } = profile;
+  return JSON.stringify(stableValue({
+    ...config,
+    api_keys: api_keys?.map(({ id: _keyId, last_probe_ok: _ok, last_probed_at: _at, created_at: _created, ...entry }) => entry),
+  }));
+}
+
+export function emptyProfileForTool(tool: TargetApp, seedFrom?: ApiProfile): ApiProfile {
   const preset = PROVIDER_PRESETS[tool]?.[0];
+  const seed = tool === 'zcode' && seedFrom?.target_app === 'claude-code' ? seedFrom : undefined;
   const base: ApiProfile = {
     name: '',
-    provider: preset?.provider ?? 'anthropic',
-    api_url: preset?.api_url ?? '',
-    api_key: '',
-    model: preset?.model,
+    provider: seed?.provider || preset?.provider || 'anthropic',
+    api_url: seed?.api_url || preset?.api_url || '',
+    api_key: seed?.api_key || '',
+    api_keys: seed?.api_keys,
+    model: seed?.model || preset?.model,
+    model_mapping: seed?.model_mapping,
+    context_1m: seed?.context_1m,
     target_app: tool,
   };
   if (tool === 'openclaw') {

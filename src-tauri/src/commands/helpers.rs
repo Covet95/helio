@@ -98,6 +98,7 @@ pub(crate) fn default_provider(target: TargetApp) -> String {
         TargetApp::OpenCode => "anthropic",
         TargetApp::Hermes => "custom",
         TargetApp::OpenClaw => "custom",
+        TargetApp::ZCode => "anthropic",
     }
     .to_string()
 }

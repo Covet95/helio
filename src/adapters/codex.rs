@@ -364,9 +364,9 @@ impl ConfigAdapter for CodexAdapter {
         let mut shared = config.clone();
 
         // Codex 的 API key 存在独立的 ~/.codex/auth.json，不在 config.toml 里。
-        // config.toml 里唯一的 API 端点/凭据信息是各 provider 的 base_url 和
-        // experimental_bearer_token（第三方中转专用鉴权）。因此都要移除，
-        // 保留 wire_api / requires_openai_auth / name 等协议字段。
+        // config.toml 里由 Profile 管理的端点/凭据信息是各 provider 的
+        // base_url、env_key 和 experimental_bearer_token。它们不属于 shared
+        // 配置，但协议字段仍要保留，切换时再由 Profile 还原。
         if let Some(obj) = shared.as_object_mut() {
             // 兼容历史版本误写入的顶层 api_key
             obj.remove("api_key");
@@ -375,18 +375,27 @@ impl ConfigAdapter for CodexAdapter {
                 .get("model_provider")
                 .and_then(|value| value.as_str())
                 .map(str::to_string);
-            if let (Some(active_provider), Some(providers)) = (
-                active_provider,
-                obj.get_mut("model_providers")
-                    .and_then(|v| v.as_object_mut()),
-            ) {
-                if let Some(p) = providers
-                    .get_mut(&active_provider)
-                    .and_then(|value| value.as_object_mut())
-                {
-                    p.remove("base_url");
-                    p.remove("env_key");
-                    p.remove("experimental_bearer_token");
+            if let Some(providers) = obj
+                .get_mut("model_providers")
+                .and_then(|v| v.as_object_mut())
+            {
+                // Never persist provider credentials in shared_configs. This
+                // applies to inactive providers too, because portable backups
+                // contain the complete shared configuration snapshot.
+                for provider in providers.values_mut() {
+                    if let Some(provider) = provider.as_object_mut() {
+                        provider.remove("api_key");
+                        provider.remove("experimental_bearer_token");
+                    }
+                }
+                if let Some(active_provider) = active_provider {
+                    if let Some(p) = providers
+                        .get_mut(&active_provider)
+                        .and_then(|value| value.as_object_mut())
+                    {
+                        p.remove("base_url");
+                        p.remove("env_key");
+                    }
                 }
             }
         }
@@ -399,8 +408,19 @@ impl ConfigAdapter for CodexAdapter {
             if api_profile.api_url.trim().is_empty() {
                 anyhow::bail!("Codex custom provider requires an API URL");
             }
-            if Self::env_key(api_profile).is_none() && api_profile.api_key.trim().is_empty() {
-                anyhow::bail!("Codex custom provider requires an API key or env_key");
+            if Self::env_key(api_profile).is_none()
+                && api_profile.api_key.trim().is_empty()
+                && api_profile
+                    .codex
+                    .experimental_bearer_token
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .is_none()
+            {
+                anyhow::bail!(
+                    "Codex custom provider requires an API key, env_key, or bearer token"
+                );
             }
         }
 
@@ -504,7 +524,7 @@ impl ConfigAdapter for CodexAdapter {
                 raw_id
             };
 
-            // 写入目标 provider 配置并规范化 Responses 与鉴权模式；其他 provider 不动。
+            // 写入目标 provider 配置并保留 Profile 指定的协议与鉴权模式；其他 provider 不动。
             if let Some(providers) = config
                 .get_mut("model_providers")
                 .and_then(|v| v.as_object_mut())
@@ -523,15 +543,18 @@ impl ConfigAdapter for CodexAdapter {
                             "env_key".to_string(),
                             serde_json::Value::String(env_key.to_string()),
                         );
-                        p.insert(
-                            "requires_openai_auth".to_string(),
-                            serde_json::Value::Bool(false),
-                        );
                     } else {
                         p.remove("env_key");
+                    }
+                    let requires_openai_auth = api_profile
+                        .codex
+                        .requires_openai_auth
+                        .or_else(|| Self::env_key(api_profile).map(|_| false))
+                        .or(Some(true));
+                    if let Some(requires_openai_auth) = requires_openai_auth {
                         p.insert(
                             "requires_openai_auth".to_string(),
-                            serde_json::Value::Bool(true),
+                            serde_json::Value::Bool(requires_openai_auth),
                         );
                     }
                     if api_profile.codex.supports_standalone_web_search == Some(true) {
@@ -542,10 +565,33 @@ impl ConfigAdapter for CodexAdapter {
                     } else {
                         p.remove("supports_standalone_web_search");
                     }
-                    p.remove("experimental_bearer_token");
+                    match api_profile
+                        .codex
+                        .experimental_bearer_token
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                    {
+                        Some(token) => {
+                            p.insert(
+                                "experimental_bearer_token".to_string(),
+                                serde_json::Value::String(token.to_string()),
+                            );
+                        }
+                        None => {
+                            p.remove("experimental_bearer_token");
+                        }
+                    }
+                    let wire_api = api_profile
+                        .codex
+                        .wire_api
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or("responses");
                     p.insert(
                         "wire_api".to_string(),
-                        serde_json::Value::String("responses".to_string()),
+                        serde_json::Value::String(wire_api.to_string()),
                     );
                     if is_new {
                         // 全新 provider：补上 Codex 必需的 name 默认值。
@@ -843,6 +889,43 @@ command = "npx"
     }
 
     #[test]
+    fn test_extract_shared_removes_provider_secrets_from_inactive_providers() {
+        let adapter = CodexAdapter::new();
+        let config = serde_json::json!({
+            "model_provider": "active",
+            "model_providers": {
+                "active": {
+                    "base_url": "https://active.example",
+                    "env_key": "ACTIVE_KEY",
+                    "experimental_bearer_token": "active-bearer",
+                    "name": "Active"
+                },
+                "inactive": {
+                    "base_url": "https://inactive.example",
+                    "env_key": "INACTIVE_KEY",
+                    "experimental_bearer_token": "inactive-bearer",
+                    "api_key": "inactive-key",
+                    "name": "Inactive"
+                }
+            }
+        });
+
+        let shared = adapter.extract_shared_config(&config);
+
+        let active = &shared["model_providers"]["active"];
+        assert!(active.get("base_url").is_none());
+        assert!(active.get("env_key").is_none());
+        assert!(active.get("experimental_bearer_token").is_none());
+
+        let inactive = &shared["model_providers"]["inactive"];
+        assert_eq!(inactive["base_url"], "https://inactive.example");
+        assert_eq!(inactive["env_key"], "INACTIVE_KEY");
+        assert!(inactive.get("experimental_bearer_token").is_none());
+        assert!(inactive.get("api_key").is_none());
+        assert_eq!(inactive["name"], "Inactive");
+    }
+
+    #[test]
     fn test_merge_inserts_api() {
         let adapter = CodexAdapter::new();
         let shared = serde_json::json!({
@@ -997,18 +1080,15 @@ command = "npx"
 
         let merged = adapter.merge_config(&profile, &shared);
 
-        assert_eq!(
-            merged["model_providers"]["myproxy"]["wire_api"],
-            "responses"
-        );
+        assert_eq!(merged["model_providers"]["myproxy"]["wire_api"], "chat");
         assert_eq!(
             merged["model_providers"]["myproxy"]["requires_openai_auth"],
-            true
+            false
         );
     }
 
     #[test]
-    fn test_merge_uses_provider_env_key_and_clears_legacy_bearer() {
+    fn test_merge_uses_provider_env_key_and_preserves_bearer() {
         let adapter = CodexAdapter::new();
         let profile = ApiProfile {
             provider: "myproxy".to_string(),
@@ -1029,9 +1109,10 @@ command = "npx"
             merged["model_providers"]["myproxy"]["requires_openai_auth"],
             false
         );
-        assert!(merged["model_providers"]["myproxy"]
-            .get("experimental_bearer_token")
-            .is_none());
+        assert_eq!(
+            merged["model_providers"]["myproxy"]["experimental_bearer_token"],
+            "sk-bearer-xyz"
+        );
     }
 
     #[test]

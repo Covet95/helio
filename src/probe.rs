@@ -1,5 +1,4 @@
 //! 模型可用性探活（与目标工具接入协议对齐）
-//! 供 CLI 与 Tauri GUI 共用。
 
 use serde::{Deserialize, Serialize};
 
@@ -120,6 +119,10 @@ fn provider_models_url(api_url: &str) -> Option<String> {
         .iter()
         .find(|(pat, _)| lower.contains(pat))
         .map(|(_, url)| url.to_string())
+}
+
+fn truncate_error_detail(text: &str, max_chars: usize) -> String {
+    text.chars().take(max_chars).collect()
 }
 
 fn is_local_url(api_url: &str) -> bool {
@@ -303,7 +306,11 @@ fn resolve_probe_plan(
     let app = target_app.trim().to_lowercase();
     let key = api_key.trim();
     let model = model.trim();
-    if key.is_empty() {
+    let codex_token = experimental_bearer_token
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .unwrap_or(key);
+    if (app != "codex" && key.is_empty()) || (app == "codex" && codex_token.is_empty()) {
         return Err("需要 API Key 才能测试模型".into());
     }
     if model.is_empty() {
@@ -311,7 +318,7 @@ fn resolve_probe_plan(
     }
 
     match app.as_str() {
-        "claude-code" => Ok(ProbePlan {
+        "claude-code" | "zcode" => Ok(ProbePlan {
             protocol: ProbeProtocol::AnthropicMessages,
             endpoint: anthropic_messages_url(api_url),
             headers: anthropic_headers(key),
@@ -319,14 +326,24 @@ fn resolve_probe_plan(
             success: SuccessCheck::AnthropicContent,
         }),
         "codex" => {
-            let _ = (wire_api, experimental_bearer_token);
-            Ok(ProbePlan {
-                protocol: ProbeProtocol::Responses,
-                endpoint: responses_url_raw(api_url),
-                headers: bearer_headers(key),
-                body: responses_body(model),
-                success: SuccessCheck::ResponsesOutputOrStatus,
-            })
+            let wire = wire_api.unwrap_or("").trim().to_ascii_lowercase();
+            if matches!(wire.as_str(), "chat" | "chat_completions" | "openai-chat") {
+                Ok(ProbePlan {
+                    protocol: ProbeProtocol::ChatCompletions,
+                    endpoint: chat_completions_url_raw(api_url),
+                    headers: bearer_headers(codex_token),
+                    body: chat_body(model),
+                    success: SuccessCheck::ChatChoices,
+                })
+            } else {
+                Ok(ProbePlan {
+                    protocol: ProbeProtocol::Responses,
+                    endpoint: responses_url_raw(api_url),
+                    headers: bearer_headers(codex_token),
+                    body: responses_body(model),
+                    success: SuccessCheck::ResponsesOutputOrStatus,
+                })
+            }
         }
         "pi" => {
             // Pi: protocol from api_mode/wire_api; official Google host → generateContent
@@ -534,7 +551,7 @@ async fn execute_probe_plan(api_url: &str, plan: &ProbePlan) -> Result<(), Strin
     if !status.is_success() {
         let detail = text.trim();
         // 截断响应体：远端/代理可能回显请求细节，避免超长或敏感内容进错误消息
-        let detail = &detail[..detail.len().min(300)];
+        let detail = truncate_error_detail(detail, 300);
         if detail.is_empty() {
             return Err(format!(
                 "{} 返回 {}",
@@ -796,6 +813,29 @@ mod tests {
     }
 
     #[test]
+    fn zcode_uses_anthropic_messages_like_claude() {
+        let plan = resolve_probe_plan(
+            "zcode",
+            "https://api.deepseek.com/anthropic",
+            "sk-test",
+            "deepseek-chat",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.protocol, ProbeProtocol::AnthropicMessages);
+        assert_eq!(
+            plan.endpoint,
+            "https://api.deepseek.com/anthropic/v1/messages"
+        );
+        assert!(plan
+            .headers
+            .iter()
+            .any(|(k, v)| k == "x-api-key" && v == "sk-test"));
+    }
+
+    #[test]
     fn codex_empty_wire_defaults_to_responses() {
         let plan = resolve_probe_plan(
             "codex",
@@ -812,7 +852,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_legacy_chat_wire_is_normalized_to_responses() {
+    fn codex_chat_wire_uses_chat_completions() {
         let plan = resolve_probe_plan(
             "codex",
             "https://proxy.example/v1",
@@ -823,12 +863,12 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(plan.protocol, ProbeProtocol::Responses);
-        assert!(plan.endpoint.ends_with("/responses"));
+        assert_eq!(plan.protocol, ProbeProtocol::ChatCompletions);
+        assert!(plan.endpoint.ends_with("/chat/completions"));
     }
 
     #[test]
-    fn codex_legacy_bearer_is_ignored() {
+    fn codex_bearer_token_is_used_for_probe() {
         let plan = resolve_probe_plan(
             "codex",
             "https://api.openai.com/v1",
@@ -845,7 +885,7 @@ mod tests {
             .find(|(k, _)| k == "Authorization")
             .map(|(_, v)| v.as_str())
             .unwrap();
-        assert_eq!(auth, "Bearer sk-main");
+        assert_eq!(auth, "Bearer sk-exp-token");
     }
 
     #[test]

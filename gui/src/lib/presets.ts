@@ -43,6 +43,13 @@ export const PROVIDER_PRESETS: Record<TargetApp, ProviderPreset[]> = {
     { id: 'cpa', label: '本地中转 CPA', provider: 'cpa', api_url: 'http://127.0.0.1:8317/v1', model: 'claude-opus-4-8', category: 'third_party' },
     { id: 'custom', label: 'Custom provider', provider: 'custom', api_url: 'https://api.example.com/v1', model: 'gpt-5.5', category: 'custom' },
   ],
+  zcode: [
+    { id: 'anthropic', label: 'Anthropic 官方', provider: 'anthropic', api_url: 'https://api.anthropic.com', category: 'official' },
+    { id: 'deepseek', label: 'DeepSeek', provider: 'anthropic', api_url: 'https://api.deepseek.com/anthropic', model: 'deepseek-chat', category: 'third_party' },
+    { id: 'glm', label: '智谱 GLM', provider: 'anthropic', api_url: 'https://open.bigmodel.cn/api/anthropic', model: 'glm-4', category: 'third_party' },
+    { id: 'kimi', label: 'Kimi', provider: 'anthropic', api_url: 'https://api.moonshot.cn/anthropic', category: 'third_party' },
+    { id: 'custom', label: '自定义', provider: 'anthropic', api_url: '', category: 'custom' },
+  ],
 };
 
 /** 推理强度选项（Codex） */
