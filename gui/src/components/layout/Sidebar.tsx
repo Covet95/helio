@@ -12,7 +12,7 @@ const NAV = [
 ];
 
 export default function Sidebar() {
-  const [version, setVersion] = useState('0.1.2');
+  const [version, setVersion] = useState('0.2.0');
 
   useEffect(() => {
     let cancelled = false;

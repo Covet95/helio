@@ -75,13 +75,6 @@ export function contextPreviewLine(
   return '不修改上下文窗口字段';
 }
 
-export function formatContextTokens(n: number | null): string {
-  if (n == null) return '—';
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1)}M`;
-  if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
-  return String(n);
-}
-
 /** StatusInfo keys use underscores (claude_code). */
 export function statusKeyFor(targetApp: string): string {
   return targetApp.replace(/-/g, '_');

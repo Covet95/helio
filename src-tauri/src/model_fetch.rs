@@ -86,6 +86,9 @@ pub struct TestModelRequest {
     pub api_mode: Option<String>,
     pub experimental_bearer_token: Option<String>,
     pub key_label: Option<String>,
+    /// Codex auth 命令模式：Helio 不执行外部命令，探活/拉取时直接提示。
+    #[serde(default)]
+    pub has_command_auth: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -96,11 +99,13 @@ pub struct FetchModelsRequest {
     pub api_url: String,
     pub api_key: String,
     pub env_key: Option<String>,
-    pub wire_api: Option<String>,
     pub api_mode: Option<String>,
     pub experimental_bearer_token: Option<String>,
     pub aws_profile: Option<String>,
     pub aws_region: Option<String>,
+    /// Codex auth 命令模式：Helio 不执行外部命令，直接提示。
+    #[serde(default)]
+    pub has_command_auth: bool,
 }
 
 fn provider_models_url(api_url: &str) -> Option<String> {
@@ -158,13 +163,8 @@ fn discovery_protocol(request: &FetchModelsRequest) -> DiscoveryProtocol {
         .unwrap_or("")
         .trim()
         .to_ascii_lowercase();
-    let wire = request
-        .wire_api
-        .as_deref()
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase();
-    if app == "codex" && matches!(wire.as_str(), "chat" | "chat_completions" | "responses") {
+    // Codex 只剩 Responses 一个协议（chat 已于 2026-02 删除），wire 取值不再影响发现方式。
+    if app == "codex" {
         return DiscoveryProtocol::OpenAiCompatible;
     }
     if request
@@ -253,7 +253,14 @@ fn resolved_api_key(request: &FetchModelsRequest) -> Result<String, String> {
         env_key.trim()
     };
     if key.is_empty() {
-        Err("需要 API Key、Bearer Token 或环境变量才能加载模型".to_string())
+        if request.has_command_auth {
+            Err(
+                "该档案使用 auth 命令获取 token，Helio 不执行外部命令，无法加载模型列表"
+                    .to_string(),
+            )
+        } else {
+            Err("需要 API Key、Bearer Token 或环境变量才能加载模型".to_string())
+        }
     } else {
         Ok(key.to_string())
     }
@@ -394,6 +401,9 @@ pub async fn test_model(request: TestModelRequest) -> Result<ModelTestResult, St
             .and_then(|name| std::env::var(name).ok()),
         request.api_key,
     );
+    if resolved_api_key.trim().is_empty() && request.has_command_auth {
+        return Err("该档案使用 auth 命令获取 token，Helio 不执行外部命令，无法探活".to_string());
+    }
     probe::probe_with_params(probe::ProbeRequest {
         target_app: &request.target_app,
         api_url: &request.api_url,

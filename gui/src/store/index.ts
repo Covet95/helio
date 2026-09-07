@@ -16,7 +16,7 @@ interface AppStore {
   addProfile: (profile: ApiProfile) => Promise<void>;
   updateProfile: (profile: ApiProfile) => Promise<void>;
   deleteProfile: (targetApp: TargetApp, name: string) => Promise<void>;
-  switchProfile: (app: TargetApp, name: string) => Promise<void>;
+  switchProfile: (app: TargetApp, name: string, probe?: boolean) => Promise<void>;
   fetchStatus: () => Promise<void>;
 
   sidebarCollapsed: boolean;
@@ -91,9 +91,9 @@ export const useStore = create<AppStore>((set, get) => ({
     }
   },
 
-  switchProfile: async (app, name) => {
+  switchProfile: async (app, name, probe) => {
     try {
-      await tauriApi.switchProfile(app, name);
+      await tauriApi.switchProfile(app, name, probe);
       set({ lastError: null });
       await get().fetchProfiles();
       await get().fetchStatus();

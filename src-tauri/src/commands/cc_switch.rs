@@ -3,7 +3,9 @@ use crate::commands::helpers::{claude_extract_models, str_field};
 use crate::commands::AppState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use switch_api::models::{ApiProfile, ClaudeProfileFields, CodexProfileFields, TargetApp};
+use switch_api::models::{
+    normalize_wire_api, ApiProfile, ClaudeProfileFields, CodexProfileFields, TargetApp,
+};
 use tauri::State;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,9 +102,13 @@ pub async fn import_cc_switch(
             },
             codex: CodexProfileFields {
                 reasoning_effort: p.reasoning_effort,
-                wire_api: (target == TargetApp::Codex)
-                    .then(|| p.wire_api.clone())
-                    .flatten(),
+                wire_api: if target == TargetApp::Codex {
+                    p.wire_api
+                        .as_deref()
+                        .and_then(|w| normalize_wire_api(Some(w)).or(Some(w.to_string())))
+                } else {
+                    None
+                },
                 env_key: p.env_key,
                 requires_openai_auth: p.requires_openai_auth,
                 experimental_bearer_token: p.experimental_bearer_token,
@@ -162,7 +168,8 @@ pub(crate) fn parse_cc_provider(app_type: &str, settings: &str) -> CcSwitchProvi
                 out.api_url = str_field(b, "base_url");
                 let w = str_field(b, "wire_api");
                 if !w.trim().is_empty() {
-                    out.wire_api = Some(w);
+                    // chat 系历史值归一为 responses（官方已删除 chat）
+                    out.wire_api = switch_api::models::normalize_wire_api(Some(&w)).or(Some(w));
                 }
                 out.requires_openai_auth = b.get("requires_openai_auth").and_then(|x| x.as_bool());
                 let env_key = str_field(b, "env_key");

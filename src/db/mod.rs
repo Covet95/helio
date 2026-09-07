@@ -106,6 +106,13 @@ impl Database {
                 supports_standalone_web_search INTEGER,
                 aws_profile TEXT,
                 aws_region TEXT,
+                reasoning_summary TEXT,
+                verbosity TEXT,
+                auth_command TEXT,
+                auth_args TEXT,
+                auth_timeout_ms INTEGER,
+                auth_refresh_interval_ms INTEGER,
+                auth_cwd TEXT,
                 api_mode TEXT,
                 max_tokens INTEGER,
                 api_keys_json TEXT,
@@ -158,6 +165,7 @@ impl Database {
         self.migrate_composite_unique()?;
         self.migrate_drop_model_effort_level()?;
         self.migrate_drop_model_thinking_enabled()?;
+        self.migrate_normalize_codex_wire_api()?;
         self.record_migration("2026-07-19-profile-schema-ledger")?;
         self.migrate_drop_gemini_target()?;
 
@@ -206,6 +214,13 @@ impl Database {
             "ALTER TABLE api_profiles ADD COLUMN supports_standalone_web_search INTEGER",
             "ALTER TABLE api_profiles ADD COLUMN aws_profile TEXT",
             "ALTER TABLE api_profiles ADD COLUMN aws_region TEXT",
+            "ALTER TABLE api_profiles ADD COLUMN reasoning_summary TEXT",
+            "ALTER TABLE api_profiles ADD COLUMN verbosity TEXT",
+            "ALTER TABLE api_profiles ADD COLUMN auth_command TEXT",
+            "ALTER TABLE api_profiles ADD COLUMN auth_args TEXT",
+            "ALTER TABLE api_profiles ADD COLUMN auth_timeout_ms INTEGER",
+            "ALTER TABLE api_profiles ADD COLUMN auth_refresh_interval_ms INTEGER",
+            "ALTER TABLE api_profiles ADD COLUMN auth_cwd TEXT",
             "ALTER TABLE api_profiles ADD COLUMN api_mode TEXT",
             "ALTER TABLE api_profiles ADD COLUMN max_tokens INTEGER",
             "ALTER TABLE api_profiles ADD COLUMN api_keys_json TEXT",
@@ -253,6 +268,9 @@ impl Database {
                 target_app TEXT, models TEXT, wire_api TEXT, env_key TEXT, requires_openai_auth INTEGER,
                 service_tier TEXT, experimental_bearer_token TEXT,
                 supports_standalone_web_search INTEGER, aws_profile TEXT, aws_region TEXT,
+                reasoning_summary TEXT, verbosity TEXT,
+                auth_command TEXT, auth_args TEXT, auth_timeout_ms INTEGER,
+                auth_refresh_interval_ms INTEGER, auth_cwd TEXT,
                 api_mode TEXT, max_tokens INTEGER, api_keys_json TEXT, catalog_models TEXT,
                 opencode_api_mode TEXT, opencode_model_configs TEXT,
                 created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
@@ -263,14 +281,18 @@ impl Database {
                 context_1m, target_app, models, wire_api, env_key, requires_openai_auth,
                 service_tier, experimental_bearer_token, api_mode, max_tokens,
                 supports_standalone_web_search, aws_profile, aws_region, api_keys_json,
-                catalog_models, opencode_api_mode, opencode_model_configs, created_at, updated_at
+                catalog_models, opencode_api_mode, opencode_model_configs, created_at, updated_at,
+                reasoning_summary, verbosity, auth_command, auth_args, auth_timeout_ms,
+                auth_refresh_interval_ms, auth_cwd
             )
             SELECT id, name, provider, api_url, api_key, model_mapping, model, reasoning_effort,
                 context_1m, target_app, models, wire_api, env_key, requires_openai_auth,
                 service_tier, experimental_bearer_token,
                 api_mode, max_tokens, supports_standalone_web_search, aws_profile, aws_region,
                 api_keys_json, catalog_models, opencode_api_mode, opencode_model_configs,
-                created_at, updated_at
+                created_at, updated_at,
+                reasoning_summary, verbosity, auth_command, auth_args, auth_timeout_ms,
+                auth_refresh_interval_ms, auth_cwd
             FROM api_profiles;
             DROP TABLE api_profiles;
             ALTER TABLE api_profiles_no_effort RENAME TO api_profiles;
@@ -315,6 +337,9 @@ impl Database {
                 target_app TEXT, models TEXT, wire_api TEXT, env_key TEXT, requires_openai_auth INTEGER,
                 service_tier TEXT, experimental_bearer_token TEXT,
                 supports_standalone_web_search INTEGER, aws_profile TEXT, aws_region TEXT,
+                reasoning_summary TEXT, verbosity TEXT,
+                auth_command TEXT, auth_args TEXT, auth_timeout_ms INTEGER,
+                auth_refresh_interval_ms INTEGER, auth_cwd TEXT,
                 api_mode TEXT, max_tokens INTEGER, api_keys_json TEXT, catalog_models TEXT,
                 opencode_api_mode TEXT, opencode_model_configs TEXT,
                 created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
@@ -325,19 +350,46 @@ impl Database {
                 context_1m, target_app, models, wire_api, env_key, requires_openai_auth,
                 service_tier, experimental_bearer_token, supports_standalone_web_search,
                 aws_profile, aws_region, api_mode, max_tokens, api_keys_json, catalog_models,
-                opencode_api_mode, opencode_model_configs, created_at, updated_at
+                opencode_api_mode, opencode_model_configs, created_at, updated_at,
+                reasoning_summary, verbosity, auth_command, auth_args, auth_timeout_ms,
+                auth_refresh_interval_ms, auth_cwd
             )
             SELECT id, name, provider, api_url, api_key, model_mapping, model, reasoning_effort,
                 context_1m, target_app, models, wire_api, env_key, requires_openai_auth,
                 service_tier, experimental_bearer_token, supports_standalone_web_search,
                 aws_profile, aws_region, api_mode, max_tokens, api_keys_json, catalog_models,
-                opencode_api_mode, opencode_model_configs, created_at, updated_at
+                opencode_api_mode, opencode_model_configs, created_at, updated_at,
+                reasoning_summary, verbosity, auth_command, auth_args, auth_timeout_ms,
+                auth_refresh_interval_ms, auth_cwd
             FROM api_profiles;
             DROP TABLE api_profiles;
             ALTER TABLE api_profiles_no_thinking RENAME TO api_profiles;
             CREATE INDEX IF NOT EXISTS idx_profiles_name ON api_profiles(name);
             COMMIT;
             "#,
+        )?;
+        self.record_migration(id)
+    }
+
+    /// wire_api="chat" 系取值已被官方删除（2026-02，discussion #7782），
+    /// 存量数据归一为 responses；写入路径本身已固定 responses，这里只修历史行。
+    fn migrate_normalize_codex_wire_api(&self) -> Result<()> {
+        let id = "2026-09-07-normalize-codex-wire-api";
+        let already: bool = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM schema_migrations WHERE id = ?1",
+                params![id],
+                |_| Ok(true),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if already {
+            return Ok(());
+        }
+        self.conn.execute(
+            "UPDATE api_profiles SET wire_api = 'responses' WHERE wire_api IS NOT NULL AND lower(trim(wire_api)) IN ('chat', 'chat_completions', 'openai-chat')",
+            [],
         )?;
         self.record_migration(id)
     }
@@ -417,6 +469,13 @@ impl Database {
                 supports_standalone_web_search INTEGER,
                 aws_profile TEXT,
                 aws_region TEXT,
+                reasoning_summary TEXT,
+                verbosity TEXT,
+                auth_command TEXT,
+                auth_args TEXT,
+                auth_timeout_ms INTEGER,
+                auth_refresh_interval_ms INTEGER,
+                auth_cwd TEXT,
                 api_mode TEXT,
                 max_tokens INTEGER,
                 api_keys_json TEXT,
@@ -429,11 +488,15 @@ impl Database {
             INSERT INTO api_profiles_new
                 (id,name,provider,api_url,api_key,model_mapping,created_at,updated_at,model,reasoning_effort,context_1m,target_app,models,
                  wire_api,env_key,requires_openai_auth,service_tier,experimental_bearer_token,
-                 supports_standalone_web_search,aws_profile,aws_region,api_mode,max_tokens,api_keys_json,
+                 supports_standalone_web_search,aws_profile,aws_region,reasoning_summary,verbosity,
+                 auth_command,auth_args,auth_timeout_ms,auth_refresh_interval_ms,auth_cwd,
+                 api_mode,max_tokens,api_keys_json,
                  catalog_models,opencode_api_mode,opencode_model_configs)
             SELECT id,name,provider,api_url,api_key,model_mapping,created_at,updated_at,model,reasoning_effort,context_1m,target_app,models,
                  wire_api,env_key,requires_openai_auth,service_tier,experimental_bearer_token,
-                 supports_standalone_web_search,aws_profile,aws_region,api_mode,max_tokens,api_keys_json,
+                 supports_standalone_web_search,aws_profile,aws_region,reasoning_summary,verbosity,
+                 auth_command,auth_args,auth_timeout_ms,auth_refresh_interval_ms,auth_cwd,
+                 api_mode,max_tokens,api_keys_json,
                  catalog_models,opencode_api_mode,opencode_model_configs
             FROM api_profiles;
 
@@ -786,6 +849,12 @@ impl Database {
             .map(serde_json::to_string)
             .transpose()?;
         let api_keys_json = Self::serialize_api_keys_json(&profile)?;
+        let auth_args_json = profile
+            .codex
+            .auth_args
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
         let (api_mode, max_tokens, opencode_api_mode) = match profile.target_app {
             Some(TargetApp::OpenClaw) => (
                 profile.openclaw.api_mode.as_ref(),
@@ -806,8 +875,8 @@ impl Database {
         };
 
         self.conn.execute(
-            "INSERT INTO api_profiles (name, provider, api_url, api_key, model_mapping, model, reasoning_effort, context_1m, target_app, models, wire_api, env_key, requires_openai_auth, service_tier, experimental_bearer_token, supports_standalone_web_search, aws_profile, aws_region, api_mode, max_tokens, api_keys_json, catalog_models, opencode_api_mode, opencode_model_configs, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
+            "INSERT INTO api_profiles (name, provider, api_url, api_key, model_mapping, model, reasoning_effort, context_1m, target_app, models, wire_api, env_key, requires_openai_auth, service_tier, experimental_bearer_token, supports_standalone_web_search, aws_profile, aws_region, reasoning_summary, verbosity, auth_command, auth_args, auth_timeout_ms, auth_refresh_interval_ms, auth_cwd, api_mode, max_tokens, api_keys_json, catalog_models, opencode_api_mode, opencode_model_configs, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33)",
             params![
                 &profile.name,
                 &profile.provider,
@@ -827,6 +896,13 @@ impl Database {
                 profile.codex.supports_standalone_web_search.map(|b| b as i64),
                 &profile.codex.aws_profile,
                 &profile.codex.aws_region,
+                &profile.codex.reasoning_summary,
+                &profile.codex.verbosity,
+                &profile.codex.auth_command,
+                auth_args_json,
+                profile.codex.auth_timeout_ms,
+                profile.codex.auth_refresh_interval_ms,
+                &profile.codex.auth_cwd,
                 api_mode,
                 max_tokens,
                 api_keys_json,
@@ -846,7 +922,9 @@ impl Database {
         "id, name, provider, api_url, api_key, model_mapping, model, ",
         "reasoning_effort, context_1m, created_at, updated_at, target_app, models, ",
         "wire_api, env_key, requires_openai_auth, service_tier, experimental_bearer_token, ",
-        "supports_standalone_web_search, aws_profile, aws_region, api_mode, max_tokens, ",
+        "supports_standalone_web_search, aws_profile, aws_region, reasoning_summary, verbosity, ",
+        "auth_command, auth_args, auth_timeout_ms, auth_refresh_interval_ms, auth_cwd, ",
+        "api_mode, max_tokens, ",
         "api_keys_json, catalog_models, opencode_api_mode, opencode_model_configs"
     );
 
@@ -894,6 +972,13 @@ impl Database {
             .transpose()
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
         let opencode_api_mode: Option<String> = row.get("opencode_api_mode")?;
+        let auth_args_str: Option<String> = row.get("auth_args")?;
+        let auth_args = auth_args_str
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
         // 工具字段按 target_app 归属，避免 Hermes/OpenClaw 互相污染
         let (hermes_api_mode, openclaw_api_mode, openclaw_max_tokens) = match target_app {
@@ -917,6 +1002,8 @@ impl Database {
             claude: ClaudeProfileFields { model_mapping },
             codex: CodexProfileFields {
                 reasoning_effort: row.get("reasoning_effort")?,
+                reasoning_summary: row.get("reasoning_summary")?,
+                verbosity: row.get("verbosity")?,
                 wire_api,
                 env_key: row.get("env_key")?,
                 requires_openai_auth: requires_openai_auth.map(|v| v != 0),
@@ -925,6 +1012,11 @@ impl Database {
                 supports_standalone_web_search: supports_standalone_web_search.map(|v| v != 0),
                 aws_profile: row.get("aws_profile")?,
                 aws_region: row.get("aws_region")?,
+                auth_command: row.get("auth_command")?,
+                auth_args,
+                auth_timeout_ms: row.get("auth_timeout_ms")?,
+                auth_refresh_interval_ms: row.get("auth_refresh_interval_ms")?,
+                auth_cwd: row.get("auth_cwd")?,
                 catalog_models,
             },
             opencode: OpenCodeProfileFields {
@@ -1071,6 +1163,12 @@ impl Database {
             .map(serde_json::to_string)
             .transpose()?;
         let api_keys_json = Self::serialize_api_keys_json(&profile)?;
+        let auth_args_json = profile
+            .codex
+            .auth_args
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
         let (api_mode, max_tokens, opencode_api_mode) = match profile.target_app {
             Some(TargetApp::OpenClaw) => (
                 profile.openclaw.api_mode.as_ref(),
@@ -1094,7 +1192,7 @@ impl Database {
             Some(id) => {
                 self.conn.execute(
                     "UPDATE api_profiles SET name = ?1, provider = ?2, api_url = ?3, api_key = ?4,
-                     model_mapping = ?5, model = ?6, reasoning_effort = ?7, context_1m = ?8, target_app = ?9, models = ?10, wire_api = ?11, env_key = ?12, requires_openai_auth = ?13, service_tier = ?14, experimental_bearer_token = ?15, supports_standalone_web_search = ?16, aws_profile = ?17, aws_region = ?18, api_mode = ?19, max_tokens = ?20, api_keys_json = ?21, catalog_models = ?22, opencode_api_mode = ?23, opencode_model_configs = ?24, updated_at = ?25 WHERE id = ?26",
+                     model_mapping = ?5, model = ?6, reasoning_effort = ?7, context_1m = ?8, target_app = ?9, models = ?10, wire_api = ?11, env_key = ?12, requires_openai_auth = ?13, service_tier = ?14, experimental_bearer_token = ?15, supports_standalone_web_search = ?16, aws_profile = ?17, aws_region = ?18, reasoning_summary = ?19, verbosity = ?20, auth_command = ?21, auth_args = ?22, auth_timeout_ms = ?23, auth_refresh_interval_ms = ?24, auth_cwd = ?25, api_mode = ?26, max_tokens = ?27, api_keys_json = ?28, catalog_models = ?29, opencode_api_mode = ?30, opencode_model_configs = ?31, updated_at = ?32 WHERE id = ?33",
                     params![
                         &profile.name,
                         &profile.provider,
@@ -1114,6 +1212,13 @@ impl Database {
                         profile.codex.supports_standalone_web_search.map(|b| b as i64),
                         &profile.codex.aws_profile,
                         &profile.codex.aws_region,
+                        &profile.codex.reasoning_summary,
+                        &profile.codex.verbosity,
+                        &profile.codex.auth_command,
+                        auth_args_json,
+                        profile.codex.auth_timeout_ms,
+                        profile.codex.auth_refresh_interval_ms,
+                        &profile.codex.auth_cwd,
                         api_mode,
                         max_tokens,
                         api_keys_json,
@@ -1129,7 +1234,7 @@ impl Database {
                 // 无 id：按 name 定位，不改名
                 self.conn.execute(
                     "UPDATE api_profiles SET provider = ?1, api_url = ?2, api_key = ?3,
-                     model_mapping = ?4, model = ?5, reasoning_effort = ?6, context_1m = ?7, target_app = ?8, models = ?9, wire_api = ?10, env_key = ?11, requires_openai_auth = ?12, service_tier = ?13, experimental_bearer_token = ?14, supports_standalone_web_search = ?15, aws_profile = ?16, aws_region = ?17, api_mode = ?18, max_tokens = ?19, api_keys_json = ?20, catalog_models = ?21, opencode_api_mode = ?22, opencode_model_configs = ?23, updated_at = ?24 WHERE name = ?25",
+                     model_mapping = ?4, model = ?5, reasoning_effort = ?6, context_1m = ?7, target_app = ?8, models = ?9, wire_api = ?10, env_key = ?11, requires_openai_auth = ?12, service_tier = ?13, experimental_bearer_token = ?14, supports_standalone_web_search = ?15, aws_profile = ?16, aws_region = ?17, reasoning_summary = ?18, verbosity = ?19, auth_command = ?20, auth_args = ?21, auth_timeout_ms = ?22, auth_refresh_interval_ms = ?23, auth_cwd = ?24, api_mode = ?25, max_tokens = ?26, api_keys_json = ?27, catalog_models = ?28, opencode_api_mode = ?29, opencode_model_configs = ?30, updated_at = ?31 WHERE name = ?32",
                     params![
                         &profile.provider,
                         &profile.api_url,
@@ -1148,6 +1253,13 @@ impl Database {
                         profile.codex.supports_standalone_web_search.map(|b| b as i64),
                         &profile.codex.aws_profile,
                         &profile.codex.aws_region,
+                        &profile.codex.reasoning_summary,
+                        &profile.codex.verbosity,
+                        &profile.codex.auth_command,
+                        auth_args_json,
+                        profile.codex.auth_timeout_ms,
+                        profile.codex.auth_refresh_interval_ms,
+                        &profile.codex.auth_cwd,
                         api_mode,
                         max_tokens,
                         api_keys_json,
@@ -1985,6 +2097,30 @@ mod tests {
     }
 
     #[test]
+    fn test_wire_api_chat_migrated_to_responses() -> Result<()> {
+        let db = Database::open(":memory:")?;
+        // 模拟迁移前的历史脏数据
+        db.conn.execute(
+            "INSERT INTO api_profiles (name, provider, api_url, api_key, target_app, wire_api, created_at, updated_at) VALUES ('old', 'p', 'https://x', 'sk', 'codex', 'chat', 1, 1)",
+            [],
+        )?;
+        db.conn.execute(
+            "DELETE FROM schema_migrations WHERE id = '2026-09-07-normalize-codex-wire-api'",
+            [],
+        )?;
+        db.migrate_normalize_codex_wire_api()?;
+        let wire: String = db.conn.query_row(
+            "SELECT wire_api FROM api_profiles WHERE name = 'old'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(wire, "responses");
+        // 幂等
+        db.migrate_normalize_codex_wire_api()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_nested_codex_fields_roundtrip() -> Result<()> {
         let db = Database::open(":memory:")?;
         let id = db.add_profile(&ApiProfile {
@@ -1995,12 +2131,19 @@ mod tests {
             target_app: Some(TargetApp::Codex),
             codex: CodexProfileFields {
                 reasoning_effort: Some("xhigh".into()),
+                reasoning_summary: Some("concise".into()),
+                verbosity: Some("medium".into()),
                 wire_api: Some("responses".into()),
                 env_key: Some("MY_CODEX_KEY".into()),
                 experimental_bearer_token: Some("sk-b".into()),
                 supports_standalone_web_search: Some(true),
                 aws_profile: Some("production".into()),
                 aws_region: Some("us-east-1".into()),
+                auth_command: Some("gcloud".into()),
+                auth_args: Some(vec!["auth".into(), "print-access-token".into()]),
+                auth_timeout_ms: Some(5000),
+                auth_refresh_interval_ms: Some(300000),
+                auth_cwd: Some("/tmp".into()),
                 catalog_models: Some(vec![crate::models::CodexCatalogModel {
                     slug: "gpt-5.6-sol".into(),
                     display_name: Some("GPT-5.6 Sol".into()),
@@ -2015,11 +2158,21 @@ mod tests {
         })?;
         let got = db.get_profile_by_id(id)?.unwrap();
         assert_eq!(got.codex.reasoning_effort.as_deref(), Some("xhigh"));
+        assert_eq!(got.codex.reasoning_summary.as_deref(), Some("concise"));
+        assert_eq!(got.codex.verbosity.as_deref(), Some("medium"));
         assert_eq!(got.codex.env_key.as_deref(), Some("MY_CODEX_KEY"));
         assert_eq!(got.codex.experimental_bearer_token.as_deref(), Some("sk-b"));
         assert_eq!(got.codex.supports_standalone_web_search, Some(true));
         assert_eq!(got.codex.aws_profile.as_deref(), Some("production"));
         assert_eq!(got.codex.aws_region.as_deref(), Some("us-east-1"));
+        assert_eq!(got.codex.auth_command.as_deref(), Some("gcloud"));
+        assert_eq!(
+            got.codex.auth_args,
+            Some(vec!["auth".into(), "print-access-token".into()])
+        );
+        assert_eq!(got.codex.auth_timeout_ms, Some(5000));
+        assert_eq!(got.codex.auth_refresh_interval_ms, Some(300000));
+        assert_eq!(got.codex.auth_cwd.as_deref(), Some("/tmp"));
         let cm = got.codex.catalog_models.as_ref().unwrap();
         assert_eq!(cm.len(), 1);
         assert_eq!(cm[0].slug, "gpt-5.6-sol");

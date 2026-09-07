@@ -326,24 +326,15 @@ fn resolve_probe_plan(
             success: SuccessCheck::AnthropicContent,
         }),
         "codex" => {
-            let wire = wire_api.unwrap_or("").trim().to_ascii_lowercase();
-            if matches!(wire.as_str(), "chat" | "chat_completions" | "openai-chat") {
-                Ok(ProbePlan {
-                    protocol: ProbeProtocol::ChatCompletions,
-                    endpoint: chat_completions_url_raw(api_url),
-                    headers: bearer_headers(codex_token),
-                    body: chat_body(model),
-                    success: SuccessCheck::ChatChoices,
-                })
-            } else {
-                Ok(ProbePlan {
-                    protocol: ProbeProtocol::Responses,
-                    endpoint: responses_url_raw(api_url),
-                    headers: bearer_headers(codex_token),
-                    body: responses_body(model),
-                    success: SuccessCheck::ResponsesOutputOrStatus,
-                })
-            }
+            // wire_api="chat" 已于 2026-02 被官方删除（discussion #7782），
+            // 探活固定走 Responses；历史存量由 validate/迁移指引清理。
+            Ok(ProbePlan {
+                protocol: ProbeProtocol::Responses,
+                endpoint: responses_url_raw(api_url),
+                headers: bearer_headers(codex_token),
+                body: responses_body(model),
+                success: SuccessCheck::ResponsesOutputOrStatus,
+            })
         }
         "pi" => {
             // Pi: protocol from api_mode/wire_api; official Google host → generateContent
@@ -852,7 +843,8 @@ mod tests {
     }
 
     #[test]
-    fn codex_chat_wire_uses_chat_completions() {
+    fn codex_legacy_chat_wire_still_probes_responses() {
+        // chat 已被官方删除：即使存量写着 chat，探活也走 Responses。
         let plan = resolve_probe_plan(
             "codex",
             "https://proxy.example/v1",
@@ -863,8 +855,8 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(plan.protocol, ProbeProtocol::ChatCompletions);
-        assert!(plan.endpoint.ends_with("/chat/completions"));
+        assert_eq!(plan.protocol, ProbeProtocol::Responses);
+        assert!(plan.endpoint.ends_with("/responses"));
     }
 
     #[test]

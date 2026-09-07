@@ -6,7 +6,7 @@ import type {
   TargetApp,
 } from '../../types';
 import { SUPPORTED_TOOLS } from '../../types';
-import { PROVIDER_PRESETS } from '../../lib/presets';
+import { CODEX_CATALOG_LEVELS, PROVIDER_PRESETS } from '../../lib/presets';
 import { cn } from '../../lib/utils';
 import { statusKeyFor } from '../../lib/contextWindow';
 import { Layers } from 'lucide-react';
@@ -172,7 +172,7 @@ export function normalizeCodexCatalogModels(
             : []
         ))
           .map((level) => level.trim().toLowerCase())
-          .filter((level) => ['minimal', 'low', 'medium', 'high', 'xhigh'].includes(level)),
+          .filter((level) => (CODEX_CATALOG_LEVELS as readonly string[]).includes(level)),
       )),
       supports_images: entry.supports_images || undefined,
       supports_tool_calls: entry.supports_tool_calls || undefined,

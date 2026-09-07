@@ -35,6 +35,14 @@ pub struct CodexCatalogModel {
 pub struct CodexProfileFields {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// 顶层 reasoning 摘要档位：auto / concise / detailed / none。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_summary: Option<String>,
+    /// 顶层 verbosity：low / medium / high。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verbosity: Option<String>,
+    /// 固定 responses（chat 已于 2026-02 被官方删除，见 Codex discussion #7782）。
+    /// 保留字段仅为兼容历史数据；写入时一律归一为 responses。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wire_api: Option<String>,
     /// Provider-scoped environment variable containing the API key.
@@ -49,6 +57,22 @@ pub struct CodexProfileFields {
     /// Custom provider capability required for standalone web search.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_standalone_web_search: Option<bool>,
+    /// 命令式 token：`[model_providers.<id>.auth]` 的 command。
+    /// 与 env_key / experimental_bearer_token / requires_openai_auth=true 互斥。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_command: Option<String>,
+    /// auth.command 的参数列表。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_args: Option<Vec<String>>,
+    /// auth 超时毫秒数（官方默认 5000）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_timeout_ms: Option<i64>,
+    /// auth token 刷新间隔毫秒数。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_refresh_interval_ms: Option<i64>,
+    /// auth.command 的工作目录（高级逃生口，多数情况留空）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_cwd: Option<String>,
     /// Built-in Amazon Bedrock provider override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aws_profile: Option<String>,
@@ -58,6 +82,44 @@ pub struct CodexProfileFields {
     /// 写入 `model_catalog.json` 的模型表；空/缺省 = 切换时不改本机 catalog
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_models: Option<Vec<CodexCatalogModel>>,
+}
+
+impl CodexProfileFields {
+    /// 是否使用命令式 token（`[model_providers.<id>.auth]`）。
+    pub fn has_command_auth(&self) -> bool {
+        self.auth_command
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_some()
+    }
+}
+
+/// 官方已删除的 chat 系 wire 取值（2026-02 起写 responses，见 Codex discussion #7782）。
+pub fn is_removed_chat_wire_api(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "chat" | "chat_completions" | "openai-chat"
+    )
+}
+
+/// 官方当前唯一支持的 wire 取值（含历史别名）。
+pub fn is_supported_wire_api(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "responses" | "openai-responses" | "openai_responses" | "codex_responses"
+    )
+}
+
+/// 外部读入的 wire 取值归一：responses 系 → "responses"，chat 系 → "responses"
+///（自愈，validate 会提示用户清理），未知值 → None（调用方默认 responses）。
+pub fn normalize_wire_api(value: Option<&str>) -> Option<String> {
+    let v = value.map(str::trim).filter(|s| !s.is_empty())?;
+    if is_supported_wire_api(v) || is_removed_chat_wire_api(v) {
+        Some("responses".to_string())
+    } else {
+        None
+    }
 }
 
 /// OpenCode 专用字段（JSON flatten → IPC 仍为顶层键）

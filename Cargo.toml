@@ -3,7 +3,7 @@ members = [".", "src-tauri"]
 
 [package]
 name = "switch-api"
-version = "0.1.9"
+version = "0.2.0"
 edition = "2021"
 authors = ["Switch API Team"]
 description = "Helio 桌面应用 API 配置管理核心库"
@@ -15,7 +15,6 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = "1.0"
-thiserror = "1.0"
 
 # Database
 rusqlite = { version = "0.32", features = ["bundled"] }

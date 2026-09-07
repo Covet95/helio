@@ -10,7 +10,7 @@ import type {
 import { SUPPORTED_TOOLS } from '../../types';
 import { Button } from '../../components/common/Button';
 import { Modal, Field } from '../../components/common/Modal';
-import { PROVIDER_PRESETS, REASONING_LEVELS } from '../../lib/presets';
+import { PROVIDER_PRESETS, REASONING_LEVELS, SERVICE_TIERS, REASONING_SUMMARIES, VERBOSITY_LEVELS, CODEX_CATALOG_LEVELS } from '../../lib/presets';
 import { cn, maskApiKey, humanizeError } from '../../lib/utils';
 import { tauriApi } from '../../lib/tauri';
 import {
@@ -94,6 +94,7 @@ export function ProfileModal({
   const activeKey =
     keys.find((k) => k.is_active)?.key?.trim() || form.api_key.trim();
   const isBedrock = tool === 'codex' && form.provider.trim().toLowerCase() === 'amazon-bedrock';
+  const usesAuthCommand = tool === 'codex' && Boolean(form.auth_command?.trim());
 
   const setKeys = (next: ApiKeyEntry[]) => {
     setForm((f) => withActiveKey(f, next));
@@ -108,9 +109,10 @@ export function ProfileModal({
     const hasDiscoveryCredential =
       Boolean(activeKey)
       || (tool === 'codex' && Boolean(form.env_key?.trim()))
-      || (tool === 'codex' && Boolean(form.experimental_bearer_token?.trim()));
+      || (tool === 'codex' && Boolean(form.experimental_bearer_token?.trim()))
+      || (tool === 'codex' && Boolean(form.auth_command?.trim()));
     if (!form.api_url.trim() || !hasDiscoveryCredential) {
-      setModelErr('先填 API URL 和 API Key、环境变量名或 Bearer Token');
+      setModelErr('先填 API URL 和 API Key、环境变量名、Bearer Token 或 Auth 命令');
       return;
     }
     setLoadingModels(true);
@@ -122,11 +124,11 @@ export function ProfileModal({
         apiUrl: form.api_url,
         apiKey: activeKey,
         envKey: form.env_key,
-        wireApi: form.wire_api,
         apiMode: tool === 'opencode' ? form.opencode_api_mode : form.api_mode,
         experimentalBearerToken: form.experimental_bearer_token,
         awsProfile: form.aws_profile,
         awsRegion: form.aws_region,
+        hasCommandAuth: usesAuthCommand || undefined,
       });
       setModels(list);
       if (list.length === 0) setModelErr('该端点没有返回模型');
@@ -143,7 +145,13 @@ export function ProfileModal({
     if (isBedrock) {
       throw new Error('Amazon Bedrock 使用 Codex 内置 AWS 认证，Helio 无法执行 HTTP 模型探活');
     }
-    if (!form.api_url.trim() || !apiKey.trim()) {
+    // Bearer 模式：活跃 key 为空时用 bearer token 探活。
+    const effectiveKey = apiKey.trim()
+      || (tool === 'codex' ? form.experimental_bearer_token?.trim() || '' : '');
+    if (!form.api_url.trim() || !effectiveKey) {
+      if (tool === 'codex' && form.auth_command?.trim()) {
+        throw new Error('该档案使用 auth 命令获取 token，Helio 不执行外部命令，无法探活');
+      }
       throw new Error('先填 API URL 和 API Key');
     }
     if (!model) {
@@ -152,13 +160,14 @@ export function ProfileModal({
     return tauriApi.testModel({
       targetApp: tool,
       apiUrl: form.api_url,
-      apiKey,
+      apiKey: effectiveKey,
       model,
       envKey: form.env_key,
       wireApi: form.wire_api,
       apiMode: tool === 'opencode' ? form.opencode_api_mode : form.api_mode,
       experimentalBearerToken: form.experimental_bearer_token,
       keyLabel,
+      hasCommandAuth: usesAuthCommand || undefined,
     });
   };
 
@@ -263,9 +272,15 @@ export function ProfileModal({
   const submit = () => {
     const normalized = withActiveKey(form, ensureKeyPool(form));
     const usesCodexEnv = tool === 'codex' && Boolean(normalized.env_key?.trim());
+    const usesAuthCmd = tool === 'codex' && Boolean(normalized.auth_command?.trim());
+    const usesBearer = tool === 'codex' && Boolean(normalized.experimental_bearer_token?.trim());
     const usesBedrock = tool === 'codex' && normalized.provider.trim().toLowerCase() === 'amazon-bedrock';
-    if (!normalized.name.trim() || !normalized.provider.trim() || (!usesBedrock && (!normalized.api_url.trim() || (!usesCodexEnv && !normalized.api_key.trim())))) {
-      setFormErr('请填写名称、Provider、API URL，并提供 API Key 或 Codex 环境变量名');
+    if (!normalized.name.trim() || !normalized.provider.trim() || (!usesBedrock && (!normalized.api_url.trim() || (!usesCodexEnv && !usesAuthCmd && !usesBearer && !normalized.api_key.trim())))) {
+      setFormErr('请填写名称、Provider、API URL，并提供 API Key、环境变量名、Bearer Token 或 Auth 命令');
+      return;
+    }
+    if (usesCodexEnv && usesBearer) {
+      setFormErr('Codex 环境变量与 Bearer Token 请只保留一个（与 Auth 命令也互斥）');
       return;
     }
     setFormErr('');
@@ -278,12 +293,37 @@ export function ProfileModal({
     const model_configs = tool === 'opencode'
       ? normalizeOpenCodeModelConfigs(normalized.model_configs)
       : undefined;
+    // Codex wire 归一：responses 别名与 chat 系历史值 → responses，未知值 → 不保存（后端默认 responses）。
+    let wire_api = normalized.wire_api;
+    if (tool === 'codex' && wire_api?.trim()) {
+      const w = wire_api.trim().toLowerCase();
+      wire_api = [
+        'responses', 'openai-responses', 'openai_responses', 'codex_responses',
+        'chat', 'chat_completions', 'openai-chat',
+      ].includes(w) ? 'responses' : undefined;
+    } else if (tool !== 'codex') {
+      wire_api = undefined;
+    }
+    // auth 命令与静态凭据互斥：以 auth 命令为准，清掉冲突字段。
+    const auth_args = usesAuthCmd
+      ? (normalized.auth_args || []).map((a) => a.trim()).filter(Boolean)
+      : undefined;
+    const positiveOrUndefined = (n: unknown) =>
+      typeof n === 'number' && Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
     onSave({
       ...normalized,
       api_url: usesBedrock ? '' : normalized.api_url,
       api_key: usesBedrock ? '' : normalized.api_key,
       api_keys: usesBedrock ? undefined : normalized.api_keys,
-      env_key: usesBedrock ? undefined : normalized.env_key,
+      wire_api,
+      env_key: (usesBedrock || usesAuthCmd) ? undefined : normalized.env_key,
+      experimental_bearer_token: usesAuthCmd ? undefined : normalized.experimental_bearer_token,
+      requires_openai_auth: usesAuthCmd ? undefined : normalized.requires_openai_auth,
+      auth_command: usesAuthCmd ? normalized.auth_command?.trim() || undefined : undefined,
+      auth_args: auth_args?.length ? auth_args : undefined,
+      auth_timeout_ms: usesAuthCmd ? positiveOrUndefined(normalized.auth_timeout_ms) : undefined,
+      auth_refresh_interval_ms: usesAuthCmd ? positiveOrUndefined(normalized.auth_refresh_interval_ms) : undefined,
+      auth_cwd: usesAuthCmd ? normalized.auth_cwd?.trim() || undefined : undefined,
       supports_standalone_web_search: usesBedrock
         ? undefined
         : normalized.supports_standalone_web_search || undefined,
@@ -391,7 +431,7 @@ export function ProfileModal({
                 label="API Key"
                 type="password"
                 value={activeKey}
-                required={tool !== 'codex' || !form.env_key?.trim()}
+                required={tool !== 'codex' || (!form.env_key?.trim() && !form.auth_command?.trim() && !form.experimental_bearer_token?.trim())}
                 mono
                 onChange={(e) => {
                   const v = e.target.value;
@@ -500,6 +540,12 @@ export function ProfileModal({
             </div>
           ) : null}
 
+          {usesAuthCommand && !isBedrock && (
+            <div className="text-[11px] text-ink-faint">
+              Auth 命令模式下 API Key 不会被写入配置，仅保留为备注。
+            </div>
+          )}
+
           {!isBedrock && (
           <div className="flex flex-wrap items-center gap-2">
             <Button type="button" variant="secondary" size="sm" onClick={testConnection} disabled={checkingApi}>
@@ -510,7 +556,8 @@ export function ProfileModal({
                 测试全部 Key
               </Button>
             )}
-            {multiKeyMode && (
+            {/* Failover 操作库里档案的 key，新建未入库时点它必报错，故仅编辑时显示 */}
+            {multiKeyMode && initialProfile && (
               <Button type="button" variant="ghost" size="sm" onClick={failoverKeys} disabled={checkingApi}>
                 Failover
               </Button>
@@ -974,7 +1021,7 @@ export function ProfileModal({
                         </div>
                         <div className="flex flex-wrap items-center gap-2 text-[11px] text-ink-dim">
                           <span>推理等级</span>
-                          {['minimal', 'low', 'medium', 'high', 'xhigh'].map((level) => {
+                          {CODEX_CATALOG_LEVELS.map((level) => {
                             const levels = entry.reasoning_levels
                               ?? (
                                 entry.supports_reasoning
@@ -1107,7 +1154,7 @@ export function ProfileModal({
               )}
 
               {tool === 'codex' && (
-                <div>
+                <div className="space-y-2">
                   <span className="block mb-1.5 text-[12px] font-medium text-ink-dim">推理强度</span>
                   <div className="flex gap-1.5">
                     {REASONING_LEVELS.map((r) => (
@@ -1117,6 +1164,40 @@ export function ProfileModal({
                         onClick={() => setForm({ ...form, reasoning_effort: r.value || undefined })}
                         className={`flex-1 rounded-md px-2 py-1.5 text-[12px] font-medium border transition-all ${
                           (form.reasoning_effort || '') === r.value
+                            ? 'border-accent text-accent bg-accent/8'
+                            : 'border-line text-ink-dim hover:border-line-strong'
+                        }`}
+                      >
+                        {r.label}
+                      </button>
+                    ))}
+                  </div>
+                  <span className="block mb-1.5 text-[12px] font-medium text-ink-dim">推理摘要（model_reasoning_summary）</span>
+                  <div className="flex gap-1.5">
+                    {REASONING_SUMMARIES.map((r) => (
+                      <button
+                        key={r.value}
+                        type="button"
+                        onClick={() => setForm({ ...form, reasoning_summary: r.value || undefined })}
+                        className={`flex-1 rounded-md px-2 py-1.5 text-[12px] font-medium border transition-all ${
+                          (form.reasoning_summary || '') === r.value
+                            ? 'border-accent text-accent bg-accent/8'
+                            : 'border-line text-ink-dim hover:border-line-strong'
+                        }`}
+                      >
+                        {r.label}
+                      </button>
+                    ))}
+                  </div>
+                  <span className="block mb-1.5 text-[12px] font-medium text-ink-dim">Verbosity（model_verbosity）</span>
+                  <div className="flex gap-1.5">
+                    {VERBOSITY_LEVELS.map((r) => (
+                      <button
+                        key={r.value}
+                        type="button"
+                        onClick={() => setForm({ ...form, verbosity: r.value || undefined })}
+                        className={`flex-1 rounded-md px-2 py-1.5 text-[12px] font-medium border transition-all ${
+                          (form.verbosity || '') === r.value
                             ? 'border-accent text-accent bg-accent/8'
                             : 'border-line text-ink-dim hover:border-line-strong'
                         }`}
@@ -1295,16 +1376,105 @@ export function ProfileModal({
                 </label>
               )}
 
-              {tool === 'codex' && !isBedrock && (
+              {tool === 'codex' && !isBedrock && !usesAuthCommand && (
                 <Field label="API Key 环境变量" value={form.env_key || ''} mono
                        onChange={(e) => setForm({ ...form, env_key: e.target.value.trim() || undefined })}
                        placeholder="留空则由 Helio 安全写入 auth.json；例如 OPENAI_API_KEY" />
               )}
 
+              {tool === 'codex' && !isBedrock && !usesAuthCommand && (
+                <Field label="Bearer Token" type="password" value={form.experimental_bearer_token || ''} mono
+                       onChange={(e) => setForm({ ...form, experimental_bearer_token: e.target.value.trim() || undefined })}
+                       placeholder="写入 provider 的 experimental_bearer_token（不推荐，能用环境变量就用环境变量）" />
+              )}
+
+              {tool === 'codex' && !isBedrock && !usesAuthCommand && (
+                <div>
+                  <span className="block mb-1.5 text-[12px] font-medium text-ink-dim">OpenAI 鉴权（requires_openai_auth）</span>
+                  <div className="flex gap-1.5">
+                    {[
+                      { value: undefined as boolean | undefined, label: '默认' },
+                      { value: true as boolean | undefined, label: '是' },
+                      { value: false as boolean | undefined, label: '否' },
+                    ].map((o) => (
+                      <button
+                        key={o.label}
+                        type="button"
+                        onClick={() => setForm({ ...form, requires_openai_auth: o.value })}
+                        className={`flex-1 rounded-md px-2 py-1.5 text-[12px] font-medium border transition-all ${
+                          form.requires_openai_auth === o.value
+                            ? 'border-accent text-accent bg-accent/8'
+                            : 'border-line text-ink-dim hover:border-line-strong'
+                        }`}
+                      >
+                        {o.label}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="mt-1 text-[11px] text-ink-faint">
+                    默认 = 自动推导：环境变量 / Bearer 模式为否，auth.json 写 key 模式为是。
+                  </div>
+                </div>
+              )}
+
+              {tool === 'codex' && !isBedrock && (
+                <div className="space-y-2">
+                  <div className="text-[12px] font-medium text-ink-dim">
+                    Auth 命令 <span className="font-normal text-ink-faint">（命令式 token，写入 [model_providers] auth 块；与环境变量 / API Key 互斥；Helio 不执行该命令）</span>
+                  </div>
+                  <Field label="Command" value={form.auth_command || ''} mono
+                         onChange={(e) => setForm({ ...form, auth_command: e.target.value.trim() || undefined })}
+                         placeholder="例如 gcloud auth print-access-token" />
+                  {usesAuthCommand && (
+                    <>
+                      <Field label="Args（空格分隔）" value={(form.auth_args || []).join(' ')} mono
+                             onChange={(e) => {
+                               const args = e.target.value.split(/\s+/).map((a) => a.trim()).filter(Boolean);
+                               setForm({ ...form, auth_args: args.length ? args : undefined });
+                             }}
+                             placeholder="例如 auth print-access-token" />
+                      <div className="grid grid-cols-3 gap-2">
+                        <Field label="超时 ms" value={form.auth_timeout_ms != null ? String(form.auth_timeout_ms) : ''} mono
+                               onChange={(e) => {
+                                 const n = Number(e.target.value.trim());
+                                 setForm({ ...form, auth_timeout_ms: e.target.value.trim() && Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined });
+                               }}
+                               placeholder="5000" />
+                        <Field label="刷新间隔 ms" value={form.auth_refresh_interval_ms != null ? String(form.auth_refresh_interval_ms) : ''} mono
+                               onChange={(e) => {
+                                 const n = Number(e.target.value.trim());
+                                 setForm({ ...form, auth_refresh_interval_ms: e.target.value.trim() && Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined });
+                               }}
+                               placeholder="300000" />
+                        <Field label="工作目录" value={form.auth_cwd || ''} mono
+                               onChange={(e) => setForm({ ...form, auth_cwd: e.target.value.trim() || undefined })}
+                               placeholder="可选" />
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+
               {tool === 'codex' && (
-                <Field label="Service Tier" value={form.service_tier || ''} mono
-                       onChange={(e) => setForm({ ...form, service_tier: e.target.value || undefined })}
-                       placeholder="留空 / fast" />
+                <div>
+                  <span className="block mb-1.5 text-[12px] font-medium text-ink-dim">Service Tier</span>
+                  <div className="flex gap-1.5">
+                    {SERVICE_TIERS.map((r) => (
+                      <button
+                        key={r.value}
+                        type="button"
+                        onClick={() => setForm({ ...form, service_tier: r.value || undefined })}
+                        className={`flex-1 rounded-md px-2 py-1.5 text-[12px] font-medium border transition-all ${
+                          (form.service_tier || '') === r.value
+                            ? 'border-accent text-accent bg-accent/8'
+                            : 'border-line text-ink-dim hover:border-line-strong'
+                        }`}
+                      >
+                        {r.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               )}
 
               {/* Claude Code / Codex only — not shared with Hermes/OpenClaw */}

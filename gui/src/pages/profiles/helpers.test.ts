@@ -61,7 +61,7 @@ describe('profile helpers', () => {
       {
         slug: 'proxy-model',
         supports_reasoning: true,
-        reasoning_levels: ['XHIGH', 'low', 'xhigh', 'unsupported'],
+        reasoning_levels: ['XHIGH', 'low', 'xhigh', 'max', 'ultra', 'none', 'unsupported'],
         supports_web_search: true,
       },
       {
@@ -72,7 +72,7 @@ describe('profile helpers', () => {
     ])).toEqual([
       {
         slug: 'proxy-model',
-        reasoning_levels: ['xhigh', 'low'],
+        reasoning_levels: ['xhigh', 'low', 'max', 'ultra', 'none'],
         supports_web_search: true,
       },
       {
@@ -130,9 +130,9 @@ describe('profile helpers', () => {
       updated_at: 20,
       api_keys: [{ ...base.api_keys[0], id: 'generated-b', last_probe_ok: false, last_probed_at: 99 }],
     };
-    const chat = { ...base, name: 'chat', wire_api: 'chat' };
+    const flex = { ...base, name: 'flex', service_tier: 'flex' };
 
     expect(profileConfigFingerprint(base)).toBe(profileConfigFingerprint(same));
-    expect(profileConfigFingerprint(base)).not.toBe(profileConfigFingerprint(chat));
+    expect(profileConfigFingerprint(base)).not.toBe(profileConfigFingerprint(flex));
   });
 });

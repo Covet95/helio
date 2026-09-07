@@ -285,34 +285,6 @@ fn copy_text_with_linux_clipboard(text: &str) -> Result<(), String> {
     Err(format!("Clipboard copy failed: {last_err}"))
 }
 
-// 新增：扫描本地 MCP 配置
-#[tauri::command]
-pub async fn scan_local_mcp_servers(
-    target_app: String,
-) -> Result<std::collections::HashMap<String, McpServerConfig>, String> {
-    let target = TargetApp::parse(&target_app)
-        .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
-
-    use switch_api::adapters::get_adapter;
-    let adapter = get_adapter(target);
-    // MCP 来源因工具而异（Claude 在 ~/.claude.json），交给适配器决定
-    let mcp_servers = adapter
-        .read_mcp_servers_raw()
-        .map_err(|e| format!("Failed to read MCP servers: {}", e))?
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default();
-
-    Ok(mcp_servers)
-}
-
-// 新增：扫描本地 Skills
-#[tauri::command]
-pub async fn scan_local_skills(target_app: String) -> Result<Vec<String>, String> {
-    let target = TargetApp::parse(&target_app)
-        .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
-    read_local_skills(target)
-}
-
 // 新增：获取完整的本地配置信息
 #[tauri::command]
 pub async fn get_local_config_info(target_app: String) -> Result<LocalConfigInfo, String> {
@@ -431,19 +403,6 @@ pub async fn delete_legacy_profile(
     let _write_guard = state.config_lock.lock().map_err(|e| e.to_string())?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.delete_legacy_profile(profile_id)
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn get_profile(
-    name: String,
-    target_app: String,
-    state: State<'_, AppState>,
-) -> Result<ApiProfile, String> {
-    let target = TargetApp::parse(&target_app)
-        .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.get_profile_by_name_and_target(&name, target)
         .map_err(|e| e.to_string())
 }
 
@@ -634,63 +593,6 @@ pub async fn switch_profile(
     Ok(())
 }
 
-#[tauri::command]
-pub async fn get_shared_config(
-    target_app: String,
-    state: State<'_, AppState>,
-) -> Result<Option<serde_json::Value>, String> {
-    let target = TargetApp::parse(&target_app)
-        .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
-
-    // 先查数据库
-    let from_db = {
-        let db = state.db.lock().map_err(|e| e.to_string())?;
-        db.get_shared_config(target)
-            .map(|opt| opt.map(|sc| sc.config))
-            .map_err(|e| e.to_string())?
-    };
-
-    // 数据库里有非空配置则返回；否则回退到读取实时配置文件的共享部分
-    if let Some(cfg) = &from_db {
-        let is_empty = cfg.as_object().map(|o| o.is_empty()).unwrap_or(false);
-        if !is_empty {
-            return Ok(from_db);
-        }
-    }
-
-    // 回退：从实时配置文件提取共享配置（让用户能看到当前工具的真实配置）
-    use switch_api::adapters::get_adapter;
-    let adapter = get_adapter(target);
-    if adapter.config_path().exists() {
-        match adapter.read_config() {
-            Ok(live) => {
-                let shared = adapter.extract_shared_config(&live);
-                return Ok(Some(shared));
-            }
-            Err(_) => return Ok(from_db),
-        }
-    }
-
-    Ok(from_db)
-}
-
-#[tauri::command]
-pub async fn save_shared_config(
-    target_app: String,
-    config: serde_json::Value,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
-    let target = TargetApp::parse(&target_app)
-        .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
-
-    // 与切换/导入互斥，避免写 shared_config 时被 replace live 库打断。
-    let _write_guard = state.config_lock.lock().map_err(|e| e.to_string())?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-
-    db.save_shared_config(target, config)
-        .map_err(|e| e.to_string())
-}
-
 #[derive(Debug, Serialize)]
 pub struct ConfigBackupInfo {
     pub path: String,
@@ -807,11 +709,50 @@ fn sync_codex_profile_from_raw_config(profile: &ApiProfile, config: &toml::Value
         .and_then(|value| value.as_integer())
         .map(|value| value >= 1_000_000);
     synced.codex.reasoning_effort = toml_string_field(Some(config), "model_reasoning_effort");
+    synced.codex.reasoning_summary = toml_string_field(Some(config), "model_reasoning_summary");
+    synced.codex.verbosity = toml_string_field(Some(config), "model_verbosity");
     synced.codex.service_tier = toml_string_field(Some(config), "service_tier");
-    synced.codex.wire_api = toml_string_field(provider, "wire_api");
+    synced.codex.wire_api = toml_string_field(provider, "wire_api")
+        .and_then(|w| switch_api::models::normalize_wire_api(Some(&w)).or(Some(w)));
     synced.codex.env_key = toml_string_field(provider, "env_key");
     synced.codex.experimental_bearer_token =
         toml_string_field(provider, "experimental_bearer_token");
+    let auth_table = provider
+        .and_then(|value| value.as_table())
+        .and_then(|table| table.get("auth"))
+        .and_then(|value| value.as_table());
+    synced.codex.auth_command = auth_table
+        .and_then(|table| table.get("command"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    synced.codex.auth_args = auth_table
+        .and_then(|table| table.get("args"))
+        .and_then(|value| value.as_array())
+        .map(|args| {
+            args.iter()
+                .filter_map(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .filter(|args| !args.is_empty());
+    synced.codex.auth_timeout_ms = auth_table
+        .and_then(|table| table.get("timeout_ms"))
+        .and_then(|value| value.as_integer())
+        .filter(|value| *value > 0);
+    synced.codex.auth_refresh_interval_ms = auth_table
+        .and_then(|table| table.get("refresh_interval_ms"))
+        .and_then(|value| value.as_integer())
+        .filter(|value| *value > 0);
+    synced.codex.auth_cwd = auth_table
+        .and_then(|table| table.get("cwd"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
     synced.codex.requires_openai_auth = provider
         .and_then(|value| value.as_table())
         .and_then(|table| table.get("requires_openai_auth"))
@@ -1045,6 +986,8 @@ pub struct ScannedApi {
     /// Claude Code 专用：Sonnet/Opus/Fable/Haiku 角色映射（从 ANTHROPIC_DEFAULT_*_MODEL 反向重建）
     pub model_mapping: Option<std::collections::HashMap<String, String>>,
     pub reasoning_effort: Option<String>,
+    pub reasoning_summary: Option<String>,
+    pub verbosity: Option<String>,
     pub context_1m: Option<bool>,
     pub wire_api: Option<String>,
     pub env_key: Option<String>,
@@ -1054,6 +997,11 @@ pub struct ScannedApi {
     pub supports_standalone_web_search: Option<bool>,
     pub aws_profile: Option<String>,
     pub aws_region: Option<String>,
+    pub auth_command: Option<String>,
+    pub auth_args: Option<Vec<String>>,
+    pub auth_timeout_ms: Option<i64>,
+    pub auth_refresh_interval_ms: Option<i64>,
+    pub auth_cwd: Option<String>,
     /// Hermes / OpenClaw 协议模式（独立字段，不再借用 wire_api）
     pub api_mode: Option<String>,
     /// OpenCode provider SDK mode.
@@ -1102,6 +1050,11 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
     let mut supports_standalone_web_search: Option<bool> = None;
     let mut aws_profile: Option<String> = None;
     let mut aws_region: Option<String> = None;
+    let mut auth_command: Option<String> = None;
+    let mut auth_args: Option<Vec<String>> = None;
+    let mut auth_timeout_ms: Option<i64> = None;
+    let mut auth_refresh_interval_ms: Option<i64> = None;
+    let mut auth_cwd: Option<String> = None;
     // Claude Code 的默认模型 / 角色映射（仅 ClaudeCode 用到）
     let mut claude_model: Option<String> = None;
     let mut claude_mapping: Option<std::collections::HashMap<String, String>> = None;
@@ -1161,10 +1114,11 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
                         if key.is_empty() && !env_key.is_empty() {
                             key = std::env::var(&env_key).unwrap_or_default();
                         }
-                        // 回带 provider 块内的协议字段，供导入还原
+                        // 回带 provider 块内的协议字段，供导入还原；
+                        // chat 系历史值归一为 responses（官方已删除 chat）。
                         let w = str_field(b, "wire_api");
                         if !w.trim().is_empty() {
-                            wire_api = Some(w);
+                            wire_api = switch_api::models::normalize_wire_api(Some(&w)).or(Some(w));
                         }
                         requires_openai_auth =
                             b.get("requires_openai_auth").and_then(|v| v.as_bool());
@@ -1174,6 +1128,47 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
                         let bearer = str_field(b, "experimental_bearer_token");
                         if !bearer.trim().is_empty() {
                             experimental_bearer_token = Some(bearer);
+                        }
+                        if let Some(auth) = b.get("auth").and_then(|v| v.as_object()) {
+                            let command = auth
+                                .get("command")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .trim();
+                            if !command.is_empty() {
+                                auth_command = Some(command.to_string());
+                            }
+                            let args = auth
+                                .get("args")
+                                .and_then(|v| v.as_array())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|v| v.as_str())
+                                        .map(str::trim)
+                                        .filter(|s| !s.is_empty())
+                                        .map(str::to_string)
+                                        .collect::<Vec<_>>()
+                                })
+                                .filter(|args| !args.is_empty());
+                            if args.is_some() {
+                                auth_args = args;
+                            }
+                            auth_timeout_ms = auth
+                                .get("timeout_ms")
+                                .and_then(|v| v.as_i64())
+                                .filter(|v| *v > 0);
+                            auth_refresh_interval_ms = auth
+                                .get("refresh_interval_ms")
+                                .and_then(|v| v.as_i64())
+                                .filter(|v| *v > 0);
+                            let cwd = auth
+                                .get("cwd")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .trim();
+                            if !cwd.is_empty() {
+                                auth_cwd = Some(cwd.to_string());
+                            }
                         }
                     }
                 }
@@ -1549,6 +1544,8 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
         },
         model_mapping: claude_mapping,
         reasoning_effort: codex_string_field(target, &cfg, "model_reasoning_effort"),
+        reasoning_summary: codex_string_field(target, &cfg, "model_reasoning_summary"),
+        verbosity: codex_string_field(target, &cfg, "model_verbosity"),
         context_1m: resolved_context_1m,
         wire_api,
         env_key: codex_env_key,
@@ -1558,6 +1555,11 @@ pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
         supports_standalone_web_search,
         aws_profile,
         aws_region,
+        auth_command,
+        auth_args,
+        auth_timeout_ms,
+        auth_refresh_interval_ms,
+        auth_cwd,
         api_mode,
         opencode_api_mode,
         opencode_models,

@@ -75,11 +75,11 @@ export const tauriApi = {
     apiUrl: string;
     apiKey: string;
     envKey?: string;
-    wireApi?: string;
     apiMode?: string;
     experimentalBearerToken?: string;
     awsProfile?: string;
     awsRegion?: string;
+    hasCommandAuth?: boolean;
   }) =>
     command<FetchedModel[]>('fetch_models', { request: args }),
 
@@ -93,6 +93,7 @@ export const tauriApi = {
     apiMode?: string;
     experimentalBearerToken?: string;
     keyLabel?: string;
+    hasCommandAuth?: boolean;
   }) =>
     command<ModelTestResult>('test_model', {
       request: args,
@@ -161,6 +162,8 @@ export const tauriApi = {
       model?: string;
       model_mapping?: Record<string, string>;
       reasoning_effort?: string;
+      reasoning_summary?: string;
+      verbosity?: string;
       context_1m?: boolean;
       wire_api?: string;
       env_key?: string;
@@ -170,6 +173,11 @@ export const tauriApi = {
       supports_standalone_web_search?: boolean;
       aws_profile?: string;
       aws_region?: string;
+      auth_command?: string;
+      auth_args?: string[];
+      auth_timeout_ms?: number;
+      auth_refresh_interval_ms?: number;
+      auth_cwd?: string;
       api_mode?: string;
       opencode_api_mode?: string;
       opencode_models?: string[];
@@ -184,6 +192,8 @@ export const tauriApi = {
       model: undefined,
       model_mapping: undefined,
       reasoning_effort: undefined,
+      reasoning_summary: undefined,
+      verbosity: undefined,
       context_1m: undefined,
       wire_api: undefined,
       env_key: undefined,
@@ -193,6 +203,11 @@ export const tauriApi = {
       supports_standalone_web_search: undefined,
       aws_profile: undefined,
       aws_region: undefined,
+      auth_command: undefined,
+      auth_args: undefined,
+      auth_timeout_ms: undefined,
+      auth_refresh_interval_ms: undefined,
+      auth_cwd: undefined,
       api_mode: undefined,
       opencode_api_mode: undefined,
       opencode_models: undefined,

@@ -1,5 +1,7 @@
 use super::{backup, ConfigAdapter};
-use crate::models::{ApiProfile, CodexCatalogModel};
+use crate::models::{
+    is_removed_chat_wire_api, is_supported_wire_api, ApiProfile, CodexCatalogModel,
+};
 use crate::utils::secure_fs::{atomic_write_private, ensure_private_dir};
 use anyhow::{Context, Result};
 use std::fs;
@@ -8,8 +10,17 @@ use std::path::PathBuf;
 /// 非 1M 时 catalog 条目默认上下文（与常见 Codex 内置条目对齐）
 const CATALOG_CONTEXT_STANDARD: i64 = 272_000;
 const CATALOG_CONTEXT_1M: i64 = 1_000_000;
-const LEGACY_REASONING_LEVELS: &[&str] = &["minimal", "low", "medium", "high", "xhigh"];
 const CODEX_REASONING_LEVELS: &[&str] = &["minimal", "low", "medium", "high", "xhigh"];
+/// Catalog（model_catalog.json）侧允许的档位：顶层 5 档之外，
+/// 官方新模型（如 gpt-5.6-sol）还在 catalog 里声明 none/max/ultra，
+/// 这里透传用户显式声明，顶层 model_reasoning_effort 仍只认 5 档。
+const CODEX_CATALOG_REASONING_LEVELS: &[&str] = &[
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+];
+/// 官方 service_tier 取值：priority / flex，fast 为 legacy 别名（仍可用）。
+const CODEX_SERVICE_TIERS: &[&str] = &["fast", "flex", "priority"];
+const CODEX_REASONING_SUMMARIES: &[&str] = &["auto", "concise", "detailed", "none"];
+const CODEX_VERBOSITY_LEVELS: &[&str] = &["low", "medium", "high"];
 
 const FALLBACK_BASE_INSTRUCTIONS: &str = "You are Codex, a coding agent based on GPT-5. You and the user share one workspace, and your job is to collaborate with them until their goal is genuinely handled.";
 
@@ -44,26 +55,22 @@ impl CodexAdapter {
     }
 
     fn normalized_reasoning_levels(entry: &CodexCatalogModel) -> Vec<String> {
-        let source: Vec<String> = entry
-            .reasoning_levels
-            .clone()
-            .or_else(|| {
-                entry.supports_reasoning.and_then(|enabled| {
-                    enabled.then(|| {
-                        LEGACY_REASONING_LEVELS
-                            .iter()
-                            .map(|level| (*level).to_string())
-                            .collect()
-                    })
-                })
-            })
-            .unwrap_or_default();
-        let mut seen = std::collections::HashSet::new();
-        source
-            .into_iter()
-            .map(|level| level.trim().to_ascii_lowercase())
-            .filter(|level| CODEX_REASONING_LEVELS.contains(&level.as_str()))
-            .filter(|level| seen.insert(level.clone()))
+        // 显式声明按 catalog 八档过滤；legacy 布尔沿用经典 5 档（不虚增 max/ultra/none）。
+        if let Some(declared) = entry.reasoning_levels.as_ref() {
+            let mut seen = std::collections::HashSet::new();
+            return declared
+                .iter()
+                .map(|level| level.trim().to_ascii_lowercase())
+                .filter(|level| CODEX_CATALOG_REASONING_LEVELS.contains(&level.as_str()))
+                .filter(|level| seen.insert(level.clone()))
+                .collect();
+        }
+        if entry.supports_reasoning != Some(true) {
+            return Vec::new();
+        }
+        CODEX_REASONING_LEVELS
+            .iter()
+            .map(|level| (*level).to_string())
             .collect()
     }
 
@@ -169,6 +176,12 @@ impl CodexAdapter {
                     .unwrap_or(default_context);
                 let reasoning_levels = Self::normalized_reasoning_levels(e);
                 let supports_reasoning = !reasoning_levels.is_empty();
+                // 默认档取第一个真实档位（跳过 none）；无真实档位则写 "none"。
+                let default_reasoning_level = reasoning_levels
+                    .iter()
+                    .find(|level| level.as_str() != "none")
+                    .cloned()
+                    .unwrap_or_else(|| "none".to_string());
                 let supports_images = e.supports_images.unwrap_or(false);
                 let supports_tool_calls = e.supports_tool_calls.unwrap_or(false);
                 let supports_web_search = e.supports_web_search.unwrap_or(false);
@@ -192,16 +205,9 @@ impl CodexAdapter {
                     "slug": e.slug,
                     "display_name": display,
                     "description": format!("Custom {} model via proxy provider.", e.slug),
-                    "default_reasoning_level": if supports_reasoning {
-                        Self::normalized_reasoning_levels(e)
-                            .first()
-                            .cloned()
-                            .unwrap_or_else(|| "medium".to_string())
-                    } else {
-                        "none".to_string()
-                    },
+                    "default_reasoning_level": default_reasoning_level,
                     "supported_reasoning_levels": reasoning_levels,
-                    "shell_type": "shell_command",
+                    "shell_type": "unified_exec",
                     "visibility": "list",
                     "supported_in_api": true,
                     "priority": i,
@@ -365,8 +371,8 @@ impl ConfigAdapter for CodexAdapter {
 
         // Codex 的 API key 存在独立的 ~/.codex/auth.json，不在 config.toml 里。
         // config.toml 里由 Profile 管理的端点/凭据信息是各 provider 的
-        // base_url、env_key 和 experimental_bearer_token。它们不属于 shared
-        // 配置，但协议字段仍要保留，切换时再由 Profile 还原。
+        // base_url、env_key、experimental_bearer_token 和 auth（命令式 token）。
+        // 它们不属于 shared 配置，但协议字段仍要保留，切换时再由 Profile 还原。
         if let Some(obj) = shared.as_object_mut() {
             // 兼容历史版本误写入的顶层 api_key
             obj.remove("api_key");
@@ -386,6 +392,9 @@ impl ConfigAdapter for CodexAdapter {
                     if let Some(provider) = provider.as_object_mut() {
                         provider.remove("api_key");
                         provider.remove("experimental_bearer_token");
+                        // auth 命令参数可能含敏感内容，不进 shared/便携备份；
+                        // 切换时由 Profile 重新写入。
+                        provider.remove("auth");
                     }
                 }
                 if let Some(active_provider) = active_provider {
@@ -417,10 +426,68 @@ impl ConfigAdapter for CodexAdapter {
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                     .is_none()
+                && !api_profile.codex.has_command_auth()
             {
                 anyhow::bail!(
-                    "Codex custom provider requires an API key, env_key, or bearer token"
+                    "Codex custom provider requires an API key, env_key, bearer token, or auth command"
                 );
+            }
+            // auth 命令式 token 与其它静态凭据互斥（官方要求）。
+            if api_profile.codex.has_command_auth() {
+                if Self::env_key(api_profile).is_some() {
+                    anyhow::bail!("Codex auth command cannot be combined with env_key");
+                }
+                if api_profile
+                    .codex
+                    .experimental_bearer_token
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .is_some()
+                {
+                    anyhow::bail!(
+                        "Codex auth command cannot be combined with experimental_bearer_token"
+                    );
+                }
+                if api_profile.codex.requires_openai_auth == Some(true) {
+                    anyhow::bail!(
+                        "Codex auth command cannot be combined with requires_openai_auth"
+                    );
+                }
+                for (label, value) in [
+                    ("auth timeout", api_profile.codex.auth_timeout_ms),
+                    (
+                        "auth refresh interval",
+                        api_profile.codex.auth_refresh_interval_ms,
+                    ),
+                ] {
+                    if let Some(ms) = value {
+                        if ms <= 0 {
+                            anyhow::bail!(
+                                "Codex {label} must be a positive number of milliseconds"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // wire_api="chat" 已于 2026-02 被官方删除（discussion #7782），残留即报错，
+        // 指引用户切 responses；未知取值同样拒绝，避免写出无法启动的配置。
+        if let Some(wire) = api_profile
+            .codex
+            .wire_api
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            if is_removed_chat_wire_api(wire) {
+                anyhow::bail!(
+                    "Codex wire_api = \"{wire}\" was removed in Feb 2026 (only \"responses\" is supported); re-save the profile in Helio to migrate it (https://github.com/openai/codex/discussions/7782)"
+                );
+            }
+            if !is_supported_wire_api(wire) {
+                anyhow::bail!("Unsupported Codex wire_api: {wire}");
             }
         }
 
@@ -436,12 +503,37 @@ impl ConfigAdapter for CodexAdapter {
             }
         }
 
+        for (label, allowed, value) in [
+            (
+                "service_tier",
+                CODEX_SERVICE_TIERS,
+                api_profile.codex.service_tier.as_deref(),
+            ),
+            (
+                "reasoning_summary",
+                CODEX_REASONING_SUMMARIES,
+                api_profile.codex.reasoning_summary.as_deref(),
+            ),
+            (
+                "verbosity",
+                CODEX_VERBOSITY_LEVELS,
+                api_profile.codex.verbosity.as_deref(),
+            ),
+        ] {
+            if let Some(v) = value.map(str::trim).filter(|v| !v.is_empty()) {
+                if !allowed.contains(&v) {
+                    anyhow::bail!("Unsupported Codex {label}: {v}");
+                }
+            }
+        }
+
         if let Some(entries) = api_profile.codex.catalog_models.as_ref() {
             for entry in entries {
                 if let Some(levels) = entry.reasoning_levels.as_ref() {
                     for level in levels {
                         let normalized = level.trim().to_ascii_lowercase();
-                        if !CODEX_REASONING_LEVELS.contains(&normalized.as_str()) {
+                        // catalog 侧按八档校验（含 none/max/ultra），顶层仍只认 5 档。
+                        if !CODEX_CATALOG_REASONING_LEVELS.contains(&normalized.as_str()) {
                             anyhow::bail!(
                                 "Unsupported Codex catalog reasoning level for {}: {}",
                                 entry.slug,
@@ -538,60 +630,117 @@ impl ConfigAdapter for CodexAdapter {
                         "base_url".to_string(),
                         serde_json::Value::String(api_profile.api_url.clone()),
                     );
-                    if let Some(env_key) = Self::env_key(api_profile) {
-                        p.insert(
-                            "env_key".to_string(),
-                            serde_json::Value::String(env_key.to_string()),
-                        );
-                    } else {
-                        p.remove("env_key");
-                    }
-                    let requires_openai_auth = api_profile
-                        .codex
-                        .requires_openai_auth
-                        .or_else(|| Self::env_key(api_profile).map(|_| false))
-                        .or(Some(true));
-                    if let Some(requires_openai_auth) = requires_openai_auth {
-                        p.insert(
-                            "requires_openai_auth".to_string(),
-                            serde_json::Value::Bool(requires_openai_auth),
-                        );
-                    }
-                    if api_profile.codex.supports_standalone_web_search == Some(true) {
-                        p.insert(
-                            "supports_standalone_web_search".to_string(),
-                            serde_json::Value::Bool(true),
-                        );
-                    } else {
-                        p.remove("supports_standalone_web_search");
-                    }
-                    match api_profile
+                    let bearer_token = api_profile
                         .codex
                         .experimental_bearer_token
                         .as_deref()
                         .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                    {
-                        Some(token) => {
-                            p.insert(
-                                "experimental_bearer_token".to_string(),
-                                serde_json::Value::String(token.to_string()),
+                        .filter(|value| !value.is_empty());
+                    if api_profile.codex.has_command_auth() {
+                        // 命令式 token：写 [model_providers.<id>.auth]，清掉互斥的静态凭据键。
+                        let command = api_profile
+                            .codex
+                            .auth_command
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .unwrap_or_default();
+                        let mut auth = serde_json::Map::new();
+                        auth.insert(
+                            "command".to_string(),
+                            serde_json::Value::String(command.to_string()),
+                        );
+                        let args: Vec<serde_json::Value> = api_profile
+                            .codex
+                            .auth_args
+                            .as_ref()
+                            .map(|list| {
+                                list.iter()
+                                    .map(|arg| arg.trim())
+                                    .filter(|arg| !arg.is_empty())
+                                    .map(|arg| serde_json::Value::String(arg.to_string()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        if !args.is_empty() {
+                            auth.insert("args".to_string(), serde_json::Value::Array(args));
+                        }
+                        for (key, value) in [
+                            ("timeout_ms", api_profile.codex.auth_timeout_ms),
+                            (
+                                "refresh_interval_ms",
+                                api_profile.codex.auth_refresh_interval_ms,
+                            ),
+                        ] {
+                            if let Some(ms) = value.filter(|ms| *ms > 0) {
+                                auth.insert(key.to_string(), serde_json::Value::Number(ms.into()));
+                            }
+                        }
+                        if let Some(cwd) = api_profile
+                            .codex
+                            .auth_cwd
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                        {
+                            auth.insert(
+                                "cwd".to_string(),
+                                serde_json::Value::String(cwd.to_string()),
                             );
                         }
-                        None => {
-                            p.remove("experimental_bearer_token");
+                        p.insert("auth".to_string(), serde_json::Value::Object(auth));
+                        p.remove("env_key");
+                        p.remove("experimental_bearer_token");
+                        p.remove("requires_openai_auth");
+                    } else {
+                        p.remove("auth");
+                        if let Some(env_key) = Self::env_key(api_profile) {
+                            p.insert(
+                                "env_key".to_string(),
+                                serde_json::Value::String(env_key.to_string()),
+                            );
+                        } else {
+                            p.remove("env_key");
                         }
-                    }
-                    let wire_api = api_profile
-                        .codex
-                        .wire_api
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .unwrap_or("responses");
+                        // 鉴权默认：显式值优先；env_key / bearer 模式不需要登录态 → false；
+                        // 其余（auth.json 写 key）保持 true，否则 Codex 不会读取 auth.json。
+                        let requires_openai_auth = api_profile
+                            .codex
+                            .requires_openai_auth
+                            .or_else(|| Self::env_key(api_profile).map(|_| false))
+                            .or_else(|| bearer_token.map(|_| false))
+                            .or(Some(true));
+                        if let Some(requires_openai_auth) = requires_openai_auth {
+                            p.insert(
+                                "requires_openai_auth".to_string(),
+                                serde_json::Value::Bool(requires_openai_auth),
+                            );
+                        }
+                        if api_profile.codex.supports_standalone_web_search == Some(true) {
+                            p.insert(
+                                "supports_standalone_web_search".to_string(),
+                                serde_json::Value::Bool(true),
+                            );
+                        } else {
+                            p.remove("supports_standalone_web_search");
+                        }
+                        match bearer_token {
+                            Some(token) => {
+                                p.insert(
+                                    "experimental_bearer_token".to_string(),
+                                    serde_json::Value::String(token.to_string()),
+                                );
+                            }
+                            None => {
+                                p.remove("experimental_bearer_token");
+                            }
+                        }
+                    } // 命令式 token 分支结束；以下对两种鉴权模式通用
+                      // wire_api 固定 responses：chat 已于 2026-02 被官方删除，
+                      // 历史值在这里自愈（validate 会提示用户清理存量）。
                     p.insert(
                         "wire_api".to_string(),
-                        serde_json::Value::String(wire_api.to_string()),
+                        serde_json::Value::String("responses".to_string()),
                     );
                     if is_new {
                         // 全新 provider：补上 Codex 必需的 name 默认值。
@@ -609,11 +758,19 @@ impl ConfigAdapter for CodexAdapter {
             obj.remove("api_key");
             obj.remove("aws_profile");
             obj.remove("aws_region");
-            if !is_bedrock && Self::env_key(api_profile).is_none() {
+            // 只有 Helio 直写 auth.json 的模式才强制 file；
+            // env_key / auth 命令 / bedrock 模式不经 auth.json，顺手清掉残留，
+            // 避免覆盖用户自己的 keyring/auto 偏好。
+            let manages_auth_json = !is_bedrock
+                && Self::env_key(api_profile).is_none()
+                && !api_profile.codex.has_command_auth();
+            if manages_auth_json {
                 obj.insert(
                     "cli_auth_credentials_store".to_string(),
                     serde_json::Value::String("file".to_string()),
                 );
+            } else {
+                obj.remove("cli_auth_credentials_store");
             }
 
             match api_profile
@@ -651,6 +808,23 @@ impl ConfigAdapter for CodexAdapter {
                 }
             }
 
+            // reasoning_summary / verbosity：Some → 写入；None → 不动。
+            // 行为设置页的手填值不应被“未管理该字段”的 Profile 切换清掉。
+            for (field, key) in [
+                (
+                    api_profile.codex.reasoning_summary.as_deref(),
+                    "model_reasoning_summary",
+                ),
+                (api_profile.codex.verbosity.as_deref(), "model_verbosity"),
+            ] {
+                if let Some(value) = field.map(str::trim).filter(|v| !v.is_empty()) {
+                    obj.insert(
+                        key.to_string(),
+                        serde_json::Value::String(value.to_string()),
+                    );
+                }
+            }
+
             match api_profile.context_1m {
                 Some(true) => {
                     obj.insert(
@@ -662,10 +836,12 @@ impl ConfigAdapter for CodexAdapter {
                         serde_json::Value::Number(900_000.into()),
                     );
                 }
-                Some(false) | None => {
+                // Some(false) = 显式关闭 → 清理；None = 不管理 → 保留用户手填的值。
+                Some(false) => {
                     obj.remove("model_context_window");
                     obj.remove("model_auto_compact_token_limit");
                 }
+                None => {}
             }
 
             obj.remove("model_effort_level");
@@ -767,7 +943,10 @@ impl ConfigAdapter for CodexAdapter {
         // catalog 先于 auth：失败则整次 switch 的 apply 失败，可重试
         self.write_model_catalog(api_profile)?;
 
-        if Self::is_amazon_bedrock_profile(api_profile) || Self::env_key(api_profile).is_some() {
+        if Self::is_amazon_bedrock_profile(api_profile)
+            || Self::env_key(api_profile).is_some()
+            || api_profile.codex.has_command_auth()
+        {
             return Ok(());
         }
 
@@ -1057,7 +1236,8 @@ command = "npx"
     #[test]
     fn test_merge_normalizes_legacy_auth_fields() {
         let adapter = CodexAdapter::new();
-        // 已有 provider 用 responses，profile 指定 chat + requires_openai_auth=false
+        // 已有 provider 用 responses，profile 的 requires_openai_auth=false 被应用，
+        // 历史遗留的 wire_api="chat" 自愈为 responses（chat 已被官方删除）。
         let shared = serde_json::json!({
             "model_providers": {
                 "myproxy": {
@@ -1080,7 +1260,10 @@ command = "npx"
 
         let merged = adapter.merge_config(&profile, &shared);
 
-        assert_eq!(merged["model_providers"]["myproxy"]["wire_api"], "chat");
+        assert_eq!(
+            merged["model_providers"]["myproxy"]["wire_api"],
+            "responses"
+        );
         assert_eq!(
             merged["model_providers"]["myproxy"]["requires_openai_auth"],
             false
@@ -1165,7 +1348,7 @@ command = "npx"
             codex: CodexProfileFields {
                 catalog_models: Some(vec![CodexCatalogModel {
                     slug: "proxy-model".into(),
-                    reasoning_levels: Some(vec!["ultra".into()]),
+                    reasoning_levels: Some(vec!["turbo".into()]),
                     ..Default::default()
                 }]),
                 ..Default::default()
@@ -1173,6 +1356,27 @@ command = "npx"
             ..sample_profile()
         };
         assert!(adapter.validate_profile(&profile).is_err());
+
+        // catalog 八档（none~ultra）放行，顶层仍只认 5 档。
+        let catalog_ok = ApiProfile {
+            codex: CodexProfileFields {
+                catalog_models: Some(vec![CodexCatalogModel {
+                    slug: "sol-like".into(),
+                    reasoning_levels: Some(vec![
+                        "low".into(),
+                        "medium".into(),
+                        "high".into(),
+                        "xhigh".into(),
+                        "max".into(),
+                        "ultra".into(),
+                    ]),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            },
+            ..sample_profile()
+        };
+        assert!(adapter.validate_profile(&catalog_ok).is_ok());
     }
 
     #[test]
@@ -1621,6 +1825,38 @@ command = "npx"
     }
 
     #[test]
+    fn test_catalog_passes_through_max_ultra_and_skips_none_default() {
+        let catalog = CodexAdapter::build_catalog_json(
+            &[CodexCatalogModel {
+                slug: "sol-like".into(),
+                reasoning_levels: Some(vec![
+                    "none".into(),
+                    "low".into(),
+                    "max".into(),
+                    "ultra".into(),
+                    "bogus".into(),
+                ]),
+                ..Default::default()
+            }],
+            None,
+            "base",
+        );
+        let model = &catalog["models"][0];
+        // bogus 被过滤，none/max/ultra 透传
+        let efforts: Vec<&str> = model["supported_reasoning_levels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["effort"].as_str().unwrap())
+            .collect();
+        assert_eq!(efforts, vec!["none", "low", "max", "ultra"]);
+        // 默认值跳过 none，取第一个真实档位
+        assert_eq!(model["default_reasoning_level"], "low");
+        // shell 类型跟随官方 unified_exec（shell_command 已是 legacy）
+        assert_eq!(model["shell_type"], "unified_exec");
+    }
+
+    #[test]
     fn test_catalog_migrates_legacy_reasoning_support_to_all_documented_levels() {
         let catalog = CodexAdapter::build_catalog_json(
             &[CodexCatalogModel {
@@ -1645,6 +1881,209 @@ command = "npx"
                 {"effort": "xhigh", "description": "xhigh reasoning effort"}
             ])
         );
+    }
+
+    #[test]
+    fn test_validate_rejects_removed_chat_wire() {
+        let adapter = CodexAdapter::new();
+        let profile = ApiProfile {
+            codex: CodexProfileFields {
+                wire_api: Some("chat".to_string()),
+                ..Default::default()
+            },
+            ..sample_profile()
+        };
+        let err = adapter.validate_profile(&profile).unwrap_err().to_string();
+        assert!(err.contains("responses"), "应指引迁移到 responses: {err}");
+
+        let unknown = ApiProfile {
+            codex: CodexProfileFields {
+                wire_api: Some("grpc".to_string()),
+                ..Default::default()
+            },
+            ..sample_profile()
+        };
+        assert!(adapter.validate_profile(&unknown).is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_bad_tiers_and_summaries() {
+        let adapter = CodexAdapter::new();
+        for codex in [
+            CodexProfileFields {
+                service_tier: Some("ultra".into()),
+                ..Default::default()
+            },
+            CodexProfileFields {
+                reasoning_summary: Some("verbose".into()),
+                ..Default::default()
+            },
+            CodexProfileFields {
+                verbosity: Some("xhigh".into()),
+                ..Default::default()
+            },
+        ] {
+            let profile = ApiProfile {
+                codex,
+                ..sample_profile()
+            };
+            assert!(adapter.validate_profile(&profile).is_err());
+        }
+        let ok = ApiProfile {
+            codex: CodexProfileFields {
+                service_tier: Some("flex".into()),
+                reasoning_summary: Some("concise".into()),
+                verbosity: Some("medium".into()),
+                ..Default::default()
+            },
+            ..sample_profile()
+        };
+        assert!(adapter.validate_profile(&ok).is_ok());
+    }
+
+    #[test]
+    fn test_merge_bearer_only_defaults_openai_auth_false() {
+        let adapter = CodexAdapter::new();
+        let profile = ApiProfile {
+            provider: "myproxy".to_string(),
+            codex: CodexProfileFields {
+                experimental_bearer_token: Some("sk-bearer".to_string()),
+                ..Default::default()
+            },
+            ..sample_profile()
+        };
+        let merged = adapter.merge_config(&profile, &serde_json::json!({}));
+        assert_eq!(
+            merged["model_providers"]["myproxy"]["requires_openai_auth"],
+            false
+        );
+        // auth.json 模式（无 env/bearer）仍默认 true，保证 auth.json 的 key 生效。
+        let merged = adapter.merge_config(&sample_profile(), &serde_json::json!({}));
+        assert_eq!(
+            merged["model_providers"]["openai-custom"]["requires_openai_auth"],
+            true
+        );
+    }
+
+    #[test]
+    fn test_merge_command_auth_writes_auth_table() {
+        let adapter = CodexAdapter::new();
+        let profile = ApiProfile {
+            provider: "myproxy".to_string(),
+            codex: CodexProfileFields {
+                auth_command: Some("gcloud".to_string()),
+                auth_args: Some(vec!["auth".into(), "print-access-token".into()]),
+                auth_timeout_ms: Some(5000),
+                auth_refresh_interval_ms: Some(300000),
+                ..Default::default()
+            },
+            ..sample_profile()
+        };
+        assert!(adapter.validate_profile(&profile).is_ok());
+        let merged = adapter.merge_config(&profile, &serde_json::json!({}));
+        let provider = &merged["model_providers"]["myproxy"];
+        assert_eq!(provider["auth"]["command"], "gcloud");
+        assert_eq!(
+            provider["auth"]["args"],
+            serde_json::json!(["auth", "print-access-token"])
+        );
+        assert_eq!(provider["auth"]["timeout_ms"], 5000);
+        assert_eq!(provider["auth"]["refresh_interval_ms"], 300000);
+        assert!(provider.get("env_key").is_none());
+        assert!(provider.get("experimental_bearer_token").is_none());
+        assert!(provider.get("requires_openai_auth").is_none());
+        assert_eq!(provider["wire_api"], "responses");
+        // 命令模式不接管 auth.json
+        assert!(merged.get("cli_auth_credentials_store").is_none());
+    }
+
+    #[test]
+    fn test_validate_rejects_auth_command_conflicts() {
+        let adapter = CodexAdapter::new();
+        for codex in [
+            CodexProfileFields {
+                auth_command: Some("cmd".into()),
+                env_key: Some("K".into()),
+                ..Default::default()
+            },
+            CodexProfileFields {
+                auth_command: Some("cmd".into()),
+                experimental_bearer_token: Some("sk-x".into()),
+                ..Default::default()
+            },
+            CodexProfileFields {
+                auth_command: Some("cmd".into()),
+                requires_openai_auth: Some(true),
+                ..Default::default()
+            },
+        ] {
+            let profile = ApiProfile {
+                codex,
+                ..sample_profile()
+            };
+            assert!(adapter.validate_profile(&profile).is_err());
+        }
+    }
+
+    #[test]
+    fn test_merge_writes_summary_and_verbosity_without_clearing_unset() {
+        let adapter = CodexAdapter::new();
+        let profile = ApiProfile {
+            codex: CodexProfileFields {
+                reasoning_summary: Some("concise".to_string()),
+                verbosity: Some("medium".to_string()),
+                ..Default::default()
+            },
+            ..sample_profile()
+        };
+        let merged = adapter.merge_config(&profile, &serde_json::json!({}));
+        assert_eq!(merged["model_reasoning_summary"], "concise");
+        assert_eq!(merged["model_verbosity"], "medium");
+
+        // 未管理这两个字段的 Profile 不得清除手填值。
+        let shared = serde_json::json!({
+            "model_reasoning_summary": "detailed",
+            "model_verbosity": "low",
+        });
+        let merged = adapter.merge_config(&sample_profile(), &shared);
+        assert_eq!(merged["model_reasoning_summary"], "detailed");
+        assert_eq!(merged["model_verbosity"], "low");
+    }
+
+    #[test]
+    fn test_merge_context_none_preserves_existing_window() {
+        let adapter = CodexAdapter::new();
+        let shared = serde_json::json!({
+            "model_context_window": 128000,
+            "model_auto_compact_token_limit": 100000,
+        });
+        // context_1m=None（不管理）→ 保留
+        let merged = adapter.merge_config(&sample_profile(), &shared);
+        assert_eq!(merged["model_context_window"], 128000);
+        // Some(false)（显式关闭）→ 清理
+        let off = ApiProfile {
+            context_1m: Some(false),
+            ..sample_profile()
+        };
+        let merged = adapter.merge_config(&off, &shared);
+        assert!(merged.get("model_context_window").is_none());
+        assert!(merged.get("model_auto_compact_token_limit").is_none());
+    }
+
+    #[test]
+    fn test_merge_clears_cli_auth_store_when_env_key() {
+        let adapter = CodexAdapter::new();
+        let shared = serde_json::json!({ "cli_auth_credentials_store": "file" });
+        let profile = ApiProfile {
+            provider: "myproxy".to_string(),
+            codex: CodexProfileFields {
+                env_key: Some("MY_KEY".to_string()),
+                ..Default::default()
+            },
+            ..sample_profile()
+        };
+        let merged = adapter.merge_config(&profile, &shared);
+        assert!(merged.get("cli_auth_credentials_store").is_none());
     }
 
     #[test]

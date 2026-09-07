@@ -6,8 +6,9 @@ import { PageHeader } from '../components/common/PageHeader';
 import { ConfirmDialog } from '../components/common/Modal';
 import { Plus, Search } from 'lucide-react';
 import type { ApiProfile, TargetApp } from '../types';
-import { toolById } from '../types';
+import { SUPPORTED_TOOLS, toolById } from '../types';
 import { cn, humanizeError } from '../lib/utils';
+import { tauriApi } from '../lib/tauri';
 import { contextBadgeLabel } from '../lib/contextWindow';
 import { profileApiCredentialsText } from '../lib/profileCopy';
 import { copyText } from '../lib/clipboard';
@@ -33,6 +34,17 @@ export default function ProfilesPage() {
   const [query, setQuery] = useState('');
   const [feedback, setFeedback] = useState<{ kind: 'success' | 'error' | 'info'; text: string } | null>(null);
   const [dedupConfirm, setDedupConfirm] = useState(false);
+  const [deletingLegacy, setDeletingLegacy] = useState<ApiProfile | null>(null);
+  // 每个 legacy 行的目标工具选择（默认当前页工具）
+  const [legacyTool, setLegacyTool] = useState<Record<number, TargetApp>>({});
+  // 启用时先探活：key 全挂则后端拒绝写入配置。偏好持久化到 localStorage。
+  const [switchProbe, setSwitchProbe] = useState(() => {
+    try {
+      return localStorage.getItem('helio-switch-probe') === '1';
+    } catch {
+      return false;
+    }
+  });
 
   useEffect(() => {
     fetchProfiles();
@@ -47,6 +59,10 @@ export default function ProfilesPage() {
   const toolProfiles = useMemo(() => {
     return profiles.filter((p) => p.target_app === targetApp);
   }, [profiles, targetApp]);
+  // 未归属档案（target_app 为空的历史遗留）：各工具页都过滤掉了，单独露出认领入口
+  const legacyProfiles = useMemo(() => {
+    return profiles.filter((p) => !p.target_app);
+  }, [profiles]);
   const filteredProfiles = useMemo(() => {
     let list = toolProfiles;
     if (normalizedQuery) {
@@ -105,9 +121,14 @@ export default function ProfilesPage() {
   const handleSwitch = async (name: string) => {
     setFeedback(null);
     try {
-      await switchProfile(targetApp, name);
+      await switchProfile(targetApp, name, switchProbe || undefined);
       setSwitched(`${name}→${targetApp}`);
-      setFeedback({ kind: 'success', text: `已启用 ${name}（已写入本地 ${selectedTool.displayName} 配置）` });
+      setFeedback({
+        kind: 'success',
+        text: switchProbe
+          ? `已探活并启用 ${name}（已写入本地 ${selectedTool.displayName} 配置）`
+          : `已启用 ${name}（已写入本地 ${selectedTool.displayName} 配置）`,
+      });
       setTimeout(() => setSwitched(null), 1600);
     } catch (error) {
       setFeedback({ kind: 'error', text: `启用失败：${humanizeError(error)}` });
@@ -121,6 +142,35 @@ export default function ProfilesPage() {
       setFeedback({ kind: 'success', text: `已复制${label}` });
     } catch (error) {
       setFeedback({ kind: 'error', text: `复制${label}失败：${humanizeError(error, '剪贴板不可用')}` });
+    }
+  };
+
+  const claimLegacy = async (p: ApiProfile) => {
+    if (p.id == null) return;
+    const t = legacyTool[p.id] ?? targetApp;
+    setFeedback(null);
+    try {
+      await tauriApi.assignLegacyProfile(p.id, t);
+      setFeedback({ kind: 'success', text: `已将「${p.name}」归属到 ${toolById(t)?.displayName ?? t}` });
+      await fetchProfiles();
+      await fetchStatus();
+    } catch (e) {
+      setFeedback({ kind: 'error', text: `认领失败：${humanizeError(e)}` });
+    }
+  };
+
+  const dropLegacy = async () => {
+    const p = deletingLegacy;
+    setDeletingLegacy(null);
+    if (!p || p.id == null) return;
+    setFeedback(null);
+    try {
+      await tauriApi.deleteLegacyProfile(p.id);
+      setFeedback({ kind: 'success', text: `已删除未归属档案「${p.name}」` });
+      await fetchProfiles();
+      await fetchStatus();
+    } catch (e) {
+      setFeedback({ kind: 'error', text: `删除失败：${humanizeError(e)}` });
     }
   };
 
@@ -150,14 +200,31 @@ export default function ProfilesPage() {
       <div className="px-4 py-4 sm:px-7 sm:py-5">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <AppSelector value={targetApp} onChange={setTargetApp} />
-          <div className="relative w-full max-w-[260px]">
-            <Search size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-faint" />
-            <input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              className="h-9 w-full rounded-md border border-line bg-card pl-8 pr-3 text-[13px] text-ink outline-none transition-colors placeholder:text-ink-faint focus:border-accent/50"
-              placeholder="搜索 name / model / url"
-            />
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-[12px] text-ink-dim" title="启用档案前先探活 key，全部失败则不写入本地配置">
+              <input
+                type="checkbox"
+                checked={switchProbe}
+                onChange={(e) => {
+                  setSwitchProbe(e.target.checked);
+                  try {
+                    localStorage.setItem('helio-switch-probe', e.target.checked ? '1' : '0');
+                  } catch {
+                    /* 忽略持久化失败 */
+                  }
+                }}
+              />
+              启用时先探活
+            </label>
+            <div className="relative w-full max-w-[260px]">
+              <Search size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-faint" />
+              <input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                className="h-9 w-full rounded-md border border-line bg-card pl-8 pr-3 text-[13px] text-ink outline-none transition-colors placeholder:text-ink-faint focus:border-accent/50"
+                placeholder="搜索 name / model / url"
+              />
+            </div>
           </div>
         </div>
 
@@ -183,6 +250,39 @@ export default function ProfilesPage() {
             {activeProfile ? '当前使用' : '未启用'}
           </span>
         </div>
+
+        {legacyProfiles.length > 0 && (
+          <div className="mb-4 overflow-hidden rounded-lg border border-warn/30 bg-warn/5">
+            <div className="border-b border-warn/20 px-3.5 py-2.5 text-[13px] font-semibold text-ink">
+              未归属档案（{legacyProfiles.length}）
+              <span className="ml-2 font-normal text-[11px] text-ink-faint">旧版本遗留，先认领到工具再使用</span>
+            </div>
+            {legacyProfiles.map((p) => (
+              <div key={p.id ?? p.name} className="flex flex-wrap items-center gap-2 border-b border-line/60 px-3.5 py-2 last:border-b-0">
+                <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-ink" title={p.name}>{p.name}</span>
+                <span className="max-w-[220px] truncate font-mono text-[11px] text-ink-faint" title={`${p.provider} ${p.api_url}`}>
+                  {p.provider} · {p.api_url}
+                </span>
+                <select
+                  value={p.id != null ? (legacyTool[p.id] ?? targetApp) : targetApp}
+                  onChange={(e) => {
+                    if (p.id == null) return;
+                    const t = e.target.value as TargetApp;
+                    setLegacyTool((prev) => ({ ...prev, [p.id as number]: t }));
+                  }}
+                  className="h-8 rounded-md border border-line bg-card px-2 text-[12px] text-ink outline-none focus:border-accent/50"
+                  aria-label={`「${p.name}」归属工具`}
+                >
+                  {SUPPORTED_TOOLS.map((t) => (
+                    <option key={t.id} value={t.id}>{t.displayName}</option>
+                  ))}
+                </select>
+                <Button size="sm" variant="secondary" onClick={() => claimLegacy(p)}>认领</Button>
+                <Button size="sm" variant="ghost" onClick={() => setDeletingLegacy(p)}>删除</Button>
+              </div>
+            ))}
+          </div>
+        )}
 
         {(feedback || lastError) && (
           <div className={cn(
@@ -282,6 +382,17 @@ export default function ProfilesPage() {
             }
             setDeleting(null);
           }}
+        />
+      )}
+
+      {deletingLegacy && (
+        <ConfirmDialog
+          title="删除未归属档案"
+          message={`确定要删除未归属档案「${deletingLegacy.name}」吗？此操作不可撤销。`}
+          confirmText="删除"
+          danger
+          onCancel={() => setDeletingLegacy(null)}
+          onConfirm={dropLegacy}
         />
       )}
 

@@ -66,6 +66,10 @@ export interface ApiProfile {
   catalog_models?: CodexCatalogModel[];
   /** 推理强度 minimal/low/medium/high/xhigh */
   reasoning_effort?: string;
+  /** 推理摘要 auto/concise/detailed/none */
+  reasoning_summary?: string;
+  /** verbosity low/medium/high */
+  verbosity?: string;
   /** 1M 上下文 */
   context_1m?: boolean;
   /** OpenClaw: models[].maxTokens（仅 OpenClaw 使用，不与 Hermes 共用语义） */
@@ -78,8 +82,18 @@ export interface ApiProfile {
   requires_openai_auth?: boolean;
   /** Codex provider-specific bearer token. */
   experimental_bearer_token?: string;
-  /** Codex 顶层 service_tier（如 fast） */
+  /** Codex 顶层 service_tier：fast（legacy）/ flex / priority */
   service_tier?: string;
+  /** Codex auth 命令（[model_providers.<id>.auth].command），与 env_key/bearer 互斥 */
+  auth_command?: string;
+  /** Codex auth 命令参数 */
+  auth_args?: string[];
+  /** Codex auth 超时毫秒数 */
+  auth_timeout_ms?: number;
+  /** Codex auth token 刷新间隔毫秒数 */
+  auth_refresh_interval_ms?: number;
+  /** Codex auth 命令工作目录（高级，多数留空） */
+  auth_cwd?: string;
   /** Custom Codex provider declares standalone web-search support. */
   supports_standalone_web_search?: boolean;
   /** Built-in Amazon Bedrock profile override. */

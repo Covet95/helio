@@ -20,6 +20,8 @@ interface Scanned {
   model?: string;
   model_mapping?: Record<string, string>;
   reasoning_effort?: string;
+  reasoning_summary?: string;
+  verbosity?: string;
   context_1m?: boolean;
   wire_api?: string;
   env_key?: string;
@@ -29,6 +31,11 @@ interface Scanned {
   supports_standalone_web_search?: boolean;
   aws_profile?: string;
   aws_region?: string;
+  auth_command?: string;
+  auth_args?: string[];
+  auth_timeout_ms?: number;
+  auth_refresh_interval_ms?: number;
+  auth_cwd?: string;
   api_mode?: string;
   opencode_api_mode?: string;
   opencode_models?: string[];
@@ -118,11 +125,18 @@ export default function ImportPage() {
         model: api.model,
         model_mapping: api.model_mapping,
         reasoning_effort: api.reasoning_effort,
+        reasoning_summary: tool === 'codex' ? api.reasoning_summary : undefined,
+        verbosity: tool === 'codex' ? api.verbosity : undefined,
         context_1m: api.context_1m,
         env_key: tool === 'codex' ? api.env_key : undefined,
         wire_api: tool === 'codex' ? api.wire_api : undefined,
         requires_openai_auth: tool === 'codex' ? api.requires_openai_auth : undefined,
         experimental_bearer_token: tool === 'codex' ? api.experimental_bearer_token : undefined,
+        auth_command: tool === 'codex' ? api.auth_command : undefined,
+        auth_args: tool === 'codex' ? api.auth_args : undefined,
+        auth_timeout_ms: tool === 'codex' ? api.auth_timeout_ms : undefined,
+        auth_refresh_interval_ms: tool === 'codex' ? api.auth_refresh_interval_ms : undefined,
+        auth_cwd: tool === 'codex' ? api.auth_cwd : undefined,
         api_mode: tool === 'hermes' || tool === 'openclaw' ? api.api_mode : undefined,
         opencode_api_mode: tool === 'opencode' ? api.opencode_api_mode : undefined,
         models: tool === 'opencode' ? api.opencode_models : undefined,
@@ -288,6 +302,10 @@ export default function ImportPage() {
                         <ReadField label="API Key" value={api.api_key ? maskApiKey(api.api_key) : '—'} />
                         {api.model && <ReadField label="默认模型" value={api.model} />}
                         {api.reasoning_effort && <ReadField label="推理强度" value={api.reasoning_effort} />}
+                        {api.reasoning_summary && <ReadField label="推理摘要" value={api.reasoning_summary} />}
+                        {api.verbosity && <ReadField label="Verbosity" value={api.verbosity} />}
+                        {api.service_tier && <ReadField label="Service Tier" value={api.service_tier} />}
+                        {api.auth_command && <ReadField label="Auth 命令" value={api.auth_command} />}
                         {api.context_1m !== undefined && <ReadField label="1M 上下文" value={api.context_1m ? '启用' : '关闭'} />}
                         {api.model_mapping && Object.keys(api.model_mapping).length > 0 && (
                           <ReadField

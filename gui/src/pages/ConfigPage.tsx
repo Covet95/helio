@@ -235,7 +235,9 @@ const CODEX_SELECT_FIELDS: { key: string; label: string; options: string[] }[] =
   { key: 'sandbox_mode', label: 'sandbox_mode', options: ['read-only', 'workspace-write', 'danger-full-access'] },
   { key: 'personality', label: 'personality', options: ['none', 'friendly', 'pragmatic'] },
   { key: 'model_reasoning_effort', label: 'model_reasoning_effort', options: ['minimal', 'low', 'medium', 'high', 'xhigh'] },
-  { key: 'service_tier', label: 'service_tier', options: ['fast'] },
+  { key: 'model_reasoning_summary', label: 'model_reasoning_summary', options: ['auto', 'concise', 'detailed', 'none'] },
+  { key: 'model_verbosity', label: 'model_verbosity', options: ['low', 'medium', 'high'] },
+  { key: 'service_tier', label: 'service_tier', options: ['fast', 'flex', 'priority'] },
 ];
 // 把 current（来自 get_local_config_info 的 other）里的顶层值转成下拉/文本框用的字符串。
 function toStr(v: unknown): string {
@@ -390,7 +392,7 @@ function CodexBehaviorSettings({
         )}
 
         <div className="text-[11px] text-ink-faint">
-          下拉选「(不设置)」会从 config.toml 删除该字段。保存前自动备份并校验 TOML，标注「非官方」的为魔改字段。
+          下拉选「(不设置)」会从 config.toml 删除该字段。保存前自动备份并校验 TOML。
         </div>
       </div>
     </section>

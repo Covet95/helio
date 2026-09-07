@@ -11,7 +11,12 @@ import type { SessionMeta, PreviewMessage } from '../types';
 
 const TOOLS = [
   { id: '', label: '全部' },
-  ...SUPPORTED_TOOLS.map((t) => ({ id: t.id, label: t.displayName })),
+  // 后端会话 reader 仅支持 codex / claude-code（见 src-tauri/session_history.rs all_readers），
+  // 其它工具没有会话来源，不列出以免出现永远空白的死筛选。
+  ...SUPPORTED_TOOLS.filter((t) => t.id === 'codex' || t.id === 'claude-code').map((t) => ({
+    id: t.id,
+    label: t.displayName,
+  })),
 ];
 
 export default function HistoryPage() {
