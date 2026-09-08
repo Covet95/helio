@@ -6,6 +6,7 @@
   margin: 0;
   padding: 0;
   box-sizing: border-box;
+  letter-spacing: 0;
 }
 
 html {
@@ -17,18 +18,19 @@ body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   overflow: hidden;
-  background: #faf6ee;
-  color: #2a2118;
+  background: #f7f8fa;
+  color: #20242b;
   letter-spacing: 0;
 }
 
 #root {
   width: 100%;
   height: 100vh;
+  height: 100dvh;
 }
 
 .app-bg {
-  background: #faf6ee;
+  background: #f7f8fa;
 }
 
 ::-webkit-scrollbar {
@@ -39,17 +41,17 @@ body {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #ddd2bd;
+  background: #c9cfd7;
   border-radius: 6px;
-  border: 2px solid #faf6ee;
+  border: 2px solid #f7f8fa;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #cabd9f;
+  background: #a8b1bd;
 }
 
 ::selection {
   background: rgba(234, 88, 12, 0.18);
-  color: #2a2118;
+  color: #20242b;
 }
 
 .drag-region {
@@ -57,4 +59,41 @@ body {
 }
 .no-drag {
   -webkit-app-region: no-drag;
+}
+
+.app-dialog {
+  /* 普通流面板：max-height 在所有引擎都按预期约束内容区（90vh 回退 + 90dvh） */
+  max-height: 90vh;
+  max-height: 90dvh;
+}
+
+:focus-visible {
+  outline: 2px solid #c94b0a;
+  outline-offset: 3px;
+}
+
+input[type="checkbox"] {
+  accent-color: #c94b0a;
+  width: 16px;
+  height: 16px;
+}
+
+@layer components {
+  .icon-button {
+    @apply grid h-8 w-8 shrink-0 place-items-center rounded-md text-ink-dim transition-colors hover:bg-elevated hover:text-ink disabled:opacity-40;
+  }
+}
+
+.page-actions > div {
+  max-width: 100%;
+  flex-wrap: wrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

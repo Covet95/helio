@@ -7,11 +7,12 @@ import {
   profileKeyCount,
   activeKeyLabel,
 } from '../../lib/contextWindow';
-import { Pencil, Trash2, Check, Eye, EyeOff, Link2 } from 'lucide-react';
+import { Pencil, Trash2, Check, Eye, EyeOff, Link2, Loader2 } from 'lucide-react';
 import { IconBtn, providerTint } from './helpers';
 
 export function ProfileCard({
   profile, active, justSwitched, onEdit, onDelete, onCopyCredentials, onSwitch,
+  switching, busy,
 }: {
   profile: ApiProfile;
   active: boolean;
@@ -20,6 +21,8 @@ export function ProfileCard({
   onDelete: () => void;
   onCopyCredentials: () => void;
   onSwitch: () => void;
+  switching?: boolean;
+  busy?: boolean;
 }) {
   const tint = providerTint(profile.provider);
   const [keyRevealed, setKeyRevealed] = useState(false);
@@ -35,7 +38,7 @@ export function ProfileCard({
         active && 'bg-accent/5',
       )}
     >
-      <div className="relative flex items-center gap-3">
+      <div className="relative flex flex-wrap items-center gap-3">
         <div
           className="grid h-9 w-9 shrink-0 place-items-center rounded-md border font-mono text-[12px] font-bold"
           style={{ background: `${tint}1a`, color: tint, borderColor: `${tint}33` }}
@@ -43,10 +46,10 @@ export function ProfileCard({
           {profile.name.slice(0, 2).toUpperCase()}
         </div>
 
-        <div className="min-w-0 flex-1">
+        <div className="min-w-0 basis-[200px] flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <h3 className="truncate text-[14px] font-semibold text-ink">{profile.name}</h3>
-            <span className="rounded border border-line bg-surface px-1.5 py-0.5 text-[10px] font-medium text-ink-dim">
+            <h3 title={profile.name} className="max-w-full break-all text-[14px] font-semibold text-ink">{profile.name}</h3>
+            <span className="max-w-full break-all text-[11px] font-medium text-ink-dim">
               {profile.provider}
             </span>
             {profile.model && (
@@ -84,8 +87,8 @@ export function ProfileCard({
               </span>
             )}
           </div>
-          <div className="mt-1 flex min-w-0 items-center gap-3 text-[12px] text-ink-dim">
-            <span className="min-w-0 flex-1 truncate font-mono">{profile.api_url}</span>
+          <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-ink-dim">
+            <span title={profile.api_url} className="min-w-0 basis-36 flex-1 truncate font-mono">{profile.api_url}</span>
             <span className="inline-flex shrink-0 items-center gap-1 font-mono text-ink-faint">
               <span className="max-w-[160px] truncate">{keyRevealed ? profile.api_key : maskApiKey(profile.api_key)}</span>
               {profile.api_key && (
@@ -93,6 +96,7 @@ export function ProfileCard({
                   type="button"
                   onClick={() => setKeyRevealed((v) => !v)}
                   aria-label={keyRevealed ? '隐藏 Key' : '显示 Key'}
+                  title={keyRevealed ? '隐藏 Key' : '显示 Key'}
                   className="grid h-5 w-5 place-items-center rounded text-ink-faint hover:text-ink hover:bg-elevated"
                 >
                   {keyRevealed ? <EyeOff size={13} /> : <Eye size={13} />}
@@ -102,14 +106,16 @@ export function ProfileCard({
           </div>
         </div>
 
-        <div className="flex shrink-0 items-center gap-1.5">
-          <IconBtn label="编辑" onClick={onEdit}><Pencil size={15} /></IconBtn>
+        <div className="ml-auto flex shrink-0 items-center gap-1.5">
+          <IconBtn label="编辑" onClick={onEdit} disabled={busy}><Pencil size={15} /></IconBtn>
           <IconBtn label="复制 URL + Key" onClick={onCopyCredentials}><Link2 size={15} /></IconBtn>
-          <IconBtn label="删除" danger onClick={onDelete}><Trash2 size={15} /></IconBtn>
+          <IconBtn label="删除" danger onClick={onDelete} disabled={busy}><Trash2 size={15} /></IconBtn>
           {active ? (
             <span className="ml-1 rounded-md border border-ok/25 bg-ok/8 px-2.5 py-1.5 text-[12px] font-medium text-ok">当前</span>
           ) : (
-            <Button size="sm" variant="secondary" onClick={onSwitch}>启用</Button>
+            <Button size="sm" variant="secondary" className="min-w-16" disabled={busy} onClick={onSwitch}>
+              {switching ? <Loader2 size={15} className="animate-spin" aria-label="启用中" /> : '启用'}
+            </Button>
           )}
         </div>
       </div>

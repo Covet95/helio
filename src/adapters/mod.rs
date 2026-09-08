@@ -145,25 +145,61 @@ pub fn apply_profile_transaction(
     Ok(())
 }
 
+/// 解析切换时应写入的共享配置（API 凭据除外）。
+///
+/// 权威规则（磁盘为准）：
+/// - 主配置文件不存在 → 直接用数据库，无库则空对象；
+/// - 磁盘任一受管文件不早于数据库 `updated_at`（用户在 Helio 之外改过，
+///   含冷启动后、托盘驻留期间的手改）→ 以磁盘为准，跳过数据库补缺，
+///   避免把用户删掉的键/条目从旧库里复活；
+/// - 否则（Helio 自己的写入，或取不到 mtime）→ 保留“磁盘优先 + 数据库补齐”。
 pub fn resolve_shared_config(
     target_app: TargetApp,
-    persisted_shared_config: Option<serde_json::Value>,
+    persisted_shared_config: Option<crate::models::SharedConfig>,
 ) -> Result<serde_json::Value> {
     let adapter = get_adapter(target_app);
+    resolve_shared_config_with_adapter(persisted_shared_config, adapter.as_ref())
+}
+
+fn resolve_shared_config_with_adapter(
+    persisted_shared_config: Option<crate::models::SharedConfig>,
+    adapter: &dyn ConfigAdapter,
+) -> Result<serde_json::Value> {
     let mut shared_config = if adapter.config_path().exists() {
         let current_config = adapter.read_config()?;
         adapter.extract_shared_config(&current_config)
     } else {
         persisted_shared_config
-            .clone()
+            .as_ref()
+            .map(|persisted| persisted.config.clone())
             .unwrap_or_else(|| serde_json::json!({}))
     };
 
     if let Some(previous) = persisted_shared_config {
-        backfill_missing_top_level(&mut shared_config, &previous);
-        backfill_mcp_entries(&mut shared_config, &previous);
+        if !disk_is_newer_than_db(adapter, previous.updated_at) {
+            backfill_missing_top_level(&mut shared_config, &previous.config);
+            backfill_mcp_entries(&mut shared_config, &previous.config);
+        }
     }
     Ok(shared_config)
+}
+
+/// 任一受管文件 mtime（秒级）不早于数据库 `updated_at` 即视为磁盘更新。
+/// 取“不早于”而非“晚于”：Helio 自己的写盘与入库多在同一秒，跳过补缺无影响
+///（刚写盘的内容本就没有缺失）；同秒内的外部手改同样归磁盘赢。
+/// 取不到 mtime 时回退到旧行为（补缺），偏向迁移不断。
+fn disk_is_newer_than_db(adapter: &dyn ConfigAdapter, updated_at: Option<i64>) -> bool {
+    let Some(updated_at) = updated_at else {
+        return false;
+    };
+    let updated_at = updated_at.max(0) as u64;
+    adapter.managed_paths().into_iter().any(|path| {
+        std::fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+            .is_some_and(|elapsed| elapsed.as_secs() >= updated_at)
+    })
 }
 
 pub fn apply_profile_configuration(
@@ -315,21 +351,46 @@ pub fn apply_profile_switch(
 pub fn sync_all_shared_configs(db: &crate::db::Database) -> Result<()> {
     for target_app in TargetApp::all() {
         let adapter = get_adapter(target_app);
-        sync_shared_config_for_adapter(db, target_app, adapter.as_ref())?;
+        sync_shared_config_if_present(db, target_app, adapter.as_ref())?;
     }
     Ok(())
 }
 
-fn sync_shared_config_for_adapter(
+/// 冷启动时把磁盘上的共享配置同步回 Helio 数据库（仅共享配置，不碰 API 凭据）。
+///
+/// 逐工具处理：主配置文件不存在则跳过（保留数据库原值，避免把未安装工具的
+/// 共享配置清零）；读取失败则记 warn 后跳过，不阻塞启动。磁盘为准。
+/// 返回实际同步成功的工具列表。
+pub fn sync_startup_shared_configs(db: &crate::db::Database) -> Vec<TargetApp> {
+    let mut synced = Vec::new();
+    for target_app in TargetApp::all() {
+        let adapter = get_adapter(target_app);
+        match sync_shared_config_if_present(db, target_app, adapter.as_ref()) {
+            Ok(true) => synced.push(target_app),
+            Ok(false) => {}
+            Err(error) => tracing::warn!("[Helio] startup sync: skip {target_app}: {error:#}"),
+        }
+    }
+    synced
+}
+
+/// 读取磁盘配置、提取共享部分后入库。主配置文件不存在时返回 `Ok(false)`
+/// 且不写库，调用方以此区分“未安装”与“已同步”。
+fn sync_shared_config_if_present(
     db: &crate::db::Database,
     target_app: TargetApp,
     adapter: &dyn ConfigAdapter,
-) -> Result<()> {
+) -> Result<bool> {
+    // 文件不存在（工具未安装）→ 保留数据库原值，不用空配置清零。
+    if !adapter.config_path().exists() {
+        return Ok(false);
+    }
     let config = adapter.read_config().with_context(|| {
-        format!("Failed to read {target_app} configuration before portable export")
+        format!("Failed to read {target_app} configuration before shared-config sync")
     })?;
     db.save_shared_config(target_app, adapter.extract_shared_config(&config))
-        .with_context(|| format!("Failed to save {target_app} shared configuration"))
+        .with_context(|| format!("Failed to save {target_app} shared configuration"))?;
+    Ok(true)
 }
 
 /// 将导入数据库中的 active profile 写回对应工具。使用数据库内的 shared config
@@ -501,7 +562,7 @@ pub fn get_adapter(target_app: TargetApp) -> Box<dyn ConfigAdapter> {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_profile_transaction, sync_shared_config_for_adapter, ConfigAdapter};
+    use super::{apply_profile_transaction, ConfigAdapter};
     use crate::db::Database;
     use crate::models::ApiProfile;
     use anyhow::Result;
@@ -683,13 +744,40 @@ mod tests {
         assert!(live.get("mcp_servers").is_none());
     }
 
-    struct SharedConfigAdapter {
+    #[test]
+    fn portable_sync_persists_current_mcp_config() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("config");
+        fs::write(&path, b"{}")?;
+        let db = Database::open(":memory:")?;
+        let adapter = StartupSyncAdapter {
+            path,
+            config: serde_json::json!({
+                "mcp_servers": { "new-server": { "command": "npx" } }
+            }),
+        };
+        assert!(super::sync_shared_config_if_present(
+            &db,
+            crate::models::TargetApp::Codex,
+            &adapter
+        )?);
+        assert_eq!(
+            db.get_shared_config(crate::models::TargetApp::Codex)?
+                .unwrap()
+                .config["mcp_servers"]["new-server"]["command"],
+            "npx"
+        );
+        Ok(())
+    }
+
+    struct StartupSyncAdapter {
+        path: PathBuf,
         config: serde_json::Value,
     }
 
-    impl ConfigAdapter for SharedConfigAdapter {
+    impl ConfigAdapter for StartupSyncAdapter {
         fn config_path(&self) -> PathBuf {
-            PathBuf::from("unused")
+            self.path.clone()
         }
         fn read_config(&self) -> Result<serde_json::Value> {
             Ok(self.config.clone())
@@ -704,7 +792,7 @@ mod tests {
             Ok(())
         }
         fn backup_config(&self) -> Result<PathBuf> {
-            Ok(PathBuf::from("unused"))
+            Ok(self.path.clone())
         }
         fn cleanup_old_backups(&self, _: usize) -> Result<()> {
             Ok(())
@@ -712,20 +800,113 @@ mod tests {
     }
 
     #[test]
-    fn portable_sync_persists_current_mcp_config() -> Result<()> {
+    fn startup_sync_skips_missing_config_file() -> Result<()> {
         let db = Database::open(":memory:")?;
-        let adapter = SharedConfigAdapter {
+        db.save_shared_config(
+            crate::models::TargetApp::Codex,
+            serde_json::json!({ "keep": true }),
+        )?;
+        let adapter = StartupSyncAdapter {
+            path: PathBuf::from("/tmp/helio-startup-sync-missing-dir/config"),
+            config: serde_json::json!({ "mcp_servers": {} }),
+        };
+        assert!(!adapter.config_path().exists());
+        let synced =
+            super::sync_shared_config_if_present(&db, crate::models::TargetApp::Codex, &adapter)?;
+        assert!(!synced);
+        let kept = db
+            .get_shared_config(crate::models::TargetApp::Codex)?
+            .unwrap();
+        assert_eq!(kept.config["keep"], true);
+        Ok(())
+    }
+
+    #[test]
+    fn startup_sync_overwrites_db_with_disk_config() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("config");
+        fs::write(&path, b"{}")?;
+        let db = Database::open(":memory:")?;
+        db.save_shared_config(
+            crate::models::TargetApp::Codex,
+            serde_json::json!({ "stale": true }),
+        )?;
+        let adapter = StartupSyncAdapter {
+            path,
             config: serde_json::json!({
-                "mcp_servers": { "new-server": { "command": "npx" } }
+                "mcp_servers": { "fresh": { "command": "npx" } }
             }),
         };
-        sync_shared_config_for_adapter(&db, crate::models::TargetApp::Codex, &adapter)?;
-        assert_eq!(
-            db.get_shared_config(crate::models::TargetApp::Codex)?
-                .unwrap()
-                .config["mcp_servers"]["new-server"]["command"],
-            "npx"
+        let synced =
+            super::sync_shared_config_if_present(&db, crate::models::TargetApp::Codex, &adapter)?;
+        assert!(synced);
+        let current = db
+            .get_shared_config(crate::models::TargetApp::Codex)?
+            .unwrap();
+        assert_eq!(current.config["mcp_servers"]["fresh"]["command"], "npx");
+        assert!(current.config.get("stale").is_none());
+        Ok(())
+    }
+
+    fn startup_persisted(
+        target: crate::models::TargetApp,
+        config: serde_json::Value,
+        updated_at: Option<i64>,
+    ) -> crate::models::SharedConfig {
+        crate::models::SharedConfig {
+            target_app: target,
+            config,
+            updated_at,
+        }
+    }
+
+    #[test]
+    fn resolve_skips_backfill_when_disk_is_newer() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("config");
+        fs::write(&path, b"{}")?;
+        let adapter = StartupSyncAdapter {
+            path,
+            config: serde_json::json!({ "live": true, "mcp_servers": {} }),
+        };
+        let persisted = startup_persisted(
+            crate::models::TargetApp::Codex,
+            serde_json::json!({
+                "live": true,
+                "db_only": 1,
+                "mcp_servers": { "old": { "command": "x" } }
+            }),
+            Some(0),
         );
+        let resolved = super::resolve_shared_config_with_adapter(Some(persisted), &adapter)?;
+        assert_eq!(resolved["live"], true);
+        assert!(resolved.get("db_only").is_none());
+        assert!(resolved["mcp_servers"].as_object().unwrap().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_backfills_when_db_is_newer() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("config");
+        fs::write(&path, b"{}")?;
+        let adapter = StartupSyncAdapter {
+            path,
+            config: serde_json::json!({ "live": true, "mcp_servers": {} }),
+        };
+        let future = chrono::Utc::now().timestamp() + 3600;
+        let persisted = startup_persisted(
+            crate::models::TargetApp::Codex,
+            serde_json::json!({
+                "live": true,
+                "db_only": 1,
+                "mcp_servers": { "old": { "command": "x" } }
+            }),
+            Some(future),
+        );
+        let resolved = super::resolve_shared_config_with_adapter(Some(persisted), &adapter)?;
+        assert_eq!(resolved["db_only"], 1);
+        assert_eq!(resolved["mcp_servers"]["old"]["command"], "x");
         Ok(())
     }
 }

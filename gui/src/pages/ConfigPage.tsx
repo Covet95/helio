@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Button } from '../components/common/Button';
 import { Spinner } from '../components/common/Spinner';
 import { PageHeader } from '../components/common/PageHeader';
@@ -6,9 +6,10 @@ import {
   RefreshCw, Boxes, Sparkles, Webhook, ShieldCheck, ChevronDown, Terminal, Globe, AlertCircle, Layers, FileCog, Save, X, CheckCircle2, SlidersHorizontal, History, RotateCcw,
 } from 'lucide-react';
 import type { TargetApp } from '../types';
-import { SUPPORTED_TOOLS } from '../types';
 import { cn, humanizeError } from '../lib/utils';
 import { tauriApi, type ConfigBackupInfo } from '../lib/tauri';
+import { useStore } from '../store';
+import { AppSelector } from './profiles/helpers';
 
 interface McpServerCfg {
   command?: string;
@@ -25,7 +26,12 @@ interface LocalInfo {
 }
 
 export default function ConfigPage() {
-  const [targetApp, setTargetApp] = useState<TargetApp>('claude-code');
+  const targetApp = useStore((state) => state.selectedTool);
+  const setTargetApp = useStore((state) => state.setSelectedTool);
+  return <ToolConfigPage key={targetApp} targetApp={targetApp} onToolChange={setTargetApp} />;
+}
+
+function ToolConfigPage({ targetApp, onToolChange }: { targetApp: TargetApp; onToolChange: (tool: TargetApp) => void }) {
   const [info, setInfo] = useState<LocalInfo | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -33,25 +39,28 @@ export default function ConfigPage() {
   const [openHooks, setOpenHooks] = useState(false);
   const [openPerms, setOpenPerms] = useState(false);
   const [openOther, setOpenOther] = useState(false);
+  const loadSeq = useRef(0);
 
-  const load = async () => {
+  const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     setLoading(true);
     setError('');
     try {
       const result = (await tauriApi.getLocalConfigInfo(targetApp)) as LocalInfo;
-      setInfo(result);
+      if (seq === loadSeq.current) setInfo(result);
     } catch (err) {
+      if (seq !== loadSeq.current) return;
       setError('读取本地配置失败: ' + humanizeError(err));
       setInfo(null);
     } finally {
-      setLoading(false);
+      if (seq === loadSeq.current) setLoading(false);
     }
-  };
+  }, [targetApp]);
 
   useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [targetApp]);
+    void load();
+    return () => { loadSeq.current += 1; };
+  }, [load]);
 
   const mcpEntries = info ? Object.entries(info.mcp_servers || {}) : [];
   const skills = info?.skills || [];
@@ -64,7 +73,7 @@ export default function ConfigPage() {
   const otherKeys = Object.keys(other);
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="min-h-full">
       <PageHeader
         title="共享配置"
         actions={
@@ -75,35 +84,19 @@ export default function ConfigPage() {
         }
       />
 
-      <div className="flex min-h-0 flex-1 flex-col overflow-auto px-4 py-4 sm:px-7 sm:py-5">
-        {/* tool selector */}
-        <div className="mb-4 flex w-fit max-w-full flex-wrap items-center gap-1 rounded-lg border border-line bg-surface p-1">
-          {SUPPORTED_TOOLS.map((t) => {
-            const active = targetApp === t.id;
-            return (
-              <button
-                key={t.id}
-                onClick={() => setTargetApp(t.id)}
-                className={cn(
-                  'flex shrink-0 items-center gap-2 whitespace-nowrap rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors',
-                  active ? 'bg-card text-ink shadow-soft' : 'text-ink-dim hover:text-ink',
-                )}
-              >
-                <span className="h-2 w-2 rounded-full" style={{ background: t.color }} />
-                {t.displayName}
-              </button>
-            );
-          })}
+      <div className="max-w-5xl px-4 py-4 sm:px-7 sm:py-5">
+        <div className="mb-4">
+          <AppSelector value={targetApp} onChange={onToolChange} />
         </div>
 
         {error && (
-          <div className="mb-3 flex items-center gap-2 rounded-md border border-danger/30 bg-danger/8 px-3 py-2 text-[13px] text-danger">
+          <div role="alert" className="mb-3 flex items-center gap-2 rounded-md border border-danger/30 bg-danger/8 px-3 py-2 text-[13px] text-danger">
             <AlertCircle size={15} className="shrink-0" />
-            <span className="flex-1">{error}</span>
+            <span className="min-w-0 flex-1 break-words">{error}</span>
           </div>
         )}
 
-        {loading ? (
+        {loading && !info ? (
           <div className="grid place-items-center py-20">
             <Spinner size="lg" />
           </div>
@@ -199,7 +192,7 @@ export default function ConfigPage() {
             </Section>
 
             {/* 配置备份（切换时自动生成，可回滚） */}
-            <ConfigBackups targetApp={targetApp} />
+            <ConfigBackups targetApp={targetApp} onRestored={load} />
 
             {/* Codex 行为设置（仅 Codex） */}
             {targetApp === 'codex' && <CodexBehaviorSettings current={other} onSaved={load} />}
@@ -208,7 +201,7 @@ export default function ConfigPage() {
             {targetApp === 'codex' && <CodexConfigEditor onSaved={load} />}
 
             {/* 原始 JSON（只读，折叠） */}
-            <div className="overflow-hidden rounded-lg border border-line bg-card">
+            <div className="border-y border-line">
               <button
                 onClick={() => setShowRaw((v) => !v)}
                 className="flex w-full items-center gap-2 px-4 py-3 text-[13px] font-medium text-ink-dim transition-colors hover:text-ink"
@@ -399,7 +392,7 @@ function CodexBehaviorSettings({
   );
 }
 
-function ConfigBackups({ targetApp }: { targetApp: TargetApp }) {
+function ConfigBackups({ targetApp, onRestored }: { targetApp: TargetApp; onRestored: () => Promise<void> }) {
   const [backups, setBackups] = useState<ConfigBackupInfo[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [restoring, setRestoring] = useState<string | null>(null);
@@ -438,7 +431,7 @@ function ConfigBackups({ targetApp }: { targetApp: TargetApp }) {
     try {
       await tauriApi.restoreConfigBackup(targetApp, b.path);
       setMsg('恢复完成');
-      load();
+      await Promise.all([load(), onRestored()]);
     } catch (e) {
       setErr('恢复失败: ' + humanizeError(e));
     } finally {
@@ -450,7 +443,8 @@ function ConfigBackups({ targetApp }: { targetApp: TargetApp }) {
     <section className="overflow-hidden rounded-lg border border-line bg-card">
       <div className="flex items-center gap-2 border-b border-line px-4 py-2.5">
         <History size={15} className="text-accent" />
-        <span className="text-[14px] font-semibold text-ink">配置备份</span>
+        <span className="text-[14px] font-semibold text-ink">版本回滚</span>
+        <span className="text-[11px] font-normal text-ink-faint">每次切换自动备份本机配置，可回退手改</span>
         <span className="rounded-md bg-elevated px-1.5 py-0.5 text-[11px] font-medium text-ink-dim">
           {backups?.length ?? 0}
         </span>
@@ -642,13 +636,13 @@ function Section({
   children: React.ReactNode;
 }) {
   return (
-    <section className="overflow-hidden rounded-lg border border-line bg-card">
-      <div className="flex items-center gap-2 border-b border-line px-4 py-2.5">
+    <section className="border-b border-line pb-4">
+      <div className="flex items-center gap-2 py-2.5">
         {icon}
         <span className="text-[14px] font-semibold text-ink">{title}</span>
         <span className="rounded-md bg-elevated px-1.5 py-0.5 text-[11px] font-medium text-ink-dim">{count}</span>
       </div>
-      <div className="p-4">{children}</div>
+      <div className="pt-2">{children}</div>
     </section>
   );
 }

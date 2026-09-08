@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import type {
   ApiKeyEntry,
   ApiProfile,
@@ -69,7 +69,7 @@ export function ProfileModal({
   initialTool: TargetApp;
   seedFrom?: ApiProfile;
   onClose: () => void;
-  onSave: (p: ApiProfile) => void;
+  onSave: (p: ApiProfile) => Promise<void>;
 }) {
   const initialProfile = profile;
   const initialModalTool = initialProfile?.target_app ?? initialTool;
@@ -84,6 +84,8 @@ export function ProfileModal({
   const [apiHealth, setApiHealth] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
   const [modelErr, setModelErr] = useState('');
   const [formErr, setFormErr] = useState('');
+  const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
   const [multiKeyMode, setMultiKeyMode] = useState(
     () => (initialProfile?.api_keys?.length ?? 0) > 1,
   );
@@ -269,7 +271,8 @@ export function ProfileModal({
     }));
   };
 
-  const submit = () => {
+  const submit = async () => {
+    if (savingRef.current) return;
     const normalized = withActiveKey(form, ensureKeyPool(form));
     const usesCodexEnv = tool === 'codex' && Boolean(normalized.env_key?.trim());
     const usesAuthCmd = tool === 'codex' && Boolean(normalized.auth_command?.trim());
@@ -310,7 +313,10 @@ export function ProfileModal({
       : undefined;
     const positiveOrUndefined = (n: unknown) =>
       typeof n === 'number' && Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
-    onSave({
+    savingRef.current = true;
+    setSaving(true);
+    try {
+      await onSave({
       ...normalized,
       api_url: usesBedrock ? '' : normalized.api_url,
       api_key: usesBedrock ? '' : normalized.api_key,
@@ -333,28 +339,35 @@ export function ProfileModal({
       opencode_api_mode: tool === 'opencode'
         ? normalized.opencode_api_mode || 'chat_completions'
         : undefined,
-    });
+      });
+    } catch (error) {
+      setFormErr(humanizeError(error));
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
   };
 
   return (
     <Modal
       title={profile ? '编辑配置档案' : '新建配置档案'}
       onClose={onClose}
-      size="lg"
+      busy={saving}
+      size="xl"
       footer={
         <>
-          <Button type="button" variant="ghost" onClick={onClose}>取消</Button>
-          <Button type="button" onClick={submit}>{profile ? '保存' : '创建'}</Button>
+          <Button type="button" variant="ghost" disabled={saving} onClick={onClose}>取消</Button>
+          <Button type="button" disabled={saving} className="min-w-20" onClick={submit}>{saving ? '保存中…' : profile ? '保存' : '创建'}</Button>
         </>
       }
     >
       <form
         id="helio-profile-form"
-        onSubmit={(e) => { e.preventDefault(); submit(); }}
-        className="space-y-4"
+        onSubmit={(e) => { e.preventDefault(); void submit(); }}
       >
+        <fieldset disabled={saving} className="min-w-0 space-y-4">
           {formErr && (
-            <div className="rounded-md border border-danger/30 bg-danger/8 px-3 py-2 text-[12.5px] text-danger">
+            <div role="alert" className="break-words rounded-md border border-danger/30 bg-danger/8 px-3 py-2 text-[12.5px] text-danger">
               {formErr}
             </div>
           )}
@@ -366,6 +379,7 @@ export function ProfileModal({
                   <button
                     key={t.id}
                     type="button"
+                    disabled={loadingModels || checkingApi}
                     onClick={() => {
                       setTool(t.id);
                       if (!initialProfile) {
@@ -498,7 +512,7 @@ export function ProfileModal({
                       placeholder="sk-..."
                       className="h-7 min-w-0 flex-1 rounded border border-line bg-surface px-1.5 font-mono text-[12px] text-ink outline-none focus:border-accent/50"
                     />
-                    <span className="hidden font-mono text-[10px] text-ink-faint sm:inline">
+                    <span className="hidden font-mono text-[10px] text-ink-faint md:inline">
                       {k.key ? maskApiKey(k.key) : ''}
                     </span>
                     <button
@@ -1516,6 +1530,7 @@ export function ProfileModal({
               )}
             </div>
           )}
+        </fieldset>
       </form>
     </Modal>
   );

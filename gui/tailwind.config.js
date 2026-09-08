@@ -5,22 +5,22 @@ export default {
   theme: {
     extend: {
       colors: {
-        bg: "#FAF6EE",
-        surface: "#F5EFE2",
+        bg: "#F7F8FA",
+        surface: "#F3F4F6",
         card: "#FFFFFF",
-        elevated: "#F5EFE2",
-        line: "#EBE2D2",
-        "line-strong": "#DACDB6",
+        elevated: "#EDEFF2",
+        line: "#E1E4E8",
+        "line-strong": "#BBC2CA",
 
-        ink: "#2A2118",
-        "ink-dim": "#6F6353",
-        "ink-faint": "#A39681",
+        ink: "#20242B",
+        "ink-dim": "#505967",
+        "ink-faint": "#687280",
 
-        accent: "#F97316",
+        accent: "#C94B0A",
         "accent-soft": "#EA580C",
 
-        ok: "#16A34A",
-        warn: "#D97706",
+        ok: "#15803D",
+        warn: "#A16207",
         danger: "#DC2626",
 
         claude: "#C2410C",
@@ -28,11 +28,11 @@ export default {
         pi: "#2563EB",
         opencode: "#7C3AED",
 
-        primary: "#2A2118",
+        primary: "#20242B",
         success: "#16A34A",
         warning: "#D97706",
         error: "#DC2626",
-        sidebar: "#F5EFE2",
+        sidebar: "#FFFFFF",
       },
       fontFamily: {
         sans: ["-apple-system", "BlinkMacSystemFont", "Segoe UI", "PingFang SC", "Microsoft YaHei", "sans-serif"],
@@ -41,9 +41,9 @@ export default {
       borderRadius: {
         sm: "0.375rem",
         md: "0.5rem",
-        lg: "0.75rem",
-        xl: "0.75rem",
-        "2xl": "0.875rem",
+        lg: "0.5rem",
+        xl: "0.5rem",
+        "2xl": "0.5rem",
       },
       boxShadow: {
         soft: "0 1px 2px 0 rgb(60 40 15 / 0.05)",

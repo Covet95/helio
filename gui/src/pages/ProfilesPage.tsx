@@ -1,10 +1,12 @@
-import { useState, useEffect, useMemo } from 'react';
+import { lazy, Suspense, useState, useEffect, useMemo, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '../store';
 import { Button } from '../components/common/Button';
 import { Spinner } from '../components/common/Spinner';
 import { PageHeader } from '../components/common/PageHeader';
 import { ConfirmDialog } from '../components/common/Modal';
-import { Plus, Search } from 'lucide-react';
+import { Plus, Search, X, FileDown } from 'lucide-react';
 import type { ApiProfile, TargetApp } from '../types';
 import { SUPPORTED_TOOLS, toolById } from '../types';
 import { cn, humanizeError } from '../lib/utils';
@@ -13,7 +15,6 @@ import { contextBadgeLabel } from '../lib/contextWindow';
 import { profileApiCredentialsText } from '../lib/profileCopy';
 import { copyText } from '../lib/clipboard';
 import { ProfileCard } from './profiles/ProfileCard';
-import { ProfileModal } from './profiles/ProfileFormModal';
 import {
   EmptyState,
   activeProfileFor,
@@ -21,12 +22,23 @@ import {
   profileConfigFingerprint,
 } from './profiles/helpers';
 
+const ProfileModal = lazy(() => import('./profiles/ProfileFormModal').then((module) => ({ default: module.ProfileModal })));
+
 export default function ProfilesPage() {
   const {
-    profiles, status, loadingProfiles, lastError, clearError,
+    profiles, status, loadingProfiles,
     fetchProfiles, fetchStatus, addProfile, updateProfile, deleteProfile, switchProfile,
-  } = useStore();
-  const [targetApp, setTargetApp] = useState<TargetApp>('claude-code');
+    sharedTool, setSelectedTool,
+  } = useStore(useShallow((state) => ({
+    profiles: state.profiles, status: state.status, loadingProfiles: state.loadingProfiles,
+    fetchProfiles: state.fetchProfiles, fetchStatus: state.fetchStatus,
+    addProfile: state.addProfile, updateProfile: state.updateProfile,
+    deleteProfile: state.deleteProfile, switchProfile: state.switchProfile,
+    sharedTool: state.selectedTool, setSelectedTool: state.setSelectedTool,
+  })));
+  const targetApp = sharedTool;
+  const setTargetApp = setSelectedTool;
+  const navigate = useNavigate();
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState<ApiProfile | null>(null);
   const [switched, setSwitched] = useState<string | null>(null);
@@ -35,6 +47,8 @@ export default function ProfilesPage() {
   const [feedback, setFeedback] = useState<{ kind: 'success' | 'error' | 'info'; text: string } | null>(null);
   const [dedupConfirm, setDedupConfirm] = useState(false);
   const [deletingLegacy, setDeletingLegacy] = useState<ApiProfile | null>(null);
+  const [switching, setSwitching] = useState<string | null>(null);
+  const switchPending = useRef(false);
   // 每个 legacy 行的目标工具选择（默认当前页工具）
   const [legacyTool, setLegacyTool] = useState<Record<number, TargetApp>>({});
   // 启用时先探活：key 全挂则后端拒绝写入配置。偏好持久化到 localStorage。
@@ -47,9 +61,10 @@ export default function ProfilesPage() {
   });
 
   useEffect(() => {
-    fetchProfiles();
-    fetchStatus();
-  }, [fetchProfiles, fetchStatus]);
+    if (!switched) return;
+    const timer = window.setTimeout(() => setSwitched(null), 1600);
+    return () => window.clearTimeout(timer);
+  }, [switched]);
 
   const selectedTool = toolById(targetApp)!;
   const activeProfile = activeProfileFor(status, targetApp);
@@ -105,7 +120,7 @@ export default function ProfilesPage() {
     setFeedback(null);
     try {
       for (const p of dupPlan.remove) {
-        await deleteProfile(p.target_app ?? targetApp, p.name);
+        await tauriApi.deleteProfile(p.target_app ?? targetApp, p.name);
       }
       setFeedback({
         kind: 'success',
@@ -114,11 +129,15 @@ export default function ProfilesPage() {
     } catch (e) {
       setFeedback({ kind: 'error', text: `去重失败：${humanizeError(e)}` });
     } finally {
+      await useStore.getState().refresh();
       setDedupConfirm(false);
     }
   };
 
   const handleSwitch = async (name: string) => {
+    if (switchPending.current) return;
+    switchPending.current = true;
+    setSwitching(name);
     setFeedback(null);
     try {
       await switchProfile(targetApp, name, switchProbe || undefined);
@@ -129,9 +148,11 @@ export default function ProfilesPage() {
           ? `已探活并启用 ${name}（已写入本地 ${selectedTool.displayName} 配置）`
           : `已启用 ${name}（已写入本地 ${selectedTool.displayName} 配置）`,
       });
-      setTimeout(() => setSwitched(null), 1600);
     } catch (error) {
       setFeedback({ kind: 'error', text: `启用失败：${humanizeError(error)}` });
+    } finally {
+      switchPending.current = false;
+      setSwitching(null);
     }
   };
 
@@ -152,6 +173,23 @@ export default function ProfilesPage() {
     try {
       await tauriApi.assignLegacyProfile(p.id, t);
       setFeedback({ kind: 'success', text: `已将「${p.name}」归属到 ${toolById(t)?.displayName ?? t}` });
+      await fetchProfiles();
+      await fetchStatus();
+    } catch (e) {
+      setFeedback({ kind: 'error', text: `认领失败：${humanizeError(e)}` });
+    }
+  };
+
+  const claimAllLegacy = async () => {
+    setFeedback(null);
+    try {
+      let n = 0;
+      for (const p of legacyProfiles) {
+        if (p.id == null) continue;
+        await tauriApi.assignLegacyProfile(p.id, legacyTool[p.id] ?? targetApp);
+        n += 1;
+      }
+      setFeedback({ kind: 'success', text: `已认领 ${n} 个档案到 ${toolById(targetApp)?.displayName ?? targetApp}（可在各行下拉框里单独改目标）` });
       await fetchProfiles();
       await fetchStatus();
     } catch (e) {
@@ -189,6 +227,10 @@ export default function ProfilesPage() {
                 去重 ({dupPlan.remove.length})
               </Button>
             )}
+            <Button variant="secondary" onClick={() => navigate('/import')}>
+              <FileDown size={15} />
+              从本机扫描
+            </Button>
             <Button onClick={() => { setEditing(null); setShowModal(true); }}>
               <Plus size={16} strokeWidth={2.5} />
               新建档案
@@ -199,7 +241,7 @@ export default function ProfilesPage() {
 
       <div className="px-4 py-4 sm:px-7 sm:py-5">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <AppSelector value={targetApp} onChange={setTargetApp} />
+          <AppSelector value={targetApp} onChange={(tool) => { setTargetApp(tool); setFeedback(null); }} disabled={switching !== null} />
           <div className="flex flex-wrap items-center gap-3">
             <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-[12px] text-ink-dim" title="启用档案前先探活 key，全部失败则不写入本地配置">
               <input
@@ -220,15 +262,16 @@ export default function ProfilesPage() {
               <Search size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-faint" />
               <input
                 value={query}
+                aria-label="搜索配置档案"
                 onChange={(event) => setQuery(event.target.value)}
                 className="h-9 w-full rounded-md border border-line bg-card pl-8 pr-3 text-[13px] text-ink outline-none transition-colors placeholder:text-ink-faint focus:border-accent/50"
-                placeholder="搜索 name / model / url"
+                placeholder="搜索名称、模型或 URL"
               />
             </div>
           </div>
         </div>
 
-        <div className="mb-4 flex items-center justify-between rounded-lg border border-line bg-card px-3.5 py-2.5">
+        <div className="mb-4 flex items-center justify-between gap-3 border-y border-line px-1 py-3">
           <div className="flex min-w-0 items-center gap-2.5">
             <span className="grid h-7 w-7 place-items-center rounded-md font-mono text-[10px] font-bold"
                   style={{ background: `${selectedTool.color}1f`, color: selectedTool.color }}>
@@ -253,9 +296,10 @@ export default function ProfilesPage() {
 
         {legacyProfiles.length > 0 && (
           <div className="mb-4 overflow-hidden rounded-lg border border-warn/30 bg-warn/5">
-            <div className="border-b border-warn/20 px-3.5 py-2.5 text-[13px] font-semibold text-ink">
-              未归属档案（{legacyProfiles.length}）
-              <span className="ml-2 font-normal text-[11px] text-ink-faint">旧版本遗留，先认领到工具再使用</span>
+            <div className="flex flex-wrap items-center gap-2 border-b border-warn/20 px-3.5 py-2.5">
+              <span className="text-[13px] font-semibold text-ink">未归属档案（{legacyProfiles.length}）</span>
+              <span className="font-normal text-[11px] text-ink-faint">旧版本遗留，先认领到工具再使用</span>
+              <Button size="sm" variant="secondary" onClick={claimAllLegacy} className="ml-auto">全部认领到{toolById(targetApp)?.displayName ?? targetApp}</Button>
             </div>
             {legacyProfiles.map((p) => (
               <div key={p.id ?? p.name} className="flex flex-wrap items-center gap-2 border-b border-line/60 px-3.5 py-2 last:border-b-0">
@@ -284,23 +328,21 @@ export default function ProfilesPage() {
           </div>
         )}
 
-        {(feedback || lastError) && (
-          <div className={cn(
+        {feedback && (
+          <div role={feedback.kind === 'error' ? 'alert' : 'status'} className={cn(
             'mb-3 rounded-md border px-3 py-2 text-[13px]',
             (feedback?.kind === 'success') ? 'border-ok/30 bg-ok/8 text-ok'
               : (feedback?.kind === 'info') ? 'border-line bg-surface text-ink-dim'
               : 'border-danger/30 bg-danger/8 text-danger',
           )}>
             <div className="flex items-start justify-between gap-2">
-              <span>{feedback?.text || lastError}</span>
-              {lastError && !feedback && (
-                <button type="button" className="shrink-0 text-[11px] underline" onClick={clearError}>关闭</button>
-              )}
+              <span className="min-w-0 break-words">{feedback.text}</span>
+              <button type="button" className="icon-button" title="关闭提示" aria-label="关闭提示" onClick={() => setFeedback(null)}><X size={14} /></button>
             </div>
           </div>
         )}
 
-        {loadingProfiles ? (
+        {loadingProfiles && profiles.length === 0 ? (
           <div className="grid place-items-center py-32"><Spinner size="lg" /></div>
         ) : profiles.length === 0 ? (
           <EmptyState />
@@ -309,7 +351,7 @@ export default function ProfilesPage() {
         ) : filteredProfiles.length === 0 ? (
           <div className="rounded-lg border border-dashed border-line bg-surface/50 px-4 py-10 text-center text-[13px] text-ink-faint">没有匹配的档案</div>
         ) : (
-          <div className="max-w-5xl overflow-hidden rounded-lg border border-line bg-card">
+          <div className="max-w-5xl border-y border-line bg-card" aria-busy={loadingProfiles}>
             {filteredProfiles.map((p) => (
               <ProfileCard
                 key={p.id ?? `${p.target_app}:${p.name}`}
@@ -320,6 +362,8 @@ export default function ProfilesPage() {
                 onDelete={() => setDeleting(p.name)}
                 onCopyCredentials={() => handleCopy('URL + Key', profileApiCredentialsText(p))}
                 onSwitch={() => handleSwitch(p.name)}
+                switching={switching === p.name}
+                busy={switching !== null}
               />
             ))}
           </div>
@@ -327,6 +371,7 @@ export default function ProfilesPage() {
       </div>
 
       {showModal && (
+        <Suspense fallback={<div role="status" aria-label="加载表单" className="fixed inset-0 z-50 grid place-items-center bg-black/20"><Spinner size="lg" /></div>}>
         <ProfileModal
           profile={editing}
           initialTool={targetApp}
@@ -358,12 +403,12 @@ export default function ProfilesPage() {
               const friendly = /UNIQUE constraint failed/i.test(String(e))
                 ? `已存在同名档案「${p.name}」，请换个名字`
                 : `保存失败：${msg}`;
-              setFeedback({ kind: 'error', text: friendly });
-              return;
+              throw new Error(friendly);
             }
             setShowModal(false);
           }}
         />
+        </Suspense>
       )}
 
       {deleting && (

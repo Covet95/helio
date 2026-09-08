@@ -5,6 +5,13 @@ use std::io::{BufRead, BufReader, Seek};
 use std::path::{Component, Path, PathBuf};
 use walkdir::WalkDir;
 
+/// 预览输入上限：最多读取 8 MiB，避免超大 jsonl 阻塞预览。
+pub(crate) const PREVIEW_MAX_BYTES: u64 = 8 * 1024 * 1024;
+/// 预览输出上限：最多返回 100 条消息。
+pub(crate) const PREVIEW_MAX_MESSAGES: usize = 100;
+/// 单条预览文本上限字符数（与前端展示一致）。
+pub(crate) const PREVIEW_MAX_CHARS: usize = 4000;
+
 /// 会话元数据（列表展示用）
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SessionMeta {
@@ -193,7 +200,12 @@ impl SessionReader for CodexSessionReader {
             .ok_or_else(|| anyhow::anyhow!("session not found: {id}"))?;
         let file = File::open(&path)?;
         let mut out = Vec::new();
+        let mut bytes_read: u64 = 0;
         for line in BufReader::new(file).lines().map_while(Result::ok) {
+            bytes_read = bytes_read.saturating_add(line.len() as u64 + 1);
+            if bytes_read > PREVIEW_MAX_BYTES || out.len() >= PREVIEW_MAX_MESSAGES {
+                break;
+            }
             let v: serde_json::Value = match serde_json::from_str(&line) {
                 Ok(v) => v,
                 Err(_) => continue,
@@ -397,7 +409,12 @@ impl SessionReader for ClaudeSessionReader {
             .ok_or_else(|| anyhow::anyhow!("session not found: {id}"))?;
         let file = File::open(&path)?;
         let mut out = Vec::new();
+        let mut bytes_read: u64 = 0;
         for line in BufReader::new(file).lines().map_while(Result::ok) {
+            bytes_read = bytes_read.saturating_add(line.len() as u64 + 1);
+            if bytes_read > PREVIEW_MAX_BYTES || out.len() >= PREVIEW_MAX_MESSAGES {
+                break;
+            }
             let v: serde_json::Value = match serde_json::from_str(&line) {
                 Ok(v) => v,
                 Err(_) => continue,
@@ -586,6 +603,28 @@ fn all_readers() -> Vec<Box<dyn SessionReader>> {
     ]
 }
 
+/// 按 tool 过滤 reader：选中工具时跳过无关目录扫描。
+fn selected_readers(tool: Option<&str>) -> Vec<Box<dyn SessionReader>> {
+    match tool {
+        Some("codex") => vec![Box::new(CodexSessionReader::new())],
+        Some("claude-code") => vec![Box::new(ClaudeSessionReader::new())],
+        Some(_) => Vec::new(),
+        None => all_readers(),
+    }
+}
+
+/// 清理时间窗口换算：days 天 -> unix 秒截止点。溢出时返回 Err。
+pub(crate) fn cleanup_cutoff(now: i64, older_than_days: i64) -> Result<i64, String> {
+    if older_than_days <= 0 {
+        return Err("天数须为正整数".into());
+    }
+    let window = older_than_days
+        .checked_mul(86400)
+        .ok_or_else(|| "天数过大，无法计算".to_string())?;
+    now.checked_sub(window)
+        .ok_or_else(|| "天数过大，无法计算".to_string())
+}
+
 /// 按 tool / search 过滤（search 命中 cwd 或 title）
 pub(crate) fn apply_filters(
     metas: Vec<SessionMeta>,
@@ -628,25 +667,44 @@ pub async fn list_sessions(
     tool: Option<String>,
     search: Option<String>,
 ) -> Result<Vec<SessionMeta>, String> {
-    let mut all = Vec::new();
-    for r in all_readers() {
-        all.extend(r.list_sessions());
-    }
-    // 默认按修改时间倒序
-    all.sort_by_key(|b| std::cmp::Reverse(b.modified_at));
-    Ok(apply_filters(all, tool.as_deref(), search.as_deref()))
+    // 磁盘扫描是同步阻塞 I/O，放到 blocking 线程，避免占用 async worker。
+    // Reader 在阻塞线程内构造，只移动 tool/search 字符串进闭包。
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut all = Vec::new();
+        for r in selected_readers(tool.as_deref()) {
+            all.extend(r.list_sessions());
+        }
+        // 默认按修改时间倒序
+        all.sort_by_key(|b| std::cmp::Reverse(b.modified_at));
+        apply_filters(all, tool.as_deref(), search.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn read_session_preview(tool: String, id: String) -> Result<Vec<PreviewMessage>, String> {
-    let reader = reader_for(&tool).ok_or_else(|| format!("未知工具: {tool}"))?;
-    reader.read_preview(&id, 4000).map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        let reader = reader_for(&tool).ok_or_else(|| format!("未知工具: {tool}"))?;
+        reader
+            .read_preview(&id, PREVIEW_MAX_CHARS)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 pub async fn delete_session(tool: String, id: String) -> Result<DeleteResult, String> {
-    let reader = reader_for(&tool).ok_or_else(|| format!("未知工具: {tool}"))?;
-    Ok(delete_one(reader.as_ref(), &id))
+    if reader_for(&tool).is_none() {
+        return Err(format!("未知工具: {tool}"));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let reader = reader_for(&tool).expect("tool checked above");
+        delete_one(reader.as_ref(), &id)
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[derive(serde::Deserialize)]
@@ -657,19 +715,23 @@ pub struct DeleteItem {
 
 #[tauri::command]
 pub async fn delete_sessions(items: Vec<DeleteItem>) -> Result<Vec<DeleteResult>, String> {
-    let mut out = Vec::new();
-    for it in items {
-        match reader_for(&it.tool) {
-            Some(r) => out.push(delete_one(r.as_ref(), &it.id)),
-            None => out.push(DeleteResult {
-                id: it.id,
-                tool: it.tool,
-                ok: false,
-                error: Some("未知工具".into()),
-            }),
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut out = Vec::new();
+        for it in items {
+            match reader_for(&it.tool) {
+                Some(r) => out.push(delete_one(r.as_ref(), &it.id)),
+                None => out.push(DeleteResult {
+                    id: it.id,
+                    tool: it.tool,
+                    ok: false,
+                    error: Some("未知工具".into()),
+                }),
+            }
         }
-    }
-    Ok(out)
+        out
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -677,25 +739,21 @@ pub async fn cleanup_sessions(
     tool: Option<String>,
     older_than_days: i64,
 ) -> Result<Vec<DeleteResult>, String> {
-    if older_than_days <= 0 {
-        return Ok(Vec::new());
-    }
     let now = chrono::Utc::now().timestamp();
-    let cutoff = now - older_than_days * 86400;
-    let mut out = Vec::new();
-    for r in all_readers() {
-        if let Some(t) = &tool {
-            if r.tool() != t {
-                continue;
+    let cutoff = cleanup_cutoff(now, older_than_days)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut out = Vec::new();
+        for r in selected_readers(tool.as_deref()) {
+            for m in r.list_sessions() {
+                if m.modified_at < cutoff {
+                    out.push(delete_one(r.as_ref(), &m.id));
+                }
             }
         }
-        for m in r.list_sessions() {
-            if m.modified_at < cutoff {
-                out.push(delete_one(r.as_ref(), &m.id));
-            }
-        }
-    }
-    Ok(out)
+        out
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -986,5 +1044,69 @@ mod tests {
         let n = count_lines(&f);
         assert!((2000..=3200).contains(&n), "外推估算应在合理范围，实际 {n}");
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn test_preview_caps_messages_at_limit() {
+        let root = temp_dir("preview-cap");
+        let day = root.join("2026/06/03");
+        fs::create_dir_all(&day).unwrap();
+        let mut content =
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"cap\",\"cwd\":\"/p\"}}\n".to_string();
+        for i in 0..150 {
+            content.push_str(&format!(
+                "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"msg{i}\"}}]}}}}\n"
+            ));
+        }
+        fs::write(day.join("rollout-cap-1.jsonl"), &content).unwrap();
+
+        let reader = CodexSessionReader {
+            sessions_dir: root.clone(),
+        };
+        let msgs = reader.read_preview("cap", 4000).unwrap();
+        assert_eq!(msgs.len(), PREVIEW_MAX_MESSAGES, "预览应截断到 100 条");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn test_preview_stops_after_byte_budget() {
+        let root = temp_dir("preview-bytes");
+        let day = root.join("2026/06/03");
+        fs::create_dir_all(&day).unwrap();
+        // 首行之后直接放一条超大行：累计字节超过 8 MiB 后应停止，后续消息不再返回。
+        let big = "y".repeat((PREVIEW_MAX_BYTES + 1024) as usize);
+        let content = format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"big\",\"cwd\":\"/p\"}}}}\n{big}\n{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"late\"}}]}}}}\n"
+        );
+        fs::write(day.join("rollout-big-1.jsonl"), &content).unwrap();
+
+        let reader = CodexSessionReader {
+            sessions_dir: root.clone(),
+        };
+        let msgs = reader.read_preview("big", 4000).unwrap();
+        assert!(msgs.is_empty(), "超预算后的消息不应被返回");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn test_cleanup_cutoff_math() {
+        assert_eq!(cleanup_cutoff(1_000_000, 1).unwrap(), 1_000_000 - 86400);
+        assert!(cleanup_cutoff(1_000_000, 0).is_err(), "非正天数应拒绝");
+        assert!(cleanup_cutoff(1_000_000, -5).is_err(), "负天数应拒绝");
+        assert!(
+            cleanup_cutoff(1_000_000, i64::MAX).is_err(),
+            "溢出天数应拒绝而非回绕"
+        );
+    }
+
+    #[test]
+    fn test_selected_readers_skip_unrelated_tool() {
+        assert_eq!(selected_readers(Some("codex")).len(), 1);
+        assert_eq!(selected_readers(Some("codex"))[0].tool(), "codex");
+        assert_eq!(selected_readers(Some("claude-code")).len(), 1);
+        assert_eq!(selected_readers(Some("unknown-tool")).len(), 0);
+        assert_eq!(selected_readers(None).len(), 2);
     }
 }

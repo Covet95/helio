@@ -447,8 +447,7 @@ pub async fn update_profile(profile: ApiProfile, state: State<'_, AppState>) -> 
     for active_target in active_targets {
         let persisted = db
             .get_shared_config(active_target)
-            .map_err(|e| e.to_string())?
-            .map(|config| config.config);
+            .map_err(|e| e.to_string())?;
         let shared = switch_api::adapters::resolve_shared_config(active_target, persisted)
             .map_err(|e| format!("读取 {active_target} 当前共享配置失败: {e}"))?;
         active_contexts.push((active_target, shared));
@@ -574,10 +573,7 @@ pub async fn switch_profile(
         let api_profile = db
             .get_profile_by_name_and_target(&profile_name, target)
             .map_err(|e| e.to_string())?;
-        let persisted_shared_config = db
-            .get_shared_config(target)
-            .map_err(|e| e.to_string())?
-            .map(|config| config.config);
+        let persisted_shared_config = db.get_shared_config(target).map_err(|e| e.to_string())?;
         (api_profile, persisted_shared_config)
     };
     api_profile.normalize_keys();
@@ -2152,11 +2148,7 @@ async fn run_failover(
         db.update_profile(&profile).map_err(|e| e.to_string())?;
         let should_switch = re_switch || (was_active && success);
         if should_switch && success {
-            Some(
-                db.get_shared_config(target)
-                    .map_err(|e| e.to_string())?
-                    .map(|config| config.config),
-            )
+            Some(db.get_shared_config(target).map_err(|e| e.to_string())?)
         } else {
             None
         }

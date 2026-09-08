@@ -1,11 +1,11 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useStore } from '../store';
 import { Button } from '../components/common/Button';
 import { Spinner } from '../components/common/Spinner';
 import { PageHeader } from '../components/common/PageHeader';
 import { Field } from '../components/common/Modal';
 import {
-  Search, FileDown, KeyRound, Boxes, Sparkles, Webhook, ShieldCheck, Check, FileWarning,
+  Search, FileDown, KeyRound, Boxes, FileWarning,
 } from 'lucide-react';
 import { SUPPORTED_TOOLS } from '../types';
 import type { OpenCodeModelConfig, TargetApp } from '../types';
@@ -43,23 +43,22 @@ interface Scanned {
   max_tokens?: number;
   source: string;
 }
-interface LocalInfo {
-  mcp_servers: Record<string, any>;
-  skills: string[];
-  hooks: any;
-  permissions: any;
-}
 type Feedback = { text: string; kind: 'success' | 'error' | 'info' };
 
 export default function ImportPage() {
-  const { addProfile } = useStore();
-  const [tool, setTool] = useState<TargetApp>('claude-code');
+  const tool = useStore((state) => state.selectedTool);
+  const setTool = useStore((state) => state.setSelectedTool);
+  return <ImportToolPage key={tool} tool={tool} onToolChange={setTool} />;
+}
+
+function ImportToolPage({ tool, onToolChange }: { tool: TargetApp; onToolChange: (tool: TargetApp) => void }) {
+  const addProfile = useStore((state) => state.addProfile);
+  const [importing, setImporting] = useState(false);
+  const importingRef = useRef(false);
   const [scanning, setScanning] = useState(false);
   const [api, setApi] = useState<Scanned | null>(null);
-  const [info, setInfo] = useState<LocalInfo | null>(null);
   const [name, setName] = useState('');
   const [feedback, setFeedback] = useState<Feedback | null>(null);
-  const [importedShared, setImportedShared] = useState(false);
   const [ccProviders, setCcProviders] = useState<CcSwitchProvider[] | null>(null);
   const [ccScanning, setCcScanning] = useState(false);
   const [ccSelected, setCcSelected] = useState<Set<number>>(new Set());
@@ -86,26 +85,29 @@ export default function ImportPage() {
   };
 
   const importCc = async () => {
-    if (!ccProviders) return;
+    if (!ccProviders || importingRef.current) return;
     const chosen = ccProviders.filter((_, i) => ccSelected.has(i));
     if (chosen.length === 0) { setFeedback({ text: '请至少选择一个', kind: 'info' }); return; }
+    importingRef.current = true;
+    setImporting(true);
     try {
       const n = await tauriApi.importCcSwitch(tool, chosen);
+      await useStore.getState().refresh();
       setFeedback({ text: `已从 cc-switch 导入 ${n} 个配置档案`, kind: 'success' });
       setCcProviders(null);
     } catch (e) {
       setFeedback({ text: `cc-switch 导入失败: ${humanizeError(e)}`, kind: 'error' });
+    } finally {
+      importingRef.current = false;
+      setImporting(false);
     }
   };
 
   const scan = async () => {
-    setScanning(true); setFeedback(null); setApi(null); setInfo(null); setImportedShared(false);
+    setScanning(true); setFeedback(null); setApi(null);
     try {
-      const [a, i] = await Promise.all([
-        tauriApi.scanLocalApi(tool),
-        tauriApi.getLocalConfigInfo(tool),
-      ]);
-      setApi(a); setInfo(i);
+      const a = await tauriApi.scanLocalApi(tool);
+      setApi(a);
       setName(`${tool}-local`);
     } catch (e) {
       setFeedback({ text: `扫描失败: ${humanizeError(e)}`, kind: 'error' });
@@ -115,7 +117,9 @@ export default function ImportPage() {
   };
 
   const importProfile = async () => {
-    if (!api) return;
+    if (!api || !name.trim() || importingRef.current) return;
+    importingRef.current = true;
+    setImporting(true);
     try {
       await addProfile({
         name: name.trim(),
@@ -155,30 +159,18 @@ export default function ImportPage() {
         ? `已存在同名档案「${name.trim()}」，请改个名字再导入`
         : `导入失败: ${humanizeError(e)}`;
       setFeedback({ text: friendly, kind: 'error' });
+    } finally {
+      importingRef.current = false;
+      setImporting(false);
     }
   };
-
-  const importShared = async () => {
-    try {
-      await tauriApi.importSharedConfig(tool);
-      setImportedShared(true);
-      setFeedback({ text: `已导入 ${meta.displayName} 的共享配置`, kind: 'success' });
-    } catch (e) {
-      setFeedback({ text: `导入共享配置失败: ${humanizeError(e)}`, kind: 'error' });
-    }
-  };
-
-  const mcpCount = info ? Object.keys(info.mcp_servers || {}).length : 0;
-  const skillCount = info ? (info.skills?.length || 0) : 0;
-  const hasHooks = info && info.hooks && Object.keys(info.hooks).length > 0;
-  const hasPerms = info && info.permissions && Object.keys(info.permissions).length > 0;
 
   return (
     <div className="min-h-full">
       <PageHeader
         title="从本地导入"
         actions={
-          <Button onClick={scan} disabled={scanning}>
+          <Button onClick={scan} disabled={scanning || importing}>
             <Search size={15} className={scanning ? 'animate-spin' : ''} />
             {scanning ? '扫描中…' : '扫描'}
           </Button>
@@ -192,7 +184,10 @@ export default function ImportPage() {
             return (
               <button
                 key={t.id}
-                onClick={() => { setTool(t.id); setApi(null); setInfo(null); setFeedback(null); setCcProviders(null); }}
+                type="button"
+                aria-pressed={active}
+                disabled={importing}
+                onClick={() => onToolChange(t.id)}
                 className={cn(
                   'flex shrink-0 items-center gap-2 whitespace-nowrap rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors',
                   active ? 'bg-card text-ink shadow-soft' : 'text-ink-dim hover:text-ink',
@@ -205,13 +200,17 @@ export default function ImportPage() {
           })}
         </div>
 
-        {canImportCcSwitch && <section className="overflow-hidden rounded-lg border border-line bg-card">
+        <p className="text-[12px] leading-relaxed text-ink-faint">
+          这里只把本机 API 做成档案。共享配置（MCP / Hooks / 权限）打开应用即自动同步，切换时以本机最新内容为准，无需手动导入。
+        </p>
+
+        {canImportCcSwitch && <section className="border-b border-line pb-4">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-4 py-3">
             <div className="flex min-w-0 items-center gap-2">
               <Boxes size={15} className="text-accent" />
               <span className="text-[14px] font-semibold text-ink">从 cc-switch 导入</span>
             </div>
-            <Button variant="secondary" onClick={scanCc} disabled={ccScanning}>
+            <Button variant="secondary" onClick={scanCc} disabled={ccScanning || importing}>
               <Search size={14} className={ccScanning ? 'animate-spin' : ''} />
               {ccScanning ? '扫描中…' : '扫描'}
             </Button>
@@ -258,7 +257,7 @@ export default function ImportPage() {
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-[12px] text-ink-faint">已选 {ccSelected.size} / {ccProviders.length}</span>
-                    <Button onClick={importCc} disabled={ccSelected.size === 0}>
+                    <Button onClick={importCc} disabled={ccSelected.size === 0 || importing}>
                       <FileDown size={15} />导入选中
                     </Button>
                   </div>
@@ -269,7 +268,7 @@ export default function ImportPage() {
         </section>}
 
         {feedback && (
-          <div className={`rounded-md border px-3 py-2 text-[13px] animate-fade-up ${
+          <div role={feedback.kind === 'error' ? 'alert' : 'status'} className={`break-words rounded-md border px-3 py-2 text-[13px] animate-fade-up ${
             feedback.kind === 'success' ? 'border-ok/30 bg-ok/10 text-ok'
             : feedback.kind === 'error' ? 'border-danger/30 bg-danger/10 text-danger'
             : 'border-line bg-surface text-ink-dim'
@@ -287,7 +286,7 @@ export default function ImportPage() {
 
         {!scanning && api && (
           <>
-            <section className="overflow-hidden rounded-lg border border-line bg-card animate-fade-up">
+            <section className="border-b border-line pb-4">
               <div className="flex items-center gap-2 border-b border-line/70 px-4 py-3">
                 <KeyRound size={15} className="text-accent" />
                 <span className="text-[14px] font-semibold text-ink">导入 API 为配置档案</span>
@@ -296,7 +295,7 @@ export default function ImportPage() {
                 {api.found ? (
                   <>
                     <div className="grid grid-cols-1 gap-3">
-                      <Field label="档案名称" value={name} onChange={(e) => setName(e.target.value)} />
+                      <Field label="档案名称" value={name} disabled={importing} onChange={(e) => setName(e.target.value)} />
                       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                         <ReadField label="API URL" value={api.api_url || '—'} />
                         <ReadField label="API Key" value={api.api_key ? maskApiKey(api.api_key) : '—'} />
@@ -327,7 +326,7 @@ export default function ImportPage() {
                       <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink-faint">{api.source}</span>
                       <Button
                         onClick={importProfile}
-                        disabled={!name.trim() || (!api.api_url && !(tool === 'codex' && api.provider === 'amazon-bedrock'))}
+                        disabled={importing || !name.trim() || (!api.api_url && !(tool === 'codex' && api.provider === 'amazon-bedrock'))}
                       >
                         <FileDown size={15} />导入为配置档案
                       </Button>
@@ -348,27 +347,6 @@ export default function ImportPage() {
               </div>
             </section>
 
-            <section className="overflow-hidden rounded-lg border border-line bg-card animate-fade-up" style={{ animationDelay: '60ms' }}>
-              <div className="flex items-center justify-between border-b border-line/70 px-4 py-3">
-                <div className="flex items-center gap-2">
-                  <ShieldCheck size={15} className="text-accent" />
-                  <span className="text-[14px] font-semibold text-ink">共享配置</span>
-                </div>
-                <Button variant={importedShared ? 'success' : 'secondary'} onClick={importShared}>
-                  {importedShared ? <><Check size={15} />已导入</> : <><FileDown size={15} />导入共享配置</>}
-                </Button>
-              </div>
-              <div className="grid grid-cols-2 gap-3 p-4 sm:grid-cols-4">
-                <InfoTile icon={<Boxes size={16} />} count={mcpCount} label="MCP Servers" tint="#4F8DF6"
-                          detail={info && mcpCount ? Object.keys(info.mcp_servers).slice(0, 3).join(', ') : '无'} />
-                <InfoTile icon={<Sparkles size={16} />} count={skillCount} label="Skills" tint="#4B5563"
-                          detail={info && skillCount ? info.skills.slice(0, 3).join(', ') : '无'} />
-                <InfoTile icon={<Webhook size={16} />} count={hasHooks ? 1 : 0} label="Hooks" tint="#8A5A44"
-                          detail={hasHooks ? '已配置' : '无'} boolean />
-                <InfoTile icon={<ShieldCheck size={16} />} count={hasPerms ? 1 : 0} label="Permissions" tint="#27A644"
-                          detail={hasPerms ? '已配置' : '无'} boolean />
-              </div>
-            </section>
           </>
         )}
       </div>
@@ -380,23 +358,7 @@ function ReadField({ label, value }: { label: string; value: string }) {
   return (
     <div>
       <span className="block mb-1.5 text-[12px] font-medium text-ink-dim">{label}</span>
-      <div className="w-full truncate rounded-md border border-line bg-surface px-3 py-2 font-mono text-[12.5px] text-ink">{value}</div>
-    </div>
-  );
-}
-
-function InfoTile({ icon, count, label, detail, tint, boolean }: {
-  icon: React.ReactNode; count: number; label: string; detail: string; tint: string; boolean?: boolean;
-}) {
-  const has = count > 0;
-  return (
-    <div className="rounded-md border border-line bg-surface p-3">
-      <div className="flex items-center gap-2 mb-2" style={{ color: has ? tint : undefined }}>
-        <span className={has ? '' : 'text-ink-faint'}>{icon}</span>
-        {!boolean && <span className={`text-[18px] font-semibold tabular-nums ${has ? 'text-ink' : 'text-ink-faint'}`}>{count}</span>}
-      </div>
-      <div className="text-[12px] font-medium text-ink-dim">{label}</div>
-      <div className="mt-0.5 text-[11px] text-ink-faint truncate">{detail}</div>
+      <div title={value} className="w-full break-all rounded-md border border-line bg-card px-3 py-2 font-mono text-[12.5px] text-ink">{value}</div>
     </div>
   );
 }

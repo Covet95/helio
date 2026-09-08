@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { NavLink } from 'react-router-dom';
-import { Layers, SlidersHorizontal, Activity, ArrowLeftRight, FileDown, History } from 'lucide-react';
+import { Layers, SlidersHorizontal, Activity, ArrowLeftRight, FileDown, History, Sun, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import { useStore } from '../../store';
 
 const NAV = [
   { to: '/profiles', label: '配置档案', icon: Layers },
@@ -13,6 +14,8 @@ const NAV = [
 
 export default function Sidebar() {
   const [version, setVersion] = useState('0.2.0');
+  const collapsed = useStore((state) => state.sidebarCollapsed);
+  const toggleSidebar = useStore((state) => state.toggleSidebar);
 
   useEffect(() => {
     let cancelled = false;
@@ -29,40 +32,34 @@ export default function Sidebar() {
   }, []);
 
   return (
-    <aside className="flex h-full w-[212px] shrink-0 flex-col border-r border-line bg-surface">
-      <div className="drag-region px-4 pb-4 pt-5">
-        <div className="flex min-h-10 items-center gap-3">
+    <aside className={`flex h-full w-16 shrink-0 flex-col border-r border-line bg-card ${collapsed ? '' : 'md:w-[200px]'}`}>
+      <div className="drag-region px-3 pb-5 pt-5">
+        <div className="flex min-h-10 items-center gap-2.5">
           <div
-            className="grid h-10 w-10 shrink-0 place-items-center rounded-[10px]"
+            className="grid h-10 w-10 shrink-0 place-items-center rounded-lg"
             style={{
               background: 'linear-gradient(180deg, #FF8A3D 0%, #F56817 100%)',
               boxShadow: '0 2px 5px rgba(234, 88, 12, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.24)',
             }}
             aria-hidden="true"
           >
-            <svg className="block h-5 w-5" viewBox="0 0 24 24" fill="none">
-              <circle cx="12" cy="12" r="3.25" stroke="white" strokeWidth="1.65" />
-              <path
-                d="M12 3.25V5.5M12 18.5v2.25M3.25 12H5.5M18.5 12h2.25M5.81 5.81 7.4 7.4m9.2 9.2 1.59 1.59m0-12.38L16.6 7.4m-9.2 9.2-1.59 1.59"
-                stroke="white"
-                strokeWidth="1.65"
-                strokeLinecap="round"
-              />
-            </svg>
+            <Sun size={22} strokeWidth={1.8} className="text-white" />
           </div>
-          <div className="flex h-10 items-center">
-            <div className="text-[15px] font-bold leading-none tracking-tight text-ink">Helio</div>
+          <div className={`${collapsed ? 'hidden' : 'hidden md:flex'} h-10 items-center`}>
+            <div className="text-[20px] font-bold leading-none text-ink">Helio</div>
           </div>
         </div>
       </div>
 
-      <nav className="flex-1 px-3 space-y-1">
+      <nav aria-label="主导航" className="min-h-0 flex-1 space-y-1 overflow-y-auto px-2">
         {NAV.map(({ to, label, icon: Icon }) => (
           <NavLink
             key={to}
             to={to}
+            title={label}
+            aria-label={label}
             className={({ isActive }) =>
-              `group relative flex items-center gap-2.5 rounded-md px-2.5 py-2 text-[13px] font-medium transition-all duration-150 ${
+              `group relative flex min-h-11 items-center justify-center gap-2.5 rounded-md px-2.5 py-2 text-[13px] font-medium transition-colors duration-150 ${collapsed ? '' : 'md:justify-start'} ${
                 isActive
                   ? 'text-ink bg-elevated'
                   : 'text-ink-dim hover:text-ink hover:bg-elevated/60'
@@ -76,16 +73,20 @@ export default function Sidebar() {
                     isActive ? 'opacity-100 scale-y-100' : 'opacity-0 scale-y-0'
                   }`}
                 />
-                <Icon size={17} strokeWidth={2} className={isActive ? 'text-accent' : ''} />
-                <span>{label}</span>
+                <Icon size={18} strokeWidth={2} className={`shrink-0 ${isActive ? 'text-accent' : ''}`} />
+                <span className={collapsed ? 'hidden' : 'hidden md:inline'}>{label}</span>
               </>
             )}
           </NavLink>
         ))}
       </nav>
 
-      <div className="border-t border-line/70 px-4 py-3 font-mono text-[10.5px] text-ink-faint">
-        v{version}
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line px-3 py-3">
+        <span className={`${collapsed ? 'hidden' : 'hidden md:inline'} font-mono text-[11px] text-ink-faint`}>v{version}</span>
+        <button type="button" onClick={toggleSidebar} title={collapsed ? '展开导航' : '收起导航'}
+          aria-label={collapsed ? '展开导航' : '收起导航'} aria-expanded={!collapsed} className="icon-button hidden md:grid">
+          {collapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}
+        </button>
       </div>
     </aside>
   );

@@ -190,46 +190,52 @@ export default function ExportPage() {
           <ActionRow
             icon={<Download size={20} className="text-accent" />}
             title="导出便携备份"
-            meta="数据库 + Skills"
+            meta="推荐 · 数据库 + Skills，换机迁移用这个"
             button={<Button onClick={handlePortableExport} disabled={portableExporting}><Download size={16} />{portableExporting ? '导出中…' : '导出'}</Button>}
           />
           <ActionRow
             icon={<Upload size={20} className="text-opencode" />}
             title="恢复便携备份"
-            meta="校验后恢复数据库、Skills 与激活配置"
+            meta="推荐 · 校验后恢复数据库、Skills 与激活配置"
             button={<Button variant="secondary" onClick={() => setConfirmPortableImport(true)} disabled={portableImporting}><Upload size={16} />{portableImporting ? '恢复中…' : '恢复'}</Button>}
           />
         </div>
+        <p className="mt-3 text-[12px] leading-relaxed text-ink-faint">
+          单个配置文件的版本回退不在这里：在「共享配置」页底部按工具查看自动备份并恢复。
+        </p>
 
-        <div className="mt-4 overflow-hidden rounded-lg border border-line bg-card">
-          <ActionRow
-            icon={<Download size={20} className="text-accent" />}
-            title="导出数据库"
-            meta=".db / .sqlite"
-            button={<Button onClick={handleExport} disabled={exporting}><Download size={16} />{exporting ? '导出中…' : '导出'}</Button>}
-          />
-          <ActionRow
-            icon={<Upload size={20} className="text-opencode" />}
-            title="导入数据库"
-            meta="仅接受 Helio 备份 · 覆盖前自动备份"
-            button={<Button variant="secondary" onClick={() => setConfirmImport(true)} disabled={importing}><Upload size={16} />{importing ? '导入中…' : '导入'}</Button>}
-          />
-        </div>
-
-        <div className="mt-4 overflow-hidden rounded-lg border border-line bg-card">
-          <ActionRow
-            icon={<FolderCog size={20} className="text-accent" />}
-            title="导出 Skills"
-            meta="claude-code / codex / opencode / pi / hermes / openclaw / zcode 全部 Skills 目录"
-            button={<Button onClick={handleSkillsExport} disabled={skillsExporting}><Download size={16} />{skillsExporting ? '导出中…' : '导出'}</Button>}
-          />
-          <ActionRow
-            icon={<FolderCog size={20} className="text-opencode" />}
-            title="导入 Skills"
-            meta="tar.gz · 整体校验 · 同名跳过"
-            button={<Button variant="secondary" onClick={() => setConfirmSkillsImport(true)} disabled={skillsImporting}><Upload size={16} />{skillsImporting ? '导入中…' : '导入'}</Button>}
-          />
-        </div>
+        <details className="mt-4 overflow-hidden rounded-lg border border-line bg-card">
+          <summary className="cursor-pointer px-4 py-3 text-[13px] font-medium text-ink-dim hover:text-ink">
+            高级：单独备份数据库 / Skills
+            <span className="mt-0.5 block text-[11px] font-normal text-ink-faint">便携备份已包含这两项；一般不需要单独操作</span>
+          </summary>
+          <div className="border-t border-line">
+            <ActionRow
+              icon={<Download size={20} className="text-accent" />}
+              title="导出数据库"
+              meta=".db / .sqlite"
+              button={<Button onClick={handleExport} disabled={exporting}><Download size={16} />{exporting ? '导出中…' : '导出'}</Button>}
+            />
+            <ActionRow
+              icon={<Upload size={20} className="text-opencode" />}
+              title="导入数据库"
+              meta="仅接受 Helio 备份 · 覆盖前自动备份"
+              button={<Button variant="secondary" onClick={() => setConfirmImport(true)} disabled={importing}><Upload size={16} />{importing ? '导入中…' : '导入'}</Button>}
+            />
+            <ActionRow
+              icon={<FolderCog size={20} className="text-accent" />}
+              title="导出 Skills"
+              meta="全部工具 Skills 目录"
+              button={<Button onClick={handleSkillsExport} disabled={skillsExporting}><Download size={16} />{skillsExporting ? '导出中…' : '导出'}</Button>}
+            />
+            <ActionRow
+              icon={<FolderCog size={20} className="text-opencode" />}
+              title="导入 Skills"
+              meta="tar.gz · 整体校验 · 同名跳过"
+              button={<Button variant="secondary" onClick={() => setConfirmSkillsImport(true)} disabled={skillsImporting}><Upload size={16} />{skillsImporting ? '导入中…' : '导入'}</Button>}
+            />
+          </div>
+        </details>
         </div>
 
         {confirmPortableImport && (

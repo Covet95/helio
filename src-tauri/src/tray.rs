@@ -197,10 +197,7 @@ fn do_switch(app: &AppHandle, tool: TargetApp, profile_name: &str) {
             let profile = db
                 .get_profile_by_name_and_target(profile_name, tool)
                 .map_err(|e| e.to_string())?;
-            let persisted_shared_config = db
-                .get_shared_config(tool)
-                .map_err(|e| e.to_string())?
-                .map(|config| config.config);
+            let persisted_shared_config = db.get_shared_config(tool).map_err(|e| e.to_string())?;
             (profile, persisted_shared_config)
         };
         // 全局写锁：与 GUI 切换等写盘命令互斥

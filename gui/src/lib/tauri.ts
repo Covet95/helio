@@ -113,21 +113,14 @@ export const tauriApi = {
     command<void>('import_database', { inputPath }),
 
   exportPortableBackup: (outputPath: string) =>
-    command<PortableBackupExportResult>('export_portable_backup', { outputPath }, {
-      path: '',
-      skills: { apps: [], total: 0, path: '' },
-    }),
+    command<PortableBackupExportResult>('export_portable_backup', { outputPath }),
 
   importPortableBackup: (inputPath: string) =>
     command<PortableBackupImportResult>('import_portable_backup', { inputPath }),
 
   // Skills 备份/恢复
   exportSkills: (outputPath: string) =>
-    command<SkillsExportResult>('export_skills', { outputPath }, {
-      apps: [],
-      total: 0,
-      path: '',
-    }),
+    command<SkillsExportResult>('export_skills', { outputPath }),
 
   importSkills: (inputPath: string) =>
     command<SkillsImportResult>('import_skills', { inputPath }),
@@ -249,10 +242,10 @@ export const tauriApi = {
     command<DeleteResult>('delete_session', { tool, id }),
 
   deleteSessions: (items: { tool: string; id: string }[]) =>
-    command<DeleteResult[]>('delete_sessions', { items }, []),
+    command<DeleteResult[]>('delete_sessions', { items }),
 
   cleanupSessions: (tool: string | undefined, olderThanDays: number) =>
-    command<DeleteResult[]>('cleanup_sessions', { tool, olderThanDays }, []),
+    command<DeleteResult[]>('cleanup_sessions', { tool, olderThanDays }),
 };
 
 export interface CcSwitchProvider {

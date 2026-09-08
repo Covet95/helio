@@ -27,6 +27,13 @@ pub fn run() {
         eprintln!("[Helio] failed to recover interrupted switch: {error:#}");
     }
 
+    // 冷启动同步：以磁盘共享配置为准写回数据库，省去手动扫描导入；
+    // 文件缺失或读取失败时跳过，不阻塞启动；只动共享配置，不碰 API 凭据。
+    let synced = switch_api::adapters::sync_startup_shared_configs(&db);
+    if !synced.is_empty() {
+        eprintln!("[Helio] startup shared-config sync: {synced:?}");
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())

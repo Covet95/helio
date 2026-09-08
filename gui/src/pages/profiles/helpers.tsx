@@ -19,20 +19,21 @@ export function EmptyState({ toolLabel }: { toolLabel?: string }) {
       <p className="text-[13px] text-ink-faint">
         {toolLabel ? `${toolLabel} 暂无配置档案` : '暂无配置档案'}
       </p>
-      <p className="mt-1 text-[11px] text-ink-faint">点右上角「新建档案」开始</p>
     </div>
   );
 }
 
-export function AppSelector({ value, onChange }: { value: TargetApp; onChange: (value: TargetApp) => void }) {
+export function AppSelector({ value, onChange, disabled }: { value: TargetApp; onChange: (value: TargetApp) => void; disabled?: boolean }) {
   return (
-    <div className="flex w-fit max-w-full flex-wrap items-center gap-1 rounded-lg border border-line bg-surface p-1">
+    <div role="group" aria-label="目标工具" className="flex w-fit max-w-full flex-wrap items-center gap-1 rounded-lg border border-line bg-surface p-1">
       {SUPPORTED_TOOLS.map((tool) => {
         const active = value === tool.id;
         return (
           <button
             key={tool.id}
             type="button"
+            aria-pressed={active}
+            disabled={disabled}
             onClick={() => onChange(tool.id)}
             className={cn(
               'no-drag flex shrink-0 items-center gap-2 whitespace-nowrap rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors',
@@ -48,14 +49,15 @@ export function AppSelector({ value, onChange }: { value: TargetApp; onChange: (
   );
 }
 
-export function IconBtn({ children, label, danger, onClick }: { children: React.ReactNode; label: string; danger?: boolean; onClick: () => void }) {
+export function IconBtn({ children, label, danger, onClick, disabled }: { children: React.ReactNode; label: string; danger?: boolean; onClick: () => void; disabled?: boolean }) {
   return (
     <button
       type="button"
       title={label}
       aria-label={label}
       onClick={onClick}
-      className={`no-drag grid place-items-center h-8 w-8 rounded-lg border border-line bg-surface transition-all hover:bg-elevated ${
+      disabled={disabled}
+      className={`no-drag grid place-items-center h-8 w-8 rounded-lg transition-colors hover:bg-elevated disabled:opacity-40 ${
         danger ? 'text-ink-faint hover:text-danger hover:border-danger/40' : 'text-ink-faint hover:text-ink'
       }`}
     >
