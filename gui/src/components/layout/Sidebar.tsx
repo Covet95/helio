@@ -13,7 +13,7 @@ const NAV = [
 ];
 
 export default function Sidebar() {
-  const [version, setVersion] = useState('0.2.0');
+  const [version, setVersion] = useState('0.2.1');
   const collapsed = useStore((state) => state.sidebarCollapsed);
   const toggleSidebar = useStore((state) => state.toggleSidebar);
 
