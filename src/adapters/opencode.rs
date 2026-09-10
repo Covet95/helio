@@ -99,7 +99,14 @@ impl OpenCodeAdapter {
         let mut config = config.clone();
 
         if let Some(providers) = config.get_mut("provider").and_then(|v| v.as_object_mut()) {
-            providers.remove(&pid);
+            let doomed: Vec<String> = providers
+                .keys()
+                .filter(|k| k.eq_ignore_ascii_case(&pid))
+                .cloned()
+                .collect();
+            for key in doomed {
+                providers.remove(&key);
+            }
         }
 
         // model / small_model 格式为 provider/model；指向被删 id 时清掉，避免脏引用
@@ -137,7 +144,7 @@ impl OpenCodeAdapter {
         let present = config
             .get("provider")
             .and_then(|p| p.as_object())
-            .map(|m| m.contains_key(&pid))
+            .map(|m| m.keys().any(|k| k.eq_ignore_ascii_case(&pid)))
             .unwrap_or(false);
         if !present {
             return Ok(());
@@ -187,18 +194,87 @@ impl OpenCodeAdapter {
         Ok(deleted)
     }
 
+    /// 与探活 `openai_compat_base` 同语义：先剥 Anthropic 兼容后缀，
+    /// 再处理 provider 特判（智谱 / z.ai 等走 paas/v4），最后确保版本根。
+    /// 保持与 `probe::chat_completions_url_compat` 一致，否则探活过而实际写坏。
+    const COMPAT_SUFFIXES: &[&str] = &[
+        "/api/claudecode",
+        "/api/anthropic",
+        "/apps/anthropic",
+        "/api/coding",
+        "/claudecode",
+        "/anthropic",
+        "/step_plan",
+        "/coding",
+        "/claude",
+    ];
+
+    const PROVIDER_COMPAT_BASES: &[(&str, &str)] = &[
+        ("bigmodel.cn", "https://open.bigmodel.cn/api/paas/v4"),
+        ("z.ai", "https://api.z.ai/api/paas/v4"),
+        ("deepseek.com", "https://api.deepseek.com/v1"),
+        ("moonshot.cn", "https://api.moonshot.cn/v1"),
+        ("openrouter.ai", "https://openrouter.ai/api/v1"),
+        ("siliconflow.cn", "https://api.siliconflow.cn/v1"),
+        (
+            "dashscope.aliyuncs.com",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        ),
+    ];
+
+    fn provider_compat_base(api_url: &str) -> Option<String> {
+        let lower = api_url.to_lowercase();
+        Self::PROVIDER_COMPAT_BASES
+            .iter()
+            .find(|(pat, _)| lower.contains(pat))
+            .map(|(_, base)| base.to_string())
+    }
+
+    fn strip_compat_suffixes(base: &str) -> String {
+        let mut out = base.to_string();
+        for suffix in Self::COMPAT_SUFFIXES {
+            if let Some(stripped) = out.strip_suffix(suffix) {
+                out = stripped.trim_end_matches('/').to_string();
+            }
+        }
+        out
+    }
+
+    /// 大小写不敏感查找已存在的 provider key，复用磁盘原大小写，避免
+    /// 新建小写 key 造成 `OpenAI` / `openai` 双份。
+    fn find_provider_key(
+        providers: &serde_json::Map<String, serde_json::Value>,
+        provider_id: &str,
+    ) -> Option<String> {
+        providers
+            .keys()
+            .find(|k| k.eq_ignore_ascii_case(provider_id))
+            .cloned()
+    }
+
     /// 规范化 OpenCode openai-compatible 的 baseURL。
     ///
     /// OpenCode 默认 `npm = @ai-sdk/openai-compatible` 会把路径拼成
     /// `{baseURL}/chat/completions`。若 base 只有域名（如 Hermes 常见的
     /// `https://host`），就会打到站点 HTML 而不是 API。
-    /// 因此：去掉尾斜杠后，若尚未是版本根（`/v1` 或 `/paas/v4`）则补 `/v1`。
+    /// 因此：显式版本根原样保留 → provider 特判 → 剥 Anthropic 兼容后缀（与探活一致）→
+    /// 若尚未是版本根（`/v1` 或 `/paas/v4`）则补 `/v1`。
     /// 已带 `/v1` 的保持原样，避免出现 `/v1/v1`。
     fn normalize_openai_compatible_base_url(api_url: &str) -> String {
         let base = api_url.trim().trim_end_matches('/');
         if base.is_empty() {
             return String::new();
         }
+        // Explicit version roots win: a user-supplied version root must be kept
+        // as-is and never rewritten by the provider table below.
+        if base.ends_with("/v1") || base.ends_with("/paas/v4") {
+            return base.to_string();
+        }
+        if let Some(provider_base) = Self::provider_compat_base(base) {
+            return provider_base;
+        }
+        let stripped = Self::strip_compat_suffixes(base);
+        let base = if stripped.is_empty() { base } else { &stripped };
         if base.ends_with("/v1") || base.ends_with("/paas/v4") {
             return base.to_string();
         }
@@ -255,6 +331,7 @@ impl OpenCodeAdapter {
     }
 
     /// Remove only models previously written by Helio for this provider.
+    /// provider key 大小写不敏感匹配磁盘原大小写，避免 `OpenAI` 残留。
     pub fn prepare_shared_config_for_switch(
         shared_config: &serde_json::Value,
         api_profile: &ApiProfile,
@@ -264,23 +341,42 @@ impl OpenCodeAdapter {
         let desired = Self::resolve_model_ids(api_profile);
         let mut config = shared_config.clone();
 
-        if let Some(previous_ids) = previous_state.get(&provider_id) {
-            if let Some(models) = config
-                .get_mut("provider")
-                .and_then(|providers| providers.as_object_mut())
-                .and_then(|providers| providers.get_mut(&provider_id))
-                .and_then(|provider| provider.get_mut("models"))
-                .and_then(|models| models.as_object_mut())
-            {
-                for model_id in previous_ids {
-                    if !desired.iter().any(|model| model == model_id) {
-                        models.remove(model_id);
+        let previous_ids = previous_state
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(&provider_id))
+            .map(|(_, v)| v);
+        if let Some(previous_ids) = previous_ids {
+            let actual_key = config
+                .get("provider")
+                .and_then(|p| p.as_object())
+                .and_then(|m| Self::find_provider_key(m, &provider_id));
+            if let Some(key) = actual_key {
+                if let Some(models) = config
+                    .get_mut("provider")
+                    .and_then(|providers| providers.as_object_mut())
+                    .and_then(|providers| providers.get_mut(&key))
+                    .and_then(|provider| provider.get_mut("models"))
+                    .and_then(|models| models.as_object_mut())
+                {
+                    for model_id in previous_ids {
+                        if !desired.iter().any(|model| model == model_id) {
+                            models.remove(model_id);
+                        }
                     }
                 }
             }
         }
 
         let mut next_state = previous_state.clone();
+        // 归一 key，避免 `CPA` / `cpa` 双份残留
+        let stale: Vec<String> = next_state
+            .keys()
+            .filter(|k| k.eq_ignore_ascii_case(&provider_id) && k.as_str() != provider_id)
+            .cloned()
+            .collect();
+        for key in stale {
+            next_state.remove(&key);
+        }
         if desired.is_empty() {
             next_state.remove(&provider_id);
         } else {
@@ -289,11 +385,32 @@ impl OpenCodeAdapter {
         (config, next_state)
     }
 
+    /// 按模型补丁合并：`limit` / `variants` 整体替换（UI 全量管理，删掉的键必须消失），
+    /// 其余（`options` 等含隐藏导入字段）深合并保留未知键；`Null` 视为删除信号。
+    fn merge_model_config(
+        target: &mut serde_json::Map<String, serde_json::Value>,
+        patch: &serde_json::Map<String, serde_json::Value>,
+    ) {
+        for key in ["limit", "variants"] {
+            if patch.contains_key(key) {
+                target.remove(key);
+            } else {
+                // 补丁没提 limit/variants → 档案不再管理它们，清理旧值防僵尸
+                target.remove(key);
+            }
+        }
+        Self::merge_json_objects(target, patch);
+    }
+
     fn merge_json_objects(
         target: &mut serde_json::Map<String, serde_json::Value>,
         patch: &serde_json::Map<String, serde_json::Value>,
     ) {
         for (key, value) in patch {
+            if value.is_null() {
+                target.remove(key);
+                continue;
+            }
             match (target.get_mut(key), value) {
                 (Some(serde_json::Value::Object(existing)), serde_json::Value::Object(next)) => {
                     Self::merge_json_objects(existing, next);
@@ -325,6 +442,7 @@ fn strip_credentials(config: &mut serde_json::Value) {
 
 /// 把磁盘配置中其他 provider 的 key 补回 shared（shared 已剥离）。
 /// 当前 provider 的 key 随后会被 merge 用 profile 的值覆盖。
+/// 大小写不敏感匹配，避免 `OpenAI` 凭据丢回失败。
 fn restore_credentials(config: &mut serde_json::Value, disk: &serde_json::Value) {
     let Some(shared_providers) = config.get_mut("provider").and_then(|v| v.as_object_mut()) else {
         return;
@@ -332,10 +450,16 @@ fn restore_credentials(config: &mut serde_json::Value, disk: &serde_json::Value)
     let Some(disk_providers) = disk.get("provider").and_then(|v| v.as_object()) else {
         return;
     };
+    // 先收集磁盘 key 的小写索引，避免借用冲突
+    let disk_index: Vec<(String, serde_json::Value)> = disk_providers
+        .iter()
+        .filter_map(|(k, v)| {
+            v.pointer("/options/apiKey")
+                .cloned()
+                .map(|key| (k.to_lowercase(), key))
+        })
+        .collect();
     for (id, shared_p) in shared_providers.iter_mut() {
-        let Some(disk_p) = disk_providers.get(id) else {
-            continue;
-        };
         let Some(shared_options) = shared_p.get_mut("options").and_then(|v| v.as_object_mut())
         else {
             continue;
@@ -343,7 +467,8 @@ fn restore_credentials(config: &mut serde_json::Value, disk: &serde_json::Value)
         if shared_options.contains_key("apiKey") {
             continue;
         }
-        if let Some(key) = disk_p.pointer("/options/apiKey") {
+        let needle = id.to_lowercase();
+        if let Some((_, key)) = disk_index.iter().find(|(k, _)| *k == needle) {
             shared_options.insert("apiKey".into(), key.clone());
         }
     }
@@ -396,10 +521,15 @@ impl ConfigAdapter for OpenCodeAdapter {
         }
 
         if let Some(providers) = config.get_mut("provider").and_then(|v| v.as_object_mut()) {
-            let is_new = !providers.contains_key(&provider_id);
+            // 复用磁盘原大小写 key，避免 `OpenAI`/`openai` 双份
+            let actual_key = Self::find_provider_key(providers, &provider_id)
+                .unwrap_or_else(|| provider_id.clone());
+            let is_new = Self::find_provider_key(providers, &provider_id).is_none();
             let entry = providers
-                .entry(provider_id.clone())
+                .entry(actual_key.clone())
                 .or_insert_with(|| serde_json::json!({}));
+            // 后续顶层 model 用磁盘实际 key，保持引用一致
+            let provider_id = actual_key;
             if let Some(p) = entry.as_object_mut() {
                 // 全新 provider：补上 OpenCode 加载所必需的 npm 适配器与显示名。
                 // 缺 npm 时 OpenCode 无法加载该 provider，切换会失效。
@@ -458,7 +588,12 @@ impl ConfigAdapter for OpenCodeAdapter {
                                     .and_then(|configs| configs.get(m))
                                     .and_then(|config| config.as_object())
                                 {
-                                    Self::merge_json_objects(model_obj, model_config);
+                                    Self::merge_model_config(model_obj, model_config);
+                                } else {
+                                    // 档案无此模型配置 → 清掉旧 limit/variants 防僵尸，
+                                    // options 等隐藏字段保留（UI 不管理）。
+                                    model_obj.remove("limit");
+                                    model_obj.remove("variants");
                                 }
                             }
                         }
@@ -486,6 +621,26 @@ impl ConfigAdapter for OpenCodeAdapter {
                 // 没有可指定的模型：移除顶层 model，避免指向已切走/失效的 provider
                 if let Some(obj) = config.as_object_mut() {
                     obj.remove("model");
+                }
+            }
+        }
+
+        // small_model 从不由档案管理：若指向当前 provider 但模型已不在管理集，
+        // 或指向已不存在的 provider，视为僵尸引用一并清理，避免切走后残留。
+        // 跨 provider 的 small_model（如用户手动配的别的 provider）予以保留。
+        {
+            let desired: std::collections::HashSet<String> =
+                Self::resolve_model_ids(api_profile).into_iter().collect();
+            let stale_small = config
+                .get("small_model")
+                .and_then(|v| v.as_str())
+                .and_then(|m| m.split_once('/'))
+                .map(|(p, mid)| (p.to_string(), mid.to_string()));
+            if let Some((p, mid)) = stale_small {
+                if p.eq_ignore_ascii_case(&provider_id) && !desired.contains(&mid) {
+                    if let Some(obj) = config.as_object_mut() {
+                        obj.remove("small_model");
+                    }
                 }
             }
         }

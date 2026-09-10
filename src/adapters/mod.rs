@@ -50,6 +50,16 @@ pub trait ConfigAdapter {
         Ok(())
     }
 
+    /// 写盘前校验合并结果。默认无操作；实现返回 Err 时整个切换事务回滚，
+    /// 防止把语义残缺的配置静默写盘。
+    fn verify_merged_config(
+        &self,
+        _merged: &serde_json::Value,
+        _api_profile: &ApiProfile,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     /// 写入主配置文件之外的辅助文件（如 Claude 的 ~/.claude.json 里的 MCP）。
     /// 默认无操作；实现出错时整个切换事务回滚。
     fn apply_auxiliary_config(&self, _shared_config: &serde_json::Value) -> Result<()> {
@@ -132,6 +142,8 @@ pub fn apply_profile_transaction(
 ) -> Result<()> {
     let snapshots = adapter.snapshot_files()?;
     let merged = adapter.merge_config(api_profile, shared_config);
+    // 写盘前语义校验：不通过则直接走快照回滚，避免残缺配置落地。
+    adapter.verify_merged_config(&merged, api_profile)?;
     if let Err(error) = adapter
         .write_config(&merged)
         .and_then(|_| adapter.apply_api_credentials(api_profile))

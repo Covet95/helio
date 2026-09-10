@@ -263,6 +263,25 @@ impl CodexAdapter {
         Ok(())
     }
 
+    /// 解析本次切换的目标 provider id（与 merge_config 共用，保证校验与写入一致）。
+    /// 返回 (provider_id, 是否 bedrock)。
+    fn active_provider_id(api_profile: &ApiProfile) -> (String, bool) {
+        if Self::is_amazon_bedrock_profile(api_profile) {
+            return ("amazon-bedrock".to_string(), true);
+        }
+        // 非 bedrock：用 profile.provider 作为 id（默认沿用 custom），保留字加后缀。
+        let raw_id = if api_profile.provider.is_empty() {
+            "custom".to_string()
+        } else {
+            api_profile.provider.to_lowercase()
+        };
+        if Self::is_reserved_provider_id(&raw_id) {
+            (format!("{raw_id}-custom"), false)
+        } else {
+            (raw_id, false)
+        }
+    }
+
     /// Codex 内置（保留）的 provider id —— 不允许在 model_providers 中覆盖。
     /// 参见 Codex 报错：`model_providers contains reserved built-in provider IDs`。
     fn is_reserved_provider_id(id: &str) -> bool {
@@ -553,7 +572,12 @@ impl ConfigAdapter for CodexAdapter {
         api_profile: &ApiProfile,
         shared_config: &serde_json::Value,
     ) -> serde_json::Value {
-        let mut config = shared_config.clone();
+        // 防御：非对象共享配置从空对象起步，避免后续下标写入 panic。正常路径无影响。
+        let mut config = if shared_config.is_object() {
+            shared_config.clone()
+        } else {
+            serde_json::json!({})
+        };
 
         let is_bedrock = Self::is_amazon_bedrock_profile(api_profile);
         if config.get("model_providers").is_none() {
@@ -605,16 +629,7 @@ impl ConfigAdapter for CodexAdapter {
             // 使用 profile.provider 作为 provider id（默认沿用 "custom"）。
             // Codex 保留了内置 provider id（如 `openai`），不允许在 model_providers
             // 中覆盖；若撞上保留字则加 `-custom` 后缀（与 Codex 报错建议一致）。
-            let raw_id = if api_profile.provider.is_empty() {
-                "custom".to_string()
-            } else {
-                api_profile.provider.to_lowercase()
-            };
-            let provider_id = if Self::is_reserved_provider_id(&raw_id) {
-                format!("{raw_id}-custom")
-            } else {
-                raw_id
-            };
+            let (provider_id, _) = Self::active_provider_id(api_profile);
 
             // 写入目标 provider 配置并保留 Profile 指定的协议与鉴权模式；其他 provider 不动。
             if let Some(providers) = config
@@ -879,6 +894,72 @@ impl ConfigAdapter for CodexAdapter {
         config
     }
 
+    /// Pre-write semantic check: the merged config must carry this switch target provider.
+    /// On failure the switch transaction rolls back from snapshots, so a broken config
+    /// is never silently written to disk.
+    fn verify_merged_config(
+        &self,
+        merged: &serde_json::Value,
+        api_profile: &ApiProfile,
+    ) -> Result<()> {
+        let merged_obj = merged.as_object().ok_or_else(|| {
+            anyhow::anyhow!("Codex merge result is not an object; refusing to write")
+        })?;
+        if merged_obj.is_empty() {
+            anyhow::bail!("Codex merge result is empty; refusing to write");
+        }
+        let (provider_id, is_bedrock) = Self::active_provider_id(api_profile);
+        let active = merged_obj
+            .get("model_provider")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        if active != provider_id {
+            anyhow::bail!("Codex merge result provider mismatch; refusing to write");
+        }
+        // Bedrock without aws settings is intentionally omitted by merge; otherwise
+        // the target section must exist and offer a working endpoint/credential route.
+        if is_bedrock {
+            return Ok(());
+        }
+        let entry = merged_obj
+            .get("model_providers")
+            .and_then(|value| value.as_object())
+            .and_then(|providers| providers.get(&provider_id))
+            .and_then(|value| value.as_object())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Codex merge result misses target provider section; refusing to write"
+                )
+            })?;
+        let non_empty_str = |key: &str| {
+            entry
+                .get(key)
+                .and_then(|value| value.as_str())
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false)
+        };
+        let has_command_auth = entry
+            .get("auth")
+            .and_then(|value| value.as_object())
+            .map(|auth| !auth.is_empty())
+            .unwrap_or(false);
+        if !(non_empty_str("base_url")
+            || non_empty_str("env_key")
+            || non_empty_str("experimental_bearer_token")
+            || has_command_auth)
+        {
+            anyhow::bail!(
+                "Codex merge result target provider has no endpoint/credential; refusing to write"
+            );
+        }
+        match entry.get("wire_api").and_then(|value| value.as_str()) {
+            Some("responses") => Ok(()),
+            _ => anyhow::bail!(
+                "Codex merge result target provider wire_api invalid; refusing to write"
+            ),
+        }
+    }
+
     fn write_config(&self, config: &serde_json::Value) -> Result<()> {
         let path = self.config_path();
 
@@ -1003,6 +1084,78 @@ mod tests {
             api_key: "sk-test-key".to_string(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_merge_with_non_object_shared_starts_empty() {
+        let adapter = CodexAdapter::new();
+        // Guard: null shared config no longer panics; merge starts from empty object.
+        let merged = adapter.merge_config(&sample_profile(), &serde_json::Value::Null);
+        assert_eq!(merged["model_provider"], "openai-custom");
+        assert_eq!(
+            merged["model_providers"]["openai-custom"]["base_url"],
+            "https://api.example.com/v1"
+        );
+    }
+
+    #[test]
+    fn test_verify_merged_config_accepts_valid_merge() {
+        let adapter = CodexAdapter::new();
+        let shared = adapter.extract_shared_config(&serde_json::json!({
+            "model_provider": "openai-custom",
+            "sandbox_mode": "danger-full-access",
+            "mcp_servers": {"a": {"command": "x"}},
+            "model_providers": {
+                "openai-custom": {"base_url": "https://old", "wire_api": "responses"}
+            }
+        }));
+        let profile = sample_profile();
+        let merged = adapter.merge_config(&profile, &shared);
+        adapter.verify_merged_config(&merged, &profile).unwrap();
+        // Shared areas must survive the switch.
+        assert_eq!(merged["sandbox_mode"], "danger-full-access");
+        assert!(merged.get("mcp_servers").is_some());
+    }
+
+    #[test]
+    fn test_verify_merged_config_rejects_stripped_config() {
+        let adapter = CodexAdapter::new();
+        let profile = sample_profile();
+        // Empty object.
+        assert!(adapter
+            .verify_merged_config(&serde_json::json!({}), &profile)
+            .is_err());
+        // Missing provider section.
+        assert!(adapter
+            .verify_merged_config(
+                &serde_json::json!({"model_provider": "openai-custom", "model_providers": {}}),
+                &profile
+            )
+            .is_err());
+        // Active provider mismatch.
+        assert!(adapter
+            .verify_merged_config(
+                &serde_json::json!({
+                    "model_provider": "other",
+                    "model_providers": {
+                        "openai-custom": {"base_url": "https://x", "wire_api": "responses"}
+                    }
+                }),
+                &profile
+            )
+            .is_err());
+        // Illegal wire_api.
+        assert!(adapter
+            .verify_merged_config(
+                &serde_json::json!({
+                    "model_provider": "openai-custom",
+                    "model_providers": {
+                        "openai-custom": {"base_url": "https://x", "wire_api": "chat"}
+                    }
+                }),
+                &profile
+            )
+            .is_err());
     }
 
     #[test]
