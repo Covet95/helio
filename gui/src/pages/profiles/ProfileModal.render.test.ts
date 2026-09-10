@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeAll, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import React from 'react';
 import type { ApiProfile, TargetApp } from '../../types';
 import { SUPPORTED_TOOLS } from '../../types';
@@ -123,6 +123,96 @@ describe('ProfileModal edit rendering', () => {
       }),
     );
     expect(screen.getByLabelText('名称')).toBeTruthy();
+    cleanup();
+  });
+
+  it('renders opencode model cards without fetching (union of model/models/configs)', () => {
+    render(
+      React.createElement(ProfileModal, {
+        profile: sampleProfile('opencode', {
+          model: 'gpt-5',
+          models: ['gpt-5'],
+          model_configs: { 'ghost-model': { limit: { context: 1000, output: 100 } } },
+          opencode_api_mode: 'chat_completions',
+        }),
+        initialTool: 'opencode' as TargetApp,
+        onClose: () => {},
+        onSave: async () => {},
+      }),
+    );
+    // fetchModels is mocked to [] — the custom config-only model must still be manageable.
+    expect(screen.getByLabelText('删除模型 ghost-model')).toBeTruthy();
+    expect(screen.getByLabelText('挂载模型 ghost-model')).toBeTruthy();
+    cleanup();
+  });
+
+  it('opencode variant rows carry exactly one effort select', () => {
+    const { container } = render(
+      React.createElement(ProfileModal, {
+        profile: sampleProfile('opencode', {
+          model: 'gpt-5',
+          models: ['gpt-5'],
+          model_configs: { 'gpt-5': { variants: { low: {} } } },
+          opencode_api_mode: 'chat_completions',
+        }),
+        initialTool: 'opencode' as TargetApp,
+        onClose: () => {},
+        onSave: async () => {},
+      }),
+    );
+    // variant row: id editor, one effort select, disabled toggle, delete.
+    expect(screen.getByLabelText('Variant low 名称')).toBeTruthy();
+    expect(screen.getByLabelText('删除模型 gpt-5')).toBeTruthy();
+    const effort = screen.getByLabelText('Variant low 推理强度') as HTMLSelectElement;
+    expect(Array.from(effort.options).map((o) => o.value)).toEqual(
+      ['', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh'],
+    );
+    expect(container.querySelectorAll('select').length).toBe(1);
+    // variant quick-add covers the official OpenAI set names.
+    expect(screen.getByRole('button', { name: '+ none' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '+ minimal' })).toBeTruthy();
+    cleanup();
+  });
+
+  it('deleting the default model promotes the next remaining model', () => {
+    render(
+      React.createElement(ProfileModal, {
+        profile: sampleProfile('opencode', {
+          model: 'model-a',
+          models: ['model-a', 'model-b'],
+          opencode_api_mode: 'chat_completions',
+        }),
+        initialTool: 'opencode' as TargetApp,
+        onClose: () => {},
+        onSave: async () => {},
+      }),
+    );
+    fireEvent.click(screen.getByLabelText('删除模型 model-a'));
+    expect(screen.queryByLabelText('删除模型 model-a')).toBeNull();
+    expect(screen.getByLabelText('删除模型 model-b')).toBeTruthy();
+    expect((screen.getByLabelText('默认模型') as HTMLInputElement).value).toBe('model-b');
+    cleanup();
+  });
+
+  it('default model checkbox is disabled, unchecking keeps the config card', () => {
+    render(
+      React.createElement(ProfileModal, {
+        profile: sampleProfile('opencode', {
+          model: 'model-a',
+          models: ['model-a', 'model-b'],
+          model_configs: { 'model-b': { name: 'B' } },
+          opencode_api_mode: 'chat_completions',
+        }),
+        initialTool: 'opencode' as TargetApp,
+        onClose: () => {},
+        onSave: async () => {},
+      }),
+    );
+    expect((screen.getByLabelText('挂载模型 model-a') as HTMLInputElement).disabled).toBe(true);
+    fireEvent.click(screen.getByLabelText('挂载模型 model-b'));
+    // Unmount only: the configured card (and its delete path) must remain.
+    expect(screen.getByLabelText('删除模型 model-b')).toBeTruthy();
+    expect((screen.getByLabelText('挂载模型 model-b') as HTMLInputElement).checked).toBe(false);
     cleanup();
   });
 });

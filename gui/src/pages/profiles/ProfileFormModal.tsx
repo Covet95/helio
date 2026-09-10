@@ -25,6 +25,10 @@ import {
   normalizeOpenCodeModelConfigs,
 } from './helpers';
 
+// OpenCode 推理强度档位：官方 OpenAI variant 六档（variant 行唯一的选项控件）。
+const OPENCODE_EFFORT_LEVELS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'];
+const OPENCODE_VARIANT_QUICK_ADD = ['none', 'minimal', 'low', 'medium', 'high', 'max'];
+
 function newKeyId(): string {
   return `k${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
 }
@@ -256,11 +260,66 @@ export function ProfileModal({
 
   const presets = PROVIDER_PRESETS[tool];
   const showModelParams = tool === 'codex' || tool === 'claude-code' || tool === 'pi' || tool === 'opencode' || tool === 'hermes' || tool === 'openclaw' || tool === 'zcode';
-  const openCodeModelIds = Array.from(new Set([
+  // OpenCode 模型的单一读写口：三片存储（默认模型 / 挂载列表 / 逐模型配置）在渲染时
+  // 归一为条目列表，结构性修改（挂载、打补丁、删除）只走 setOpenCodeModels 写回。
+  // 默认模型输入框仍直写 form.model（单字段、无结构分叉，归一时自动纳入）。
+  type OpenCodeModelEntry = {
+    id: string;
+    mounted: boolean;
+    isDefault: boolean;
+    config: OpenCodeModelConfig | undefined;
+  };
+  const openCodeModels: OpenCodeModelEntry[] = Array.from(new Set([
     ...(form.models || []),
     form.model?.trim() || '',
     ...Object.keys(form.model_configs || {}),
-  ].filter(Boolean)));
+  ].filter(Boolean))).map((id) => ({
+    id,
+    mounted: (form.models || []).includes(id),
+    isDefault: (form.model || '').trim() === id,
+    config: form.model_configs?.[id],
+  }));
+
+  const setOpenCodeModels = (entries: OpenCodeModelEntry[]) => {
+    const nextConfigs: Record<string, OpenCodeModelConfig> = {};
+    for (const e of entries) {
+      if (e.config) nextConfigs[e.id] = e.config;
+    }
+    setForm({
+      ...form,
+      model: entries.find((e) => e.isDefault)?.id ?? '',
+      models: entries.filter((e) => e.mounted).map((e) => e.id),
+      model_configs: Object.keys(nextConfigs).length > 0 ? nextConfigs : undefined,
+    });
+  };
+
+  const patchOpenCodeModelConfig = (modelId: string, patch: Partial<OpenCodeModelConfig>) => {
+    setOpenCodeModels(openCodeModels.map((e) =>
+      e.id === modelId ? { ...e, config: { ...(e.config || {}), ...patch } } : e,
+    ));
+  };
+
+  // 彻底移除一个 OpenCode 模型：同时清理 models 挂载、model_configs 卡片和默认引用。
+  // 若删的是默认模型，自动把剩余并集里的第一个提升为默认，避免顶层 model 悬空。
+  const removeOpenCodeModel = (modelId: string) => {
+    const rest = openCodeModels.filter((e) => e.id !== modelId);
+    if (rest.length > 0 && !rest.some((e) => e.isDefault)) {
+      rest[0] = { ...rest[0], isDefault: true };
+    }
+    setOpenCodeModels(rest);
+    setVariantDrafts((drafts) => {
+      const next = { ...drafts };
+      delete next[modelId];
+      return next;
+    });
+    setVariantNameDrafts((drafts) => {
+      const next = { ...drafts };
+      for (const key of Object.keys(next)) {
+        if (key === modelId || key.startsWith(`${modelId}:`)) delete next[key];
+      }
+      return next;
+    });
+  };
 
   const applyPreset = (p: typeof presets[number]) => {
     setForm((f) => ({
@@ -614,33 +673,41 @@ export function ProfileModal({
                 {models.length > 0 && <div className="mt-1 text-[11px] text-ink-faint">已加载 {models.length} 个模型；也可在上方输入框自定义</div>}
               </div>
 
-              {tool === 'opencode' && models.length > 0 && (
+              {tool === 'opencode' && (models.length > 0 || openCodeModels.some((e) => !models.some((m) => m.id === e.id))) && (
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
                     <span className="text-[12px] font-medium text-ink-dim">
-                      provider 模型 <span className="font-normal text-ink-faint">（勾选要挂载到 OpenCode 的模型）</span>
+                      provider 模型 <span className="font-normal text-ink-faint">（勾选挂载；取消勾选保留配置，下方卡片删除按钮可彻底移除）</span>
                     </span>
                     <span className="text-[11px] text-ink-faint">已选 {(form.models || []).length}</span>
                   </div>
                   <div className="max-h-40 overflow-y-auto rounded-md border border-line bg-card p-1.5">
-                    {models.map((m) => {
-                      const selected = (form.models || []).includes(m.id);
+                    {[...openCodeModels, ...models.filter((m) => !openCodeModels.some((e) => e.id === m.id)).map((m) => ({ id: m.id, mounted: false, isDefault: false, config: undefined }) as OpenCodeModelEntry)].map((entry) => {
                       const toggle = () => {
-                        const cur = form.models || [];
-                        const nextConfigs = { ...(form.model_configs || {}) };
-                        if (selected && m.id !== form.model?.trim()) {
-                          delete nextConfigs[m.id];
+                        if (entry.isDefault) return;
+                        if (openCodeModels.some((e) => e.id === entry.id)) {
+                          setOpenCodeModels(openCodeModels.map((e) =>
+                            e.id === entry.id ? { ...e, mounted: !e.mounted } : e,
+                          ));
+                        } else {
+                          // 拉取列表里尚未纳管的模型：勾选即纳入并挂载。
+                          setOpenCodeModels([...openCodeModels, { ...entry, mounted: true }]);
                         }
-                        setForm({
-                          ...form,
-                          models: selected ? cur.filter((x) => x !== m.id) : [...cur, m.id],
-                          model_configs: Object.keys(nextConfigs).length > 0 ? nextConfigs : undefined,
-                        });
                       };
                       return (
-                        <label key={m.id} className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 hover:bg-elevated/60">
-                          <input type="checkbox" checked={selected} onChange={toggle} />
-                          <span className="truncate font-mono text-[12px] text-ink">{m.id}</span>
+                        <label
+                          key={entry.id}
+                          title={entry.isDefault ? '默认模型不可取消挂载，可更改默认模型或用下方卡片删除按钮移除' : undefined}
+                          className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 hover:bg-elevated/60"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={entry.mounted}
+                            disabled={entry.isDefault}
+                            onChange={toggle}
+                            aria-label={`挂载模型 ${entry.id}`}
+                          />
+                          <span className="truncate font-mono text-[12px] text-ink">{entry.id}</span>
                         </label>
                       );
                     })}
@@ -682,30 +749,18 @@ export function ProfileModal({
                     <div className="text-[12px] font-medium text-ink-dim">
                       模型行为 <span className="font-normal text-ink-faint">（默认模型、勾选模型和配置模型都会写入）</span>
                     </div>
-                    {openCodeModelIds.length === 0 ? (
+                    {openCodeModels.length === 0 ? (
                       <div className="rounded-md border border-dashed border-line px-3 py-2 text-[11px] text-ink-faint">
                         先填写默认模型，或加载模型列表后勾选模型
                       </div>
                     ) : (
-                      openCodeModelIds.map((modelId) => {
-                        const config: OpenCodeModelConfig = form.model_configs?.[modelId] || {};
-                        const options = config.options || {};
+                      openCodeModels.map((entry) => {
+                        const modelId = entry.id;
+                        const config: OpenCodeModelConfig = entry.config || {};
                         const limit = config.limit || {};
                         const variants = config.variants || {};
                         const setConfig = (patch: Partial<OpenCodeModelConfig>) => {
-                          setForm({
-                            ...form,
-                            model_configs: {
-                              ...(form.model_configs || {}),
-                              [modelId]: { ...config, ...patch },
-                            },
-                          });
-                        };
-                        const setOption = (key: string, value: unknown) => {
-                          const next = { ...options };
-                          if (value === undefined || value === '') delete next[key];
-                          else next[key] = value;
-                          setConfig({ options: Object.keys(next).length > 0 ? next : undefined });
+                          patchOpenCodeModelConfig(modelId, patch);
                         };
                         const setLimit = (key: 'context' | 'output', value: string) => {
                           const n = Number(value);
@@ -732,22 +787,6 @@ export function ProfileModal({
                           delete next[oldId];
                           setConfig({ variants: next });
                         };
-                        const setVariantReasoning = (variantId: string, value: string) => {
-                          const variant = { ...variants[variantId] };
-                          if (value) variant.reasoningEffort = value;
-                          else delete variant.reasoningEffort;
-                          updateVariant(variantId, variant);
-                        };
-                        const setVariantThinking = (variantId: string, value: string) => {
-                          const variant = { ...variants[variantId] };
-                          const n = Number(value);
-                          if (value && Number.isFinite(n) && n > 0) {
-                            variant.thinking = { type: 'enabled', budgetTokens: Math.floor(n) };
-                          } else {
-                            delete variant.thinking;
-                          }
-                          updateVariant(variantId, variant);
-                        };
                         const addVariant = (variantId: string) => {
                           const id = variantId.trim();
                           if (!id || variants[id]) return;
@@ -758,16 +797,25 @@ export function ProfileModal({
                             },
                           });
                         };
+                        const setVariantReasoning = (variantId: string, value: string) => {
+                          const variant = { ...variants[variantId] };
+                          if (value) variant.reasoningEffort = value;
+                          else delete variant.reasoningEffort;
+                          updateVariant(variantId, variant);
+                        };
                         return (
                           <div key={modelId} className="space-y-2 rounded-md border border-line bg-card/50 p-2.5">
                             <div className="flex flex-wrap items-center gap-2">
                               <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-ink">{modelId}</span>
-                              <input
-                                value={config.name || ''}
-                                onChange={(e) => setConfig({ name: e.target.value || undefined })}
-                                placeholder="显示名"
-                                className="h-7 w-32 rounded border border-line bg-surface px-1.5 text-[11px] text-ink outline-none focus:border-accent/50"
-                              />
+                              <button
+                                type="button"
+                                aria-label={`删除模型 ${modelId}`}
+                                title="彻底移除该模型（挂载、配置与默认引用）"
+                                onClick={() => removeOpenCodeModel(modelId)}
+                                className="text-[11px] text-danger hover:underline"
+                              >
+                                删除
+                              </button>
                             </div>
                             <div className="flex flex-wrap items-center gap-2 text-[11px] text-ink-dim">
                               <span>限制</span>
@@ -788,39 +836,10 @@ export function ProfileModal({
                                 className="h-7 w-24 rounded border border-line bg-surface px-1.5 font-mono"
                               />
                             </div>
-                            <div className="flex flex-wrap items-center gap-2 text-[11px] text-ink-dim">
-                              <span>默认推理</span>
-                              <select
-                                value={String(options.reasoningEffort || '')}
-                                onChange={(e) => setOption('reasoningEffort', e.target.value || undefined)}
-                                className="h-7 rounded border border-line bg-surface px-1.5 text-[11px]"
-                              >
-                                <option value="">不设置</option>
-                                {['minimal', 'low', 'medium', 'high', 'xhigh'].map((level) => (
-                                  <option key={level} value={level}>{level}</option>
-                                ))}
-                              </select>
-                              <input
-                                type="number"
-                                min={1}
-                                value={options.thinking?.budgetTokens ?? ''}
-                                onChange={(e) => {
-                                  const n = Number(e.target.value);
-                                  setOption(
-                                    'thinking',
-                                    e.target.value && Number.isFinite(n) && n > 0
-                                      ? { type: 'enabled', budgetTokens: Math.floor(n) }
-                                      : undefined,
-                                  );
-                                }}
-                                placeholder="thinking budget"
-                                className="h-7 w-32 rounded border border-line bg-surface px-1.5 font-mono"
-                              />
-                            </div>
                             <div className="space-y-1.5">
                               <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-medium text-ink-dim">
                                 <span>Variants</span>
-                                {['low', 'medium', 'high', 'max'].map((variantId) => (
+                                {OPENCODE_VARIANT_QUICK_ADD.map((variantId) => (
                                   <button
                                     key={variantId}
                                     type="button"
@@ -855,21 +874,15 @@ export function ProfileModal({
                                   <select
                                     value={String(variant.reasoningEffort || '')}
                                     onChange={(e) => setVariantReasoning(variantId, e.target.value)}
+                                    title="reasoningEffort：该 variant 的推理强度（官方自定义 variant 写法）"
+                                    aria-label={`Variant ${variantId} 推理强度`}
                                     className="h-7 rounded border border-line bg-surface px-1.5 text-[11px]"
                                   >
-                                    <option value="">reasoning 不设置</option>
-                                    {['minimal', 'low', 'medium', 'high', 'xhigh'].map((level) => (
+                                    <option value="">effort 不设置</option>
+                                    {OPENCODE_EFFORT_LEVELS.map((level) => (
                                       <option key={level} value={level}>{level}</option>
                                     ))}
                                   </select>
-                                  <input
-                                    type="number"
-                                    min={1}
-                                    value={variant.thinking?.budgetTokens ?? ''}
-                                    onChange={(e) => setVariantThinking(variantId, e.target.value)}
-                                    placeholder="budget"
-                                    className="h-7 w-24 rounded border border-line bg-surface px-1.5 font-mono text-[11px]"
-                                  />
                                   <label className="flex items-center gap-1 text-[11px] text-ink-dim">
                                     <input
                                       type="checkbox"
