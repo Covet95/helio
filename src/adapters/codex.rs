@@ -242,6 +242,129 @@ impl CodexAdapter {
     }
 
     /// 有有效列表时整表覆盖 model_catalog.json。
+    /// Disk-first catalog merge: disk-proven entries keep behavioral fields
+    /// unless the profile explicitly manages them; disk-only slugs are kept.
+    /// Unparseable disk catalog falls back to full overwrite.
+    fn merge_catalog_with_disk(
+        generated: serde_json::Value,
+        entries: &[CodexCatalogModel],
+        disk: Option<serde_json::Value>,
+    ) -> serde_json::Value {
+        let disk_models: Vec<serde_json::Value> = disk
+            .as_ref()
+            .and_then(|v| v.get("models"))
+            .and_then(|m| m.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if disk_models.is_empty() {
+            return generated;
+        }
+        let disk_by_slug: std::collections::HashMap<String, &serde_json::Value> = disk_models
+            .iter()
+            .filter_map(|m| {
+                m.get("slug")
+                    .and_then(|s| s.as_str())
+                    .map(|s| (s.to_string(), m))
+            })
+            .collect();
+        let entry_by_slug: std::collections::HashMap<&str, &CodexCatalogModel> =
+            entries.iter().map(|e| (e.slug.as_str(), e)).collect();
+        let generated_models: Vec<serde_json::Value> = generated
+            .get("models")
+            .and_then(|m| m.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mut out: Vec<serde_json::Value> = Vec::with_capacity(generated_models.len());
+        for m in &generated_models {
+            let slug = m.get("slug").and_then(|s| s.as_str()).unwrap_or("");
+            match (disk_by_slug.get(slug), entry_by_slug.get(slug)) {
+                (Some(disk_entry), Some(profile_entry)) => {
+                    out.push(Self::overlay_profile_fields(disk_entry, m, profile_entry));
+                }
+                _ => out.push(m.clone()),
+            }
+        }
+        let mut seen: std::collections::HashSet<String> = generated_models
+            .iter()
+            .filter_map(|m| m.get("slug").and_then(|s| s.as_str()).map(str::to_string))
+            .collect();
+        for m in &disk_models {
+            if let Some(slug) = m.get("slug").and_then(|s| s.as_str()) {
+                if seen.insert(slug.to_string()) {
+                    out.push(m.clone());
+                }
+            }
+        }
+        serde_json::json!({ "models": out })
+    }
+
+    /// Overlay profile-managed fields onto a disk-proven entry.
+    /// Behavior capabilities (patch type, search, shell, modalities, ...)
+    /// stay as disk had them unless the profile explicitly sets them,
+    /// so a switch cannot regress a working entry.
+    fn overlay_profile_fields(
+        disk_entry: &serde_json::Value,
+        generated: &serde_json::Value,
+        profile_entry: &CodexCatalogModel,
+    ) -> serde_json::Value {
+        let mut merged = disk_entry.clone();
+        let Some(obj) = merged.as_object_mut() else {
+            return generated.clone();
+        };
+        if let Some(name) = profile_entry
+            .display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            obj.insert(
+                "display_name".to_string(),
+                serde_json::Value::String(name.to_string()),
+            );
+        }
+        if let Some(ctx) = profile_entry.context_window.filter(|v| *v > 0) {
+            obj.insert(
+                "context_window".to_string(),
+                serde_json::Value::Number(ctx.into()),
+            );
+            obj.insert(
+                "max_context_window".to_string(),
+                serde_json::Value::Number(ctx.into()),
+            );
+        }
+        if profile_entry.reasoning_levels.is_some() || profile_entry.supports_reasoning.is_some() {
+            for key in [
+                "supported_reasoning_levels",
+                "default_reasoning_level",
+                "supports_reasoning_summaries",
+            ] {
+                if let Some(v) = generated.get(key) {
+                    obj.insert(key.to_string(), v.clone());
+                }
+            }
+        }
+        if profile_entry.supports_images.is_some() {
+            for key in ["input_modalities", "supports_image_detail_original"] {
+                if let Some(v) = generated.get(key) {
+                    obj.insert(key.to_string(), v.clone());
+                }
+            }
+        }
+        if profile_entry.supports_tool_calls.is_some() {
+            if let Some(v) = generated.get("supports_parallel_tool_calls") {
+                obj.insert("supports_parallel_tool_calls".to_string(), v.clone());
+            }
+        }
+        if profile_entry.supports_web_search.is_some() {
+            if let Some(v) = generated.get("supports_search_tool") {
+                obj.insert("supports_search_tool".to_string(), v.clone());
+            }
+        }
+        if let Some(v) = generated.get("priority") {
+            obj.insert("priority".to_string(), v.clone());
+        }
+        merged
+    }
     fn write_model_catalog(&self, api_profile: &ApiProfile) -> Result<()> {
         let entries = Self::effective_catalog_models(api_profile);
         if entries.is_empty() {
@@ -254,10 +377,15 @@ impl CodexAdapter {
 
         let base = self.catalog_template_base_instructions();
         let catalog = Self::build_catalog_json(&entries, api_profile.context_1m, &base);
+        let path = self.model_catalog_path();
+        // Disk-first: preserve proven entries and disk-only slugs.
+        let disk = fs::read_to_string(&path)
+            .ok()
+            .and_then(|c| serde_json::from_str(&c).ok());
+        let catalog = Self::merge_catalog_with_disk(catalog, &entries, disk);
         let content = serde_json::to_string_pretty(&catalog)
             .context("Failed to serialize model_catalog.json")?;
 
-        let path = self.model_catalog_path();
         atomic_write_private(&path, content.as_bytes())
             .context("Failed to write model_catalog.json")?;
         Ok(())
@@ -1779,19 +1907,22 @@ command = "npx"
     }
 
     #[test]
-    fn test_write_model_catalog_overwrites_and_preserves_slug() {
+    fn test_write_model_catalog_upserts_and_preserves_proven_entries() {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let unique = COUNTER.fetch_add(1, Ordering::SeqCst);
         let config_dir = std::env::temp_dir().join(format!(
-            "switch-api-codex-catalog-{}-{unique}",
+            "switch-api-codex-catalog-upsert-{}-{unique}",
             std::process::id()
         ));
         fs::create_dir_all(&config_dir).unwrap();
-        // 旧 catalog 含其它 slug，应被整表覆盖
+        // Disk-proven entry plus an unrelated slug; both must survive the switch.
         fs::write(
             config_dir.join("model_catalog.json"),
-            r#"{"models":[{"slug":"old-only","display_name":"Old","base_instructions":"KEEP_ME"}]}"#,
+            r#"{"models":[
+                {"slug":"old-only","display_name":"Old","base_instructions":"KEEP_ME"},
+                {"slug":"GPT-5.6-Sol","display_name":"DiskName","supports_search_tool":false,"apply_patch_tool_type":null,"supports_reasoning_summaries":true,"priority":7}
+            ]}"#,
         )
         .unwrap();
 
@@ -1806,6 +1937,8 @@ command = "npx"
                     CodexCatalogModel {
                         slug: "GPT-5.6-Sol".into(),
                         display_name: Some("Sol".into()),
+                        context_window: Some(500_000),
+                        supports_web_search: Some(true),
                         ..Default::default()
                     },
                     CodexCatalogModel {
@@ -1825,16 +1958,20 @@ command = "npx"
         )
         .unwrap();
         let models = written["models"].as_array().unwrap();
-        assert_eq!(models.len(), 2);
-        assert_eq!(models[0]["slug"], "GPT-5.6-Sol"); // 原样
-        assert_eq!(models[0]["display_name"], "Sol");
-        assert_eq!(models[0]["context_window"], 1_000_000);
-        assert_eq!(models[0]["base_instructions"], "KEEP_ME"); // 复用旧模板
-        assert_eq!(models[1]["slug"], "extra-model");
-        assert_eq!(models[1]["display_name"], "extra-model");
-        assert_eq!(models[1]["priority"], 1);
-        // old-only 消失
-        assert!(models.iter().all(|m| m["slug"] != "old-only"));
+        assert_eq!(models.len(), 3);
+        assert_eq!(models[0]["slug"], "GPT-5.6-Sol");
+        // Disk-only slug kept untouched (no destructive shrink).
+        let old = models.iter().find(|m| m["slug"] == "old-only").unwrap();
+        assert_eq!(old["display_name"], "Old");
+        let sol = &models[0];
+        // Explicit profile fields applied...
+        assert_eq!(sol["display_name"], "Sol");
+        assert_eq!(sol["context_window"], 500_000);
+        assert_eq!(sol["max_context_window"], 500_000);
+        assert_eq!(sol["supports_search_tool"], true);
+        // ...while proven behavioral fields survive.
+        assert!(sol["apply_patch_tool_type"].is_null());
+        assert_eq!(sol["supports_reasoning_summaries"], true);
 
         let _ = fs::remove_dir_all(&config_dir);
     }
