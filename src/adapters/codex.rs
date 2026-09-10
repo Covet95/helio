@@ -298,10 +298,12 @@ impl CodexAdapter {
         serde_json::json!({ "models": out })
     }
 
-    /// Overlay profile-managed fields onto a disk-proven entry.
-    /// Behavior capabilities (patch type, search, shell, modalities, ...)
-    /// stay as disk had them unless the profile explicitly sets them,
-    /// so a switch cannot regress a working entry.
+    /// Overlay profile-managed naming/sizing/reasoning onto a disk-proven entry.
+    /// Behavior capabilities (patch type, search, shell, modalities, verbosity, ...)
+    /// ALWAYS stay as disk had them: they alter request shape and are relay
+    /// sensitive, so disk-proven values win over profile flags on existing slugs.
+    /// (Fresh slugs without a disk entry still get full generated defaults.
+    /// Delete the slug from model_catalog.json to force regeneration.)
     fn overlay_profile_fields(
         disk_entry: &serde_json::Value,
         generated: &serde_json::Value,
@@ -341,23 +343,6 @@ impl CodexAdapter {
                 if let Some(v) = generated.get(key) {
                     obj.insert(key.to_string(), v.clone());
                 }
-            }
-        }
-        if profile_entry.supports_images.is_some() {
-            for key in ["input_modalities", "supports_image_detail_original"] {
-                if let Some(v) = generated.get(key) {
-                    obj.insert(key.to_string(), v.clone());
-                }
-            }
-        }
-        if profile_entry.supports_tool_calls.is_some() {
-            if let Some(v) = generated.get("supports_parallel_tool_calls") {
-                obj.insert("supports_parallel_tool_calls".to_string(), v.clone());
-            }
-        }
-        if profile_entry.supports_web_search.is_some() {
-            if let Some(v) = generated.get("supports_search_tool") {
-                obj.insert("supports_search_tool".to_string(), v.clone());
             }
         }
         if let Some(v) = generated.get("priority") {
@@ -1318,6 +1303,108 @@ mod tests {
     }
 
     #[test]
+    fn test_full_switch_against_poison_profile_keeps_proven_state() {
+        use crate::adapters::apply_profile_transaction;
+        use crate::db::Database;
+        use crate::models::TargetApp;
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join("codex-home");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        // Seed disk-proven user state: full providers, sandbox, MCP, tuned catalog.
+        std::fs::write(
+            config_dir.join("config.toml"),
+            r#"model = "muse-spark-1.3"
+model_provider = "openai-custom"
+sandbox_mode = "danger-full-access"
+
+[model_providers.openai-custom]
+base_url = "https://old.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+
+[mcp_servers.codegraph]
+command = "codegraph"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            config_dir.join("model_catalog.json"),
+            r#"{"models":[
+                {"slug":"muse-spark-1.3","display_name":"DiskProven","supports_search_tool":false,"apply_patch_tool_type":null},
+                {"slug":"keep-me","display_name":"Keep"}
+            ]}"#,
+        )
+        .unwrap();
+        let adapter = CodexAdapter {
+            config_dir: config_dir.clone(),
+        };
+        // Poison profile mirroring the real incident: search on, narrow reasoning.
+        let profile = ApiProfile {
+            name: "poison".to_string(),
+            target_app: Some(TargetApp::Codex),
+            provider: "openai".to_string(),
+            api_url: "https://new.example/v1".to_string(),
+            api_key: "sk-new".to_string(),
+            model: Some("muse-spark-1.3".to_string()),
+            codex: CodexProfileFields {
+                catalog_models: Some(vec![CodexCatalogModel {
+                    slug: "muse-spark-1.3".into(),
+                    reasoning_levels: Some(vec!["xhigh".to_string()]),
+                    supports_images: Some(true),
+                    supports_tool_calls: Some(true),
+                    supports_web_search: Some(true),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let db = Database::open(dir.path().join("test.sqlite")).unwrap();
+        let pid = db.add_profile(&profile).unwrap();
+        let mut profile = profile;
+        profile.id = Some(pid);
+        // Mirror apply_profile_switch with the temp adapter: disk-first resolve,
+        // journal, backup, transaction, then DB bookkeeping.
+        let disk = adapter.read_config().unwrap();
+        let shared = adapter.extract_shared_config(&disk);
+        adapter.validate_profile(&profile).unwrap();
+        let journal =
+            crate::adapters::journal::begin_switch(&db, &adapter, TargetApp::Codex, pid, "poison")
+                .unwrap();
+        assert!(journal.is_some());
+        let backup = adapter.backup_config().unwrap();
+        assert!(backup.exists());
+        apply_profile_transaction(&adapter, &profile, &shared).unwrap();
+        db.save_shared_config(TargetApp::Codex, shared).unwrap();
+        db.set_active_profile(TargetApp::Codex, pid).unwrap();
+        // Config: switch applied, user areas intact.
+        let written = std::fs::read_to_string(config_dir.join("config.toml")).unwrap();
+        assert!(written.contains("mcp_servers"));
+        assert!(written.contains("danger-full-access"));
+        assert!(written.contains("https://new.example/v1"));
+        // Catalog: proven entry survived the poison profile.
+        let catalog: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(config_dir.join("model_catalog.json")).unwrap(),
+        )
+        .unwrap();
+        let models = catalog["models"].as_array().unwrap();
+        assert!(models.iter().any(|m| m["slug"] == "keep-me"));
+        let muse = models
+            .iter()
+            .find(|m| m["slug"] == "muse-spark-1.3")
+            .unwrap();
+        assert_eq!(muse["supports_search_tool"], false);
+        assert!(muse["apply_patch_tool_type"].is_null());
+        assert_eq!(muse["display_name"], "DiskProven");
+        // Auth + DB bookkeeping.
+        let auth: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(config_dir.join("auth.json")).unwrap())
+                .unwrap();
+        assert_eq!(auth["OPENAI_API_KEY"], "sk-new");
+        let active = db.get_active_profile(TargetApp::Codex).unwrap().unwrap();
+        assert_eq!(active.profile_id, pid);
+    }
+    #[test]
     fn test_toml_json_roundtrip() {
         let toml_str = r#"
 model_provider = "openai"
@@ -1968,7 +2055,9 @@ command = "npx"
         assert_eq!(sol["display_name"], "Sol");
         assert_eq!(sol["context_window"], 500_000);
         assert_eq!(sol["max_context_window"], 500_000);
-        assert_eq!(sol["supports_search_tool"], true);
+        // Capability flags are disk-wins even when the profile sets them:
+        // request shape stays relay-proven.
+        assert_eq!(sol["supports_search_tool"], false);
         // ...while proven behavioral fields survive.
         assert!(sol["apply_patch_tool_type"].is_null());
         assert_eq!(sol["supports_reasoning_summaries"], true);
