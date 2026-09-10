@@ -1159,6 +1159,37 @@ mod tests {
     }
 
     #[test]
+    fn test_switch_transaction_preserves_shared_areas_end_to_end() {
+        use crate::adapters::apply_profile_transaction;
+        let dir = tempfile::tempdir().unwrap();
+        // Seed a realistic full user config: providers, sandbox, MCP must survive.
+        fs::write(
+            dir.path().join("config.toml"),
+            "model = \"muse-spark-1.3\"\nmodel_provider = \"openai-custom\"\nsandbox_mode = \"danger-full-access\"\ncli_auth_credentials_store = \"file\"\n\n[model_providers.openai-custom]\nbase_url = \"https://old.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n\n[mcp_servers.codegraph]\ncommand = \"codegraph\"\n",
+        )
+        .unwrap();
+        let adapter = CodexAdapter {
+            config_dir: dir.path().to_path_buf(),
+        };
+        let disk = adapter.read_config().unwrap();
+        let shared = adapter.extract_shared_config(&disk);
+        let mut profile = sample_profile();
+        profile.model = Some("muse-spark-1.3".to_string());
+        apply_profile_transaction(&adapter, &profile, &shared).unwrap();
+        let written = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        let parsed: toml::Value = toml::from_str(&written).unwrap();
+        assert_eq!(parsed["model_provider"].as_str(), Some("openai-custom"));
+        assert_eq!(
+            parsed["model_providers"]["openai-custom"]["base_url"].as_str(),
+            Some("https://api.example.com/v1")
+        );
+        // User areas untouched by the switch.
+        assert_eq!(parsed["sandbox_mode"].as_str(), Some("danger-full-access"));
+        assert!(parsed.get("mcp_servers").is_some());
+        assert_eq!(parsed["model"].as_str(), Some("muse-spark-1.3"));
+    }
+
+    #[test]
     fn test_toml_json_roundtrip() {
         let toml_str = r#"
 model_provider = "openai"
