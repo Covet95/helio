@@ -169,7 +169,6 @@ export function toolById(id: TargetApp | string): ToolInfo | undefined {
 export interface TargetStatus {
   profile?: ApiProfile;
   connected: boolean;
-  latency?: number;
   probe_ok?: boolean | null;
   probe_error?: string | null;
   last_probed_at?: number | null;
