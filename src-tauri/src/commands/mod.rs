@@ -8,3 +8,7 @@ pub(crate) mod helpers;
 pub mod main_cmds;
 
 pub use main_cmds::AppState;
+/// 错误类型定义在核心 crate（`switch_api::error`），因为错误语义是在那一层
+/// 产生的；这里只做转出，方便命令层 `use crate::commands::{AppError, ...}`。
+/// 需要按类别分支时直接从 `switch_api::error::ErrorKind` 引入。
+pub use switch_api::error::{unknown_target_app, AppError};

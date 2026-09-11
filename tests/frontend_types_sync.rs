@@ -36,13 +36,14 @@ const MIRRORED_TYPES: &[&str] = &[
     "SessionMeta",
     "PreviewMessage",
     "DeleteResult",
+    "AppError",
 ];
 
 /// 必须与 `gui/src/types/index.ts` 字符串联合类型一致的 Rust 枚举。
 ///
 /// 比较的是**线上取值**（套用 `#[serde(rename_all)]` / `#[serde(rename)]` 之后
 /// 的结果），而不是 Rust 里的变体名。
-const MIRRORED_ENUMS: &[&str] = &["TargetApp", "ReachabilityStatus"];
+const MIRRORED_ENUMS: &[&str] = &["TargetApp", "ReachabilityStatus", "ErrorKind"];
 
 const TS_TYPES_PATH: &str = "gui/src/types/index.ts";
 
@@ -357,9 +358,39 @@ fn apply_rename_all(ident: &str, rule: Option<&str>) -> String {
             }
             out
         }
+        Some("snake_case") => to_snake(ident, false),
+        Some("SCREAMING_SNAKE_CASE") => to_snake(ident, true),
         Some("lowercase") => ident.to_ascii_lowercase(),
         Some("UPPERCASE") => ident.to_ascii_uppercase(),
         _ => ident.to_string(),
+    }
+}
+
+/// `PascalCase` / `camelCase` -> `snake_case`。
+///
+/// 曾经这里没有 `snake_case` 分支，于是 `#[serde(rename_all = "snake_case")]`
+/// 会落到 `_ => ident.to_string()`，把 `NotFound` 当成线上取值 `NotFound` 去比对
+/// TS 的 `'not_found'`——守卫不但没报错，还给出「已同步」的假象。
+/// 任何新增的 rename_all 规则都必须在这里显式实现，否则就是静默失效。
+///
+/// 已知简化：连续大写（`HTTPServer`）会得到 `h_t_t_p_server`，而 serde 得到
+/// `http_server`。当前枚举里没有这种变体；若将来出现，需要按大写连续段切分。
+fn to_snake(ident: &str, screaming: bool) -> String {
+    let mut out = String::new();
+    for (i, c) in ident.chars().enumerate() {
+        if c.is_ascii_uppercase() {
+            if i != 0 {
+                out.push('_');
+            }
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    if screaming {
+        out.to_ascii_uppercase()
+    } else {
+        out
     }
 }
 
@@ -613,5 +644,68 @@ impl TsIndex {
             }
         }
         Some(out)
+    }
+}
+
+// ------------------------------------------------- rename_all 换算自检
+//
+// 这些是守卫**自身**的测试。之前这里没有测试，于是 `apply_rename_all` 缺
+// `snake_case` 分支这件事一直没被发现——守卫照常通过，给出「类型已同步」的
+// 假象，而实际上根本没比对上。守卫不可信，比没有守卫更危险。
+
+#[test]
+fn rename_all_covers_every_rule_the_repo_uses() {
+    assert_eq!(
+        apply_rename_all("NotFound", Some("snake_case")),
+        "not_found"
+    );
+    assert_eq!(
+        apply_rename_all("PartialFailure", Some("snake_case")),
+        "partial_failure"
+    );
+    assert_eq!(apply_rename_all("Io", Some("snake_case")), "io");
+    assert_eq!(
+        apply_rename_all("InvalidInput", Some("snake_case")),
+        "invalid_input"
+    );
+    // 已经是 snake_case 的字段名不应被二次加工
+    assert_eq!(apply_rename_all("api_url", Some("snake_case")), "api_url");
+
+    assert_eq!(
+        apply_rename_all("ClaudeCode", Some("kebab-case")),
+        "claude-code"
+    );
+    assert_eq!(
+        apply_rename_all("latency_ms", Some("camelCase")),
+        "latencyMs"
+    );
+    assert_eq!(
+        apply_rename_all("Operational", Some("lowercase")),
+        "operational"
+    );
+    assert_eq!(
+        apply_rename_all("api_key", Some("SCREAMING_SNAKE_CASE")),
+        "API_KEY"
+    );
+    assert_eq!(apply_rename_all("ok", None), "ok");
+}
+
+#[test]
+fn rename_all_never_silently_passes_through_a_known_rule() {
+    // 回归保护：曾经的实现没有 snake_case 分支，落到 `_ => ident.to_string()`，
+    // 于是 `NotFound` 原样返回，与 TS 的 'not_found' 永远对不上。
+    // 这条断言把「规则必须真的被实现」钉死。
+    for (ident, rule) in [
+        ("NotFound", "snake_case"),
+        ("ClaudeCode", "kebab-case"),
+        ("latency_ms", "camelCase"),
+        ("Operational", "lowercase"),
+        ("api_key", "SCREAMING_SNAKE_CASE"),
+    ] {
+        assert_ne!(
+            apply_rename_all(ident, Some(rule)),
+            ident,
+            "rename_all = {rule:?} 必须真的换算 {ident}，不能原样返回"
+        );
     }
 }

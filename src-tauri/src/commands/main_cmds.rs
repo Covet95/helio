@@ -10,6 +10,7 @@ use tauri::State;
 use crate::commands::helpers::{
     claude_extract_models, codex_context_1m, codex_string_field, default_provider, str_field,
 };
+use crate::commands::{unknown_target_app, AppError};
 
 pub struct AppState {
     pub db: Mutex<Database>,
@@ -386,35 +387,29 @@ pub async fn assign_legacy_profile(
     profile_id: i64,
     target_app: String,
     state: State<'_, AppState>,
-) -> Result<(), String> {
-    let target =
-        TargetApp::parse(&target_app).ok_or_else(|| format!("Unknown target app: {target_app}"))?;
-    let _write_guard = state.config_lock.lock().map_err(|e| e.to_string())?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+) -> Result<(), AppError> {
+    let target = TargetApp::parse(&target_app).ok_or_else(|| unknown_target_app(&target_app))?;
+    let _write_guard = state.config_lock.lock()?;
+    let db = state.db.lock()?;
     db.assign_legacy_profile(profile_id, target)
-        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn delete_legacy_profile(
     profile_id: i64,
     state: State<'_, AppState>,
-) -> Result<bool, String> {
-    let _write_guard = state.config_lock.lock().map_err(|e| e.to_string())?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+) -> Result<bool, AppError> {
+    let _write_guard = state.config_lock.lock()?;
+    let db = state.db.lock()?;
     db.delete_legacy_profile(profile_id)
-        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn add_profile(profile: ApiProfile, state: State<'_, AppState>) -> Result<i64, String> {
-    if profile.target_app.is_none() {
-        return Err(
-            "API Profile requires target_app; universal profiles are not supported yet".into(),
-        );
-    }
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.add_profile(&profile).map_err(|e| e.to_string())
+pub async fn add_profile(profile: ApiProfile, state: State<'_, AppState>) -> Result<i64, AppError> {
+    // target_app 的校验交给 db 层：那里是权威来源，且能返回 InvalidInput。
+    // 这里不再重复一遍，避免同一句文案在两个文件里各自漂移。
+    let db = state.db.lock()?;
+    db.add_profile(&profile)
 }
 
 #[tauri::command]
@@ -1625,18 +1620,16 @@ fn finalize_provider(target: TargetApp, cfg: &serde_json::Value, parts: &mut Sca
 pub async fn import_shared_config(
     target_app: String,
     state: State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, AppError> {
     use switch_api::adapters::get_adapter;
-    let target = TargetApp::parse(&target_app)
-        .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
+    let target = TargetApp::parse(&target_app).ok_or_else(|| unknown_target_app(&target_app))?;
     let adapter = get_adapter(target);
-    let cfg = adapter.read_config().map_err(|e| e.to_string())?;
+    let cfg = adapter.read_config()?;
     let shared = adapter.extract_shared_config(&cfg);
 
-    let _write_guard = state.config_lock.lock().map_err(|e| e.to_string())?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.save_shared_config(target, shared.clone())
-        .map_err(|e| e.to_string())?;
+    let _write_guard = state.config_lock.lock()?;
+    let db = state.db.lock()?;
+    db.save_shared_config(target, shared.clone())?;
     Ok(shared)
 }
 

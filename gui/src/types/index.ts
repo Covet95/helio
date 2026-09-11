@@ -238,3 +238,30 @@ export interface DeleteResult {
   ok: boolean;
   error: string | null;
 }
+
+/**
+ * 命令层错误类别。与 Rust `switch_api::error::ErrorKind` 一一对应,
+ * 由 `tests/frontend_types_sync.rs` 守卫。
+ *
+ * 请按 `kind` 分支,不要匹配 `message` 文案——文案随时可能调整。
+ */
+export type ErrorKind =
+  | 'not_found'
+  | 'invalid_input'
+  | 'permission'
+  | 'conflict'
+  | 'io'
+  | 'partial_failure'
+  | 'internal';
+
+/**
+ * 命令层结构化错误。
+ *
+ * 尚未迁移的命令仍返回字符串,`toUserMessage()` 两种形状都接受,
+ * 因此新旧命令可以长期共存。
+ */
+export interface AppError {
+  kind: ErrorKind;
+  message: string;
+  detail?: string;
+}

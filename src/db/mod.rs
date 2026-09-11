@@ -1,3 +1,4 @@
+use crate::error::AppError;
 use crate::models::{
     ActiveProfile, ApiProfile, ClaudeProfileFields, CodexProfileFields, HermesProfileFields,
     OpenClawProfileFields, OpenCodeManagedModelState, OpenCodeProfileFields, SharedConfig,
@@ -815,12 +816,16 @@ impl Database {
     // ========== API Profile 操作 ==========
 
     /// 添加 API Profile
-    pub fn add_profile(&self, profile: &ApiProfile) -> Result<i64> {
+    ///
+    /// 返回 `AppError` 而非 `anyhow::Error`：调用方需要知道「参数不合法」这个
+    /// 类别，而 `anyhow` 会把类别信息抹掉。未分类的内部失败仍可经
+    /// `From<anyhow::Error>` 自动转换。
+    pub fn add_profile(&self, profile: &ApiProfile) -> Result<i64, AppError> {
         let mut profile = profile.clone();
         if profile.target_app.is_none() {
-            anyhow::bail!(
-                "API Profile requires target_app; universal profiles are not supported yet"
-            );
+            return Err(AppError::invalid_input(
+                "API Profile 必须指定目标工具；暂不支持通用 Profile",
+            ));
         }
         profile.normalize_keys();
         let now = chrono::Utc::now().timestamp();
@@ -1091,7 +1096,16 @@ impl Database {
 
     /// Assign one legacy profile whose target_app is NULL to an explicit tool.
     /// The caller must make the ownership decision; the database never guesses.
-    pub fn assign_legacy_profile(&self, profile_id: i64, target: TargetApp) -> Result<()> {
+    /// 把「无归属」的遗留 Profile 指派给某个工具。
+    ///
+    /// 三种失败在语义上完全不同，因此必须给出不同的 `ErrorKind`——这正是
+    /// 本方法不能返回 `anyhow::Error` 的原因：上层要能区分「被删了」和
+    /// 「状态冲突」，两者的处置方式不一样。
+    pub fn assign_legacy_profile(
+        &self,
+        profile_id: i64,
+        target: TargetApp,
+    ) -> Result<(), AppError> {
         let (name, current_target): (String, Option<String>) = self
             .conn
             .query_row(
@@ -1100,12 +1114,18 @@ impl Database {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?
-            .ok_or_else(|| anyhow::anyhow!("Profile id={profile_id} 不存在"))?;
+            .ok_or_else(|| AppError::not_found(format!("Profile id={profile_id} 不存在")))?;
         if current_target.is_some() {
-            anyhow::bail!("Profile id={profile_id} 已经归属明确工具");
+            return Err(AppError::conflict(format!(
+                "Profile id={profile_id} 已经归属明确工具"
+            )));
         }
         if self.profile_name_exists(&name, target, None)? {
-            anyhow::bail!("目标工具 {} 已存在同名 Profile: {}", target.as_str(), name);
+            return Err(AppError::conflict(format!(
+                "目标工具 {} 已存在同名 Profile：{}",
+                target.as_str(),
+                name
+            )));
         }
         self.conn.execute(
             "UPDATE api_profiles SET target_app = ?1, updated_at = ?2 WHERE id = ?3 AND target_app IS NULL",
@@ -1117,7 +1137,7 @@ impl Database {
     /// Delete a legacy unassigned profile by id. Active rows are protected by
     /// the foreign key cascade, but a NULL-target row cannot be a normal active
     /// profile in the first place.
-    pub fn delete_legacy_profile(&self, profile_id: i64) -> Result<bool> {
+    pub fn delete_legacy_profile(&self, profile_id: i64) -> Result<bool, AppError> {
         let rows = self.conn.execute(
             "DELETE FROM api_profiles WHERE id = ?1 AND target_app IS NULL",
             params![profile_id],
@@ -1307,7 +1327,7 @@ impl Database {
         &self,
         target_app: TargetApp,
         config: serde_json::Value,
-    ) -> Result<()> {
+    ) -> Result<(), AppError> {
         let now = chrono::Utc::now().timestamp();
         let config_json = serde_json::to_string(&config)?;
 
@@ -1321,7 +1341,7 @@ impl Database {
     }
 
     /// 删除共享配置（切换事务回滚到「从未保存过」状态时使用）。
-    pub fn delete_shared_config(&self, target_app: TargetApp) -> Result<()> {
+    pub fn delete_shared_config(&self, target_app: TargetApp) -> Result<(), AppError> {
         self.conn.execute(
             "DELETE FROM shared_configs WHERE target_app = ?1",
             params![target_app.as_str()],
@@ -2804,6 +2824,87 @@ mod tests {
         let _db2 = Database::open(&path)?;
 
         let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// 结构化错误的价值全在 `kind` 上。如果类别不对，前端就还得回去猜文案，
+    /// 这次改造就白做了。这里把每种失败的类别逐个钉死。
+    #[test]
+    fn legacy_profile_operations_report_structured_error_kinds() -> Result<()> {
+        use crate::error::ErrorKind;
+
+        let dir = tempfile::tempdir()?;
+        let db = Database::open(dir.path().join("live.sqlite"))?;
+        let now = chrono::Utc::now().timestamp();
+
+        // 直接插一行 target_app IS NULL 的遗留 profile：
+        // add_profile 现在会拒绝 target_app=None，所以不能再借它造数据。
+        let insert_legacy = |name: &str| -> Result<i64> {
+            db.conn.execute(
+                "INSERT INTO api_profiles
+                 (name, provider, api_url, api_key, target_app, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?5)",
+                rusqlite::params![name, "custom", "https://legacy.example", "legacy-key", now],
+            )?;
+            Ok(db.conn.last_insert_rowid())
+        };
+
+        // 1) id 不存在 -> NotFound（而不是 Internal / 靠文案猜）
+        let err = db
+            .assign_legacy_profile(999_999, TargetApp::Codex)
+            .expect_err("不存在的 id 必须失败");
+        assert_eq!(err.kind(), ErrorKind::NotFound);
+        assert!(
+            err.message.contains("999999"),
+            "文案要带上 id，实际为：{}",
+            err.message
+        );
+
+        // 2) 已归属的 profile 再次指派 -> Conflict
+        let legacy_id = insert_legacy("legacy-kind")?;
+        db.assign_legacy_profile(legacy_id, TargetApp::Codex)?;
+        let err = db
+            .assign_legacy_profile(legacy_id, TargetApp::ClaudeCode)
+            .expect_err("已归属的 profile 不能再指派");
+        assert_eq!(
+            err.kind(),
+            ErrorKind::Conflict,
+            "「已归属」是状态冲突，不是「不存在」"
+        );
+
+        // 3) 同工具重名 -> Conflict
+        let dup_id = insert_legacy("legacy-kind")?;
+        let err = db
+            .assign_legacy_profile(dup_id, TargetApp::Codex)
+            .expect_err("同工具重名必须失败");
+        assert_eq!(err.kind(), ErrorKind::Conflict);
+        assert!(
+            err.message.contains("legacy-kind"),
+            "重名冲突要指出是哪个名字，实际为：{}",
+            err.message
+        );
+
+        // 4) add_profile 缺 target_app -> InvalidInput
+        // 命令层已不再重复校验这一条，所以这里是唯一防线，必须真的返回 InvalidInput。
+        let err = db
+            .add_profile(&ApiProfile {
+                name: "no-target".into(),
+                provider: "custom".into(),
+                api_url: "https://x.example".into(),
+                api_key: "k".into(),
+                target_app: None,
+                ..Default::default()
+            })
+            .expect_err("缺 target_app 必须失败");
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+
+        // 5) delete_legacy_profile 没有语义错误：删不到是 Ok(false)，不是 Err。
+        // 注意要用**未指派**的行——已归属的行被 WHERE target_app IS NULL 挡掉，
+        // 删不掉是设计如此，不是缺陷。
+        let to_delete = insert_legacy("legacy-delete")?;
+        assert!(db.delete_legacy_profile(to_delete)?);
+        assert!(!db.delete_legacy_profile(to_delete)?);
+
         Ok(())
     }
 }
