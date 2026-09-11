@@ -478,7 +478,7 @@ impl ConfigAdapter for OpenCodeAdapter {
                 }
                 if !native_anthropic {
                     // Invalid modes never reach here: validate_profile gates every prod path.
-                if let Ok(Some(mode)) =
+                    if let Ok(Some(mode)) =
                         Self::normalize_api_mode(api_profile.opencode.opencode_api_mode.as_deref())
                     {
                         p.insert(
