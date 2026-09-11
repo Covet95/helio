@@ -844,6 +844,17 @@ impl Database {
                 "API Profile 必须指定目标工具；暂不支持通用 Profile",
             ));
         }
+        // 同名预检：直接 INSERT 撞 UNIQUE 会退化成 Io 的“数据库操作失败”。
+        // 按类型给出 Conflict 需要先查一次；并发写由命令层 config_lock 串行化。
+        if let Some(target) = profile.target_app {
+            if self.profile_name_exists(&profile.name, target, None)? {
+                return Err(AppError::conflict(format!(
+                    "目标工具 {} 已存在同名 Profile：{}",
+                    target.as_str(),
+                    profile.name
+                )));
+            }
+        }
         profile.normalize_keys();
         let now = chrono::Utc::now().timestamp();
         let model_mapping_json = profile
@@ -1177,6 +1188,17 @@ impl Database {
             ));
         }
         profile.normalize_keys();
+        // 改名撞车与 add 同理：UPDATE 撞 UNIQUE 会退化成 Io，这里先给 Conflict。
+        // 无 id 时按 name 定位（不改名），不可能撞到别的行，跳过。
+        if let (Some(target), Some(id)) = (profile.target_app, profile.id) {
+            if self.profile_name_exists(&profile.name, target, Some(id))? {
+                return Err(AppError::conflict(format!(
+                    "目标工具 {} 已存在同名 Profile：{}",
+                    target.as_str(),
+                    profile.name
+                )));
+            }
+        }
         let now = chrono::Utc::now().timestamp();
         let model_mapping_json = profile
             .claude
@@ -2981,6 +3003,52 @@ mod tests {
             .expect_err("缺 target_app 的更新必须失败");
         assert_eq!(err.kind(), ErrorKind::InvalidInput);
 
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_profile_name_is_conflict_not_io() -> anyhow::Result<()> {
+        use crate::error::ErrorKind;
+
+        let dir = tempfile::tempdir()?;
+        let db = Database::open(dir.path().join("dup.sqlite"))?;
+        let base = ApiProfile {
+            name: "dup".into(),
+            provider: "custom".into(),
+            api_url: "https://x.example".into(),
+            api_key: "k".into(),
+            target_app: Some(TargetApp::Codex),
+            ..Default::default()
+        };
+        db.add_profile(&base)?;
+
+        // 同名新增：必须是 Conflict（带名字），而不是 Io 的“数据库操作失败”。
+        let err = db.add_profile(&base).expect_err("同名新增必须失败");
+        assert_eq!(err.kind(), ErrorKind::Conflict);
+        assert!(
+            err.to_string().contains("dup"),
+            "冲突文案应保留名字，实得：{}",
+            err
+        );
+
+        // 改名撞车：同样必须是 Conflict。
+        let other = ApiProfile {
+            name: "other".into(),
+            ..base.clone()
+        };
+        let other_id = db.add_profile(&other)?;
+        let renamed = ApiProfile {
+            id: Some(other_id),
+            name: "dup".into(),
+            ..other
+        };
+        let err = db.update_profile(&renamed).expect_err("改名撞车必须失败");
+        assert_eq!(err.kind(), ErrorKind::Conflict);
+        assert!(
+            err.to_string().contains("dup"),
+            "冲突文案应保留名字，实得：{}",
+            err
+        );
         Ok(())
     }
 }

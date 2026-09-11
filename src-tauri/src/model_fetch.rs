@@ -378,12 +378,16 @@ pub async fn fetch_models(request: FetchModelsRequest) -> Result<Vec<FetchedMode
                         models.sort_by(|a, b| a.id.cmp(&b.id));
                         return Ok(models);
                     }
-                    Err(error) => last_err = format!("{} 解析失败：{}", url, error),
+                    Err(error) => {
+                        last_err = format!("{} 解析失败：{}", probe::sanitize_endpoint(url), error)
+                    }
                 },
-                Err(error) => last_err = format!("{} 读取响应失败：{}", url, error),
+                Err(error) => {
+                    last_err = format!("{} 读取响应失败：{}", probe::sanitize_endpoint(url), error)
+                }
             },
-            Ok(r) => last_err = format!("{} 返回 {}", url, r.status()),
-            Err(e) => last_err = format!("{} 请求失败：{}", url, e),
+            Ok(r) => last_err = format!("{} 返回 {}", probe::sanitize_endpoint(url), r.status()),
+            Err(e) => last_err = format!("{} 请求失败：{}", probe::sanitize_endpoint(url), e),
         }
     }
     // message 只说「失败了、试了几个端点」，逐个端点的具体原因进 detail：
@@ -499,6 +503,48 @@ mod tests {
         assert_eq!(
             discovery_protocol(&explicit),
             DiscoveryProtocol::OpenAiCompatible
+        );
+    }
+
+    #[test]
+    fn query_key_is_masked_in_error_detail() {
+        // 回归：fetch_models 曾把原始 ?key= 明文写进 AppError detail（前端“详情”展示）。
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(4) {
+                let mut s = stream.unwrap();
+                let mut buf = [0u8; 4096];
+                use std::io::Read;
+                s.set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                    .ok();
+                let _ = s.read(&mut buf);
+                let body = "boom";
+                use std::io::Write;
+                let resp = format!(
+                    "HTTP/1.1 500 Boom\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = s.write_all(resp.as_bytes());
+            }
+        });
+        let req: super::FetchModelsRequest = serde_json::from_value(serde_json::json!({
+            "targetApp": "opencode",
+            "apiUrl": format!("http://{addr}/v1?key=SECRET999"),
+            "apiKey": "k",
+        }))
+        .unwrap();
+        let err = tauri::async_runtime::block_on(super::fetch_models(req)).unwrap_err();
+        let v = serde_json::to_value(&err).unwrap();
+        let detail = v.get("detail").and_then(|d| d.as_str()).unwrap_or("");
+        assert!(
+            !detail.contains("SECRET999"),
+            "detail 不得含明文凭据，实得：{detail}"
+        );
+        assert!(
+            detail.contains("***"),
+            "detail 应保留掩码后的端点以便排查，实得：{detail}"
         );
     }
 

@@ -59,7 +59,8 @@ export function humanizeError(err: unknown, fallback = '发生未知错误'): st
     return detail ? `${message}：${detail}` : message;
   }
 
-  const raw = err instanceof Error ? err.message : String(err);
+  const raw =
+    err instanceof Error ? err.message : typeof err === 'string' ? err : safeStringify(err);
 
   // 没有 Tauri runtime —— 通常是在普通浏览器里打开了前端。
   // 这**不是**后端返回的错误，走不到上面的 isAppError 分支，必须单独识别。
@@ -68,6 +69,20 @@ export function humanizeError(err: unknown, fallback = '发生未知错误'): st
   }
   // 退回:去掉冗长的 "TypeError:/Error:" 前缀,保留核心信息
   return raw.replace(/^\s*(TypeError|Error):\s*/i, '').trim() || fallback;
+}
+
+/**
+ * 非 Error/非字符串输入转可读文本。JSON.stringify 优先，避免普通对象
+ * 被 String() 变成毫无信息的 `[object Object]`；无法序列化时退回空串，
+ * 由调用方的 fallback 兜底。
+ */
+function safeStringify(value: unknown): string {
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value) ?? '';
+  } catch {
+    return '';
+  }
 }
 
 /**

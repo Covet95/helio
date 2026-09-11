@@ -392,7 +392,9 @@ fn resolve_probe_plan(
 
 /// 脱敏 endpoint 中的凭据类 query 参数（防御性：万一凭据进 URL，错误消息不泄漏）。
 /// 匹配 key / api_key / apikey 等常见键名，值替换为 ***。
-fn sanitize_endpoint(endpoint: &str) -> String {
+/// 遮蔽端点中的凭据类 query 参数（key/api_key），供错误文案使用。
+/// 注意：仅用于展示，绝不能把返回值再当请求 URL（见 execute_probe_plan）。
+pub fn sanitize_endpoint(endpoint: &str) -> String {
     let Some((base, query)) = endpoint.split_once('?') else {
         return endpoint.to_string();
     };
@@ -480,8 +482,10 @@ fn validate_success(plan: &ProbePlan, text: &str) -> Result<(), String> {
 /// 执行已解析的探活计划（供 test_model / failover / 批量探活复用）
 async fn execute_probe_plan(api_url: &str, plan: &ProbePlan) -> Result<(), String> {
     let client = http_client(api_url)?;
+    // 请求必须用原始 endpoint：sanitize 只用于展示文案。
+    // 若把掩码后的 URL 当请求发，带 ?key= 的端点发出去的是 ***，探活必失败。
     let mut req = client
-        .post(sanitize_endpoint(&plan.endpoint))
+        .post(plan.endpoint.clone())
         .timeout(std::time::Duration::from_secs(15))
         .json(&plan.body);
     for (k, v) in &plan.headers {
@@ -1022,6 +1026,67 @@ mod tests {
         assert!(should_retry_reachability("connection abort"));
         assert!(!should_retry_reachability("Connection failed: dns error"));
         assert!(!should_retry_reachability("Reachable"));
+    }
+
+    #[test]
+    fn probe_sends_raw_credential_query_not_masked() {
+        // 回归：execute_probe_plan 曾把 sanitize 后的 URL 当请求 URL，
+        // 带 ?key= 的端点发出去的是 ***，探活必失败。
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen2 = seen.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(1) {
+                let mut s = stream.unwrap();
+                let mut buf = [0u8; 4096];
+                use std::io::Read;
+                s.set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                    .ok();
+                let n = s.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                seen2.lock().unwrap().push(req.clone());
+                // 真实服务端行为：query 钥匙完全正确才 200，否则 401。
+                // 修之前发出去的是 ?key=***，必吃 401；修之后 200。
+                let authorized = req.contains("key=SECRET123");
+                let (status, body) = if authorized {
+                    ("200 OK", r#"{"output":[{}],"status":"completed"}"#.to_string())
+                } else {
+                    ("401 Unauthorized", r#"{"error":"bad key"}"#.to_string())
+                };
+                use std::io::Write;
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len(),
+                );
+                let _ = s.write_all(resp.as_bytes());
+            }
+        });
+        let api = format!("http://{addr}?key=SECRET123");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let r = rt.block_on(probe_with_params(ProbeRequest {
+            target_app: "pi",
+            api_url: &api,
+            api_key: "k",
+            model: "m",
+            wire_api: None,
+            api_mode: Some("responses"),
+            experimental_bearer_token: None,
+            key_label: None,
+        }));
+        assert!(r.is_ok(), "probe should succeed: {r:?}");
+        let log = seen.lock().unwrap().join("\n");
+        assert!(
+            log.contains("SECRET123"),
+            "raw credential must reach server, wire saw: {log}"
+        );
+        assert!(
+            !log.contains("***"),
+            "masked credential must not be sent: {log}"
+        );
     }
 
     #[test]

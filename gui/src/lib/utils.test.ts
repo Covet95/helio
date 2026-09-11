@@ -75,6 +75,12 @@ describe('humanizeError', () => {
     expect(humanizeError('')).toBe('发生未知错误');
   });
 
+  it('stringifies non-Error objects instead of showing [object Object]', () => {
+    expect(humanizeError({ foo: 1 } as unknown as Error)).toBe('{"foo":1}');
+    expect(humanizeError(null as unknown as Error)).toBe('null');
+    expect(humanizeError(undefined as unknown as Error)).toBe('发生未知错误');
+  });
+
   it('still detects a missing Tauri runtime', () => {
     expect(
       humanizeError(new Error("Cannot read properties of undefined (reading 'invoke')")),
