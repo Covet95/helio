@@ -34,6 +34,9 @@ default = ["tauri-gui"]
 custom-protocol = ["tauri/custom-protocol"]
 tauri-gui = []
 
+[dev-dependencies]
+tempfile = "3.10"
+
 [lib]
 name = "switch_api_gui_lib"
 crate-type = ["staticlib", "cdylib", "lib"]
