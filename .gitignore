@@ -20,6 +20,9 @@ gui/node_modules/
 docs/
 openspec/
 
+# 编码助手的工作记忆与日志，属开发过程产物
+.workbuddy-ai/
+
 .claude/settings.local.json
 
 # Windows 保留名：在 Git Bash 里执行 `cmd 2>nul` 会误建同名文件

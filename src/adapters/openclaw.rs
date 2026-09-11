@@ -368,53 +368,21 @@ impl Default for OpenClawAdapter {
     }
 }
 
-/// 剥离 models.providers.<id>.apiKey。
+/// 剥离 `models.providers.<id>.apiKey`。
 fn strip_credentials(config: &mut serde_json::Value) {
-    if let Some(providers) = config
-        .get_mut("models")
-        .and_then(|v| v.get_mut("providers"))
-        .and_then(|v| v.as_object_mut())
-    {
-        for p in providers.values_mut() {
-            if let Some(obj) = p.as_object_mut() {
-                obj.remove("apiKey");
-            }
-        }
-    }
+    super::credentials::strip_credential_map(config, &["models", "providers"], &["apiKey"]);
 }
 
 /// 把磁盘配置中其他 provider 的 apiKey 补回 shared（shared 已剥离）。
 /// 当前 provider 的 key 随后会被 merge 用 profile 的值覆盖。
 fn restore_credentials(config: &mut serde_json::Value, disk: &serde_json::Value) {
-    let Some(shared_providers) = config
-        .get_mut("models")
-        .and_then(|v| v.get_mut("providers"))
-        .and_then(|v| v.as_object_mut())
-    else {
-        return;
-    };
-    let Some(disk_providers) = disk
-        .get("models")
-        .and_then(|v| v.get("providers"))
-        .and_then(|v| v.as_object())
-    else {
-        return;
-    };
-    for (id, shared_p) in shared_providers.iter_mut() {
-        let Some(sobj) = shared_p.as_object_mut() else {
-            continue;
-        };
-        if sobj.contains_key("apiKey") {
-            continue;
-        }
-        if let Some(key) = disk_providers
-            .get(id)
-            .and_then(|v| v.get("apiKey"))
-            .and_then(|v| v.as_str())
-        {
-            sobj.insert("apiKey".into(), serde_json::Value::String(key.to_string()));
-        }
-    }
+    super::credentials::backfill_credential_map(
+        config,
+        disk,
+        &["models", "providers"],
+        &["apiKey"],
+        false,
+    );
 }
 
 impl ConfigAdapter for OpenClawAdapter {

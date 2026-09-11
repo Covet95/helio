@@ -282,18 +282,9 @@ impl Default for HermesAdapter {
     }
 }
 
-/// 剥离 custom_providers[].api_key。
+/// 剥离 `custom_providers[].api_key`。
 fn strip_credentials(config: &mut serde_json::Value) {
-    if let Some(arr) = config
-        .get_mut("custom_providers")
-        .and_then(|v| v.as_array_mut())
-    {
-        for entry in arr.iter_mut() {
-            if let Some(obj) = entry.as_object_mut() {
-                obj.remove("api_key");
-            }
-        }
-    }
+    super::credentials::strip_credential_array(config, &["custom_providers"], &["api_key"]);
 }
 
 /// 把磁盘配置中其他 provider 的 api_key 补回 shared（shared 已剥离）。

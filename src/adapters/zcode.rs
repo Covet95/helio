@@ -229,41 +229,21 @@ impl Default for ZCodeAdapter {
     }
 }
 
-/// 剥离所有 provider 的 options.apiKey。
+/// 剥离所有 provider 的 `provider.*.options.apiKey`。
 fn strip_credentials(config: &mut serde_json::Value) {
-    if let Some(providers) = config.get_mut("provider").and_then(|v| v.as_object_mut()) {
-        for p in providers.values_mut() {
-            if let Some(options) = p.get_mut("options").and_then(|v| v.as_object_mut()) {
-                options.remove("apiKey");
-            }
-        }
-    }
+    super::credentials::strip_credential_map(config, &["provider"], &["options", "apiKey"]);
 }
 
 /// 把磁盘配置中其他 provider 的 key 补回 shared（shared 已剥离）。
 /// 当前 provider 的 key 随后会被 merge 用 profile 的值覆盖。
 fn restore_credentials(config: &mut serde_json::Value, disk: &serde_json::Value) {
-    let Some(shared_providers) = config.get_mut("provider").and_then(|v| v.as_object_mut()) else {
-        return;
-    };
-    let Some(disk_providers) = disk.get("provider").and_then(|v| v.as_object()) else {
-        return;
-    };
-    for (id, shared_p) in shared_providers.iter_mut() {
-        let Some(disk_p) = disk_providers.get(id) else {
-            continue;
-        };
-        let Some(shared_options) = shared_p.get_mut("options").and_then(|v| v.as_object_mut())
-        else {
-            continue;
-        };
-        if shared_options.contains_key("apiKey") {
-            continue;
-        }
-        if let Some(key) = disk_p.pointer("/options/apiKey") {
-            shared_options.insert("apiKey".into(), key.clone());
-        }
-    }
+    super::credentials::backfill_credential_map(
+        config,
+        disk,
+        &["provider"],
+        &["options", "apiKey"],
+        false,
+    );
 }
 
 impl ConfigAdapter for ZCodeAdapter {
@@ -587,6 +567,30 @@ mod tests {
             "sk-test-key"
         );
         let _ = fs::remove_dir_all(&adapter.config_dir);
+    }
+
+    #[test]
+    fn restore_credentials_keeps_ids_apart_by_case() {
+        // 这条断言锁定 zcode 的「按 id 精确匹配」契约：`OpenAI` 不得拿到磁盘上
+        // `openai` 的 key。与 opencode 的大小写不敏感行为互为对照——两者现在
+        // 共用 adapters::credentials，仅靠一个布尔参数区分，禁止单方面改动。
+        let disk = serde_json::json!({
+            "provider": {
+                "openai": { "options": { "apiKey": "sk-lower" } }
+            }
+        });
+        let mut shared = serde_json::json!({
+            "provider": {
+                "OpenAI": { "options": { "baseURL": "https://x" } }
+            }
+        });
+        restore_credentials(&mut shared, &disk);
+        assert!(
+            shared["provider"]["OpenAI"]["options"]
+                .get("apiKey")
+                .is_none(),
+            "zcode 按 id 精确匹配，大小写不同不应互相补 key"
+        );
     }
 
     #[test]

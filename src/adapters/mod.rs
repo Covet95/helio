@@ -552,6 +552,7 @@ fn backfill_mcp_entries(live: &mut serde_json::Value, previous: &serde_json::Val
 pub mod backup;
 pub mod claude_code;
 pub mod codex;
+mod credentials;
 pub mod hermes;
 pub mod journal;
 pub mod openclaw;

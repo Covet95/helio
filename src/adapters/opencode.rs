@@ -351,49 +351,22 @@ impl Default for OpenCodeAdapter {
     }
 }
 
-/// 剥离所有 provider 的 options.apiKey。
+/// 剥离所有 provider 的 `provider.*.options.apiKey`。
 fn strip_credentials(config: &mut serde_json::Value) {
-    if let Some(providers) = config.get_mut("provider").and_then(|v| v.as_object_mut()) {
-        for p in providers.values_mut() {
-            if let Some(options) = p.get_mut("options").and_then(|v| v.as_object_mut()) {
-                options.remove("apiKey");
-            }
-        }
-    }
+    super::credentials::strip_credential_map(config, &["provider"], &["options", "apiKey"]);
 }
 
 /// 把磁盘配置中其他 provider 的 key 补回 shared（shared 已剥离）。
 /// 当前 provider 的 key 随后会被 merge 用 profile 的值覆盖。
 /// 大小写不敏感匹配，避免 `OpenAI` 凭据丢回失败。
 fn restore_credentials(config: &mut serde_json::Value, disk: &serde_json::Value) {
-    let Some(shared_providers) = config.get_mut("provider").and_then(|v| v.as_object_mut()) else {
-        return;
-    };
-    let Some(disk_providers) = disk.get("provider").and_then(|v| v.as_object()) else {
-        return;
-    };
-    // 先收集磁盘 key 的小写索引，避免借用冲突
-    let disk_index: Vec<(String, serde_json::Value)> = disk_providers
-        .iter()
-        .filter_map(|(k, v)| {
-            v.pointer("/options/apiKey")
-                .cloned()
-                .map(|key| (k.to_lowercase(), key))
-        })
-        .collect();
-    for (id, shared_p) in shared_providers.iter_mut() {
-        let Some(shared_options) = shared_p.get_mut("options").and_then(|v| v.as_object_mut())
-        else {
-            continue;
-        };
-        if shared_options.contains_key("apiKey") {
-            continue;
-        }
-        let needle = id.to_lowercase();
-        if let Some((_, key)) = disk_index.iter().find(|(k, _)| *k == needle) {
-            shared_options.insert("apiKey".into(), key.clone());
-        }
-    }
+    super::credentials::backfill_credential_map(
+        config,
+        disk,
+        &["provider"],
+        &["options", "apiKey"],
+        true,
+    );
 }
 
 impl ConfigAdapter for OpenCodeAdapter {
@@ -1005,6 +978,26 @@ mod tests {
         has_key["provider"]["cpa"]["options"]["apiKey"] = serde_json::json!("sk-keep");
         restore_credentials(&mut has_key, &config);
         assert_eq!(has_key["provider"]["cpa"]["options"]["apiKey"], "sk-keep");
+    }
+
+    #[test]
+    fn test_restore_credentials_matches_provider_id_case_insensitively() {
+        // 这条断言锁定 opencode 的「大小写不敏感」契约：shared 里的 `OpenAI`
+        // 必须能拿到磁盘上 `openai` 的 key，否则切走再切回就丢凭据。
+        // 与 zcode 的精确匹配（restore_credentials_keeps_ids_apart_by_case）互为对照，
+        // 两者现在共用 adapters::credentials，仅靠这个开关区分，禁止单方面改动。
+        let disk = serde_json::json!({
+            "provider": {
+                "openai": { "options": { "apiKey": "sk-disk" } }
+            }
+        });
+        let mut shared = serde_json::json!({
+            "provider": {
+                "OpenAI": { "options": { "baseURL": "https://x" } }
+            }
+        });
+        restore_credentials(&mut shared, &disk);
+        assert_eq!(shared["provider"]["OpenAI"]["options"]["apiKey"], "sk-disk");
     }
 
     #[test]
