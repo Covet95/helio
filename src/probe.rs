@@ -1,5 +1,6 @@
 //! 模型可用性探活（与目标工具接入协议对齐）
 
+use crate::utils::endpoint::{is_anthropic_official, openai_compat_base, trim_base};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,40 +88,6 @@ struct GeminiGenerateResponse {
     candidates: Vec<serde_json::Value>,
 }
 
-/// Anthropic 协议兼容子路径；仅用于 models 列表与 OpenAI-compatible 探活
-const COMPAT_SUFFIXES: &[&str] = &[
-    "/api/claudecode",
-    "/api/anthropic",
-    "/apps/anthropic",
-    "/api/coding",
-    "/claudecode",
-    "/anthropic",
-    "/step_plan",
-    "/coding",
-    "/claude",
-];
-
-const PROVIDER_MODELS_URLS: &[(&str, &str)] = &[
-    ("bigmodel.cn", "https://open.bigmodel.cn/api/paas/v4/models"),
-    ("z.ai", "https://api.z.ai/api/paas/v4/models"),
-    ("deepseek.com", "https://api.deepseek.com/models"),
-    ("moonshot.cn", "https://api.moonshot.cn/v1/models"),
-    ("openrouter.ai", "https://openrouter.ai/api/v1/models"),
-    ("siliconflow.cn", "https://api.siliconflow.cn/v1/models"),
-    (
-        "dashscope.aliyuncs.com",
-        "https://dashscope.aliyuncs.com/compatible-mode/v1/models",
-    ),
-];
-
-fn provider_models_url(api_url: &str) -> Option<String> {
-    let lower = api_url.to_lowercase();
-    PROVIDER_MODELS_URLS
-        .iter()
-        .find(|(pat, _)| lower.contains(pat))
-        .map(|(_, url)| url.to_string())
-}
-
 fn truncate_error_detail(text: &str, max_chars: usize) -> String {
     text.chars().take(max_chars).collect()
 }
@@ -146,27 +113,6 @@ fn http_client(api_url: &str) -> Result<&'static reqwest::Client, String> {
         DEFAULT.get_or_init(reqwest::Client::new)
     };
     Ok(client)
-}
-
-fn trim_base(api_url: &str) -> String {
-    api_url.trim().trim_end_matches('/').to_string()
-}
-
-/// OpenAI-compatible base：可剥 Anthropic 兼容后缀 + provider 特判（仅列表/兼容探活）
-fn openai_compat_base(api_url: &str) -> String {
-    if let Some(url) = provider_models_url(api_url) {
-        return url
-            .trim_end_matches("/models")
-            .trim_end_matches('/')
-            .to_string();
-    }
-    let base = trim_base(api_url);
-    for suffix in COMPAT_SUFFIXES {
-        if let Some(stripped) = base.strip_suffix(suffix) {
-            return stripped.trim_end_matches('/').to_string();
-        }
-    }
-    base
 }
 
 /// 原样 base（不剥 Anthropic 后缀）—— Claude / Hermes·OpenClaw anthropic 用
@@ -388,22 +334,35 @@ fn resolve_probe_plan(
                 })
             }
         }
-        "opencode" => match normalize_hermes_openclaw_mode(api_mode) {
-            "responses" => Ok(ProbePlan {
-                protocol: ProbeProtocol::Responses,
-                endpoint: responses_url_compat(api_url),
-                headers: bearer_headers(key),
-                body: responses_body(model),
-                success: SuccessCheck::ResponsesOutputOrStatus,
-            }),
-            _ => Ok(ProbePlan {
-                protocol: ProbeProtocol::ChatCompletions,
-                endpoint: chat_completions_url_compat(api_url),
-                headers: bearer_headers(key),
-                body: chat_body(model),
-                success: SuccessCheck::ChatChoices,
-            }),
-        },
+        "opencode" => {
+            // Official Anthropic serves no OpenAI endpoint: probe native messages,
+            // mirroring what the switch writes (native npm adapter).
+            if is_anthropic_official(api_url) {
+                return Ok(ProbePlan {
+                    protocol: ProbeProtocol::AnthropicMessages,
+                    endpoint: anthropic_messages_url(api_url),
+                    headers: anthropic_headers(key),
+                    body: anthropic_body(model),
+                    success: SuccessCheck::AnthropicContent,
+                });
+            }
+            match normalize_hermes_openclaw_mode(api_mode) {
+                "responses" => Ok(ProbePlan {
+                    protocol: ProbeProtocol::Responses,
+                    endpoint: responses_url_compat(api_url),
+                    headers: bearer_headers(key),
+                    body: responses_body(model),
+                    success: SuccessCheck::ResponsesOutputOrStatus,
+                }),
+                _ => Ok(ProbePlan {
+                    protocol: ProbeProtocol::ChatCompletions,
+                    endpoint: chat_completions_url_compat(api_url),
+                    headers: bearer_headers(key),
+                    body: chat_body(model),
+                    success: SuccessCheck::ChatChoices,
+                }),
+            }
+        }
         "hermes" | "openclaw" => match normalize_hermes_openclaw_mode(api_mode) {
             "anthropic_messages" => Ok(ProbePlan {
                 protocol: ProbeProtocol::AnthropicMessages,

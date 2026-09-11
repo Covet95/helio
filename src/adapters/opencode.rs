@@ -1,5 +1,6 @@
 use super::{backup, ConfigAdapter};
 use crate::models::ApiProfile;
+use crate::utils::endpoint::{is_anthropic_official, normalize_openai_compatible_base_url};
 use crate::utils::secure_fs::atomic_write_private;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -194,52 +195,6 @@ impl OpenCodeAdapter {
         Ok(deleted)
     }
 
-    /// 与探活 `openai_compat_base` 同语义：先剥 Anthropic 兼容后缀，
-    /// 再处理 provider 特判（智谱 / z.ai 等走 paas/v4），最后确保版本根。
-    /// 保持与 `probe::chat_completions_url_compat` 一致，否则探活过而实际写坏。
-    const COMPAT_SUFFIXES: &[&str] = &[
-        "/api/claudecode",
-        "/api/anthropic",
-        "/apps/anthropic",
-        "/api/coding",
-        "/claudecode",
-        "/anthropic",
-        "/step_plan",
-        "/coding",
-        "/claude",
-    ];
-
-    const PROVIDER_COMPAT_BASES: &[(&str, &str)] = &[
-        ("bigmodel.cn", "https://open.bigmodel.cn/api/paas/v4"),
-        ("z.ai", "https://api.z.ai/api/paas/v4"),
-        ("deepseek.com", "https://api.deepseek.com/v1"),
-        ("moonshot.cn", "https://api.moonshot.cn/v1"),
-        ("openrouter.ai", "https://openrouter.ai/api/v1"),
-        ("siliconflow.cn", "https://api.siliconflow.cn/v1"),
-        (
-            "dashscope.aliyuncs.com",
-            "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        ),
-    ];
-
-    fn provider_compat_base(api_url: &str) -> Option<String> {
-        let lower = api_url.to_lowercase();
-        Self::PROVIDER_COMPAT_BASES
-            .iter()
-            .find(|(pat, _)| lower.contains(pat))
-            .map(|(_, base)| base.to_string())
-    }
-
-    fn strip_compat_suffixes(base: &str) -> String {
-        let mut out = base.to_string();
-        for suffix in Self::COMPAT_SUFFIXES {
-            if let Some(stripped) = out.strip_suffix(suffix) {
-                out = stripped.trim_end_matches('/').to_string();
-            }
-        }
-        out
-    }
-
     /// 大小写不敏感查找已存在的 provider key，复用磁盘原大小写，避免
     /// 新建小写 key 造成 `OpenAI` / `openai` 双份。
     fn find_provider_key(
@@ -250,35 +205,6 @@ impl OpenCodeAdapter {
             .keys()
             .find(|k| k.eq_ignore_ascii_case(provider_id))
             .cloned()
-    }
-
-    /// 规范化 OpenCode openai-compatible 的 baseURL。
-    ///
-    /// OpenCode 默认 `npm = @ai-sdk/openai-compatible` 会把路径拼成
-    /// `{baseURL}/chat/completions`。若 base 只有域名（如 Hermes 常见的
-    /// `https://host`），就会打到站点 HTML 而不是 API。
-    /// 因此：显式版本根原样保留 → provider 特判 → 剥 Anthropic 兼容后缀（与探活一致）→
-    /// 若尚未是版本根（`/v1` 或 `/paas/v4`）则补 `/v1`。
-    /// 已带 `/v1` 的保持原样，避免出现 `/v1/v1`。
-    fn normalize_openai_compatible_base_url(api_url: &str) -> String {
-        let base = api_url.trim().trim_end_matches('/');
-        if base.is_empty() {
-            return String::new();
-        }
-        // Explicit version roots win: a user-supplied version root must be kept
-        // as-is and never rewritten by the provider table below.
-        if base.ends_with("/v1") || base.ends_with("/paas/v4") {
-            return base.to_string();
-        }
-        if let Some(provider_base) = Self::provider_compat_base(base) {
-            return provider_base;
-        }
-        let stripped = Self::strip_compat_suffixes(base);
-        let base = if stripped.is_empty() { base } else { &stripped };
-        if base.ends_with("/v1") || base.ends_with("/paas/v4") {
-            return base.to_string();
-        }
-        format!("{base}/v1")
     }
 
     pub fn normalize_api_mode(mode: Option<&str>) -> Result<Option<&'static str>> {
@@ -391,13 +317,9 @@ impl OpenCodeAdapter {
         target: &mut serde_json::Map<String, serde_json::Value>,
         patch: &serde_json::Map<String, serde_json::Value>,
     ) {
+        // limit/variants 完全由补丁决定：有则随后写入，无则清理旧值防僵尸。
         for key in ["limit", "variants"] {
-            if patch.contains_key(key) {
-                target.remove(key);
-            } else {
-                // 补丁没提 limit/variants → 档案不再管理它们，清理旧值防僵尸
-                target.remove(key);
-            }
+            target.remove(key);
         }
         Self::merge_json_objects(target, patch);
     }
@@ -493,6 +415,12 @@ impl ConfigAdapter for OpenCodeAdapter {
 
     fn validate_profile(&self, api_profile: &ApiProfile) -> Result<()> {
         Self::normalize_api_mode(api_profile.opencode.opencode_api_mode.as_deref())?;
+        if api_profile.api_url.trim().is_empty() {
+            anyhow::bail!("OpenCode custom provider requires an API URL");
+        }
+        if api_profile.api_key.trim().is_empty() {
+            anyhow::bail!("OpenCode custom provider requires an API key");
+        }
         Ok(())
     }
 
@@ -515,6 +443,9 @@ impl ConfigAdapter for OpenCodeAdapter {
             restore_credentials(&mut config, &disk);
         }
         let provider_id = Self::provider_id(api_profile);
+        // Official Anthropic serves no OpenAI endpoint: use the native SDK adapter
+        // and no baseURL (OpenCode defaults it). Applies by host, not by name.
+        let native_anthropic = is_anthropic_official(&api_profile.api_url);
 
         if config.get("provider").is_none() {
             config["provider"] = serde_json::json!({});
@@ -536,17 +467,30 @@ impl ConfigAdapter for OpenCodeAdapter {
                 // 已有 provider 的 npm / name / models 保留不动，只更新凭据。
                 if is_new {
                     p.entry("npm".to_string()).or_insert_with(|| {
-                        serde_json::Value::String("@ai-sdk/openai-compatible".to_string())
+                        serde_json::Value::String(if native_anthropic {
+                            "@ai-sdk/anthropic".to_string()
+                        } else {
+                            "@ai-sdk/openai-compatible".to_string()
+                        })
                     });
                     p.entry("name".to_string())
                         .or_insert_with(|| serde_json::Value::String(provider_id.clone()));
                 }
-                if let Ok(Some(mode)) =
-                    Self::normalize_api_mode(api_profile.opencode.opencode_api_mode.as_deref())
-                {
+                if !native_anthropic {
+                    if let Ok(Some(mode)) =
+                        Self::normalize_api_mode(api_profile.opencode.opencode_api_mode.as_deref())
+                    {
+                        p.insert(
+                            "npm".to_string(),
+                            serde_json::Value::String(Self::npm_for_api_mode(mode).to_string()),
+                        );
+                    }
+                } else {
+                    // An OpenAI-protocol npm can never work against the official host;
+                    // pin native (also repairs providers created before this rule).
                     p.insert(
                         "npm".to_string(),
-                        serde_json::Value::String(Self::npm_for_api_mode(mode).to_string()),
+                        serde_json::Value::String("@ai-sdk/anthropic".to_string()),
                     );
                 }
                 let options = p
@@ -557,12 +501,18 @@ impl ConfigAdapter for OpenCodeAdapter {
                         "apiKey".to_string(),
                         serde_json::Value::String(api_profile.api_key.clone()),
                     );
-                    opt.insert(
-                        "baseURL".to_string(),
-                        serde_json::Value::String(Self::normalize_openai_compatible_base_url(
-                            &api_profile.api_url,
-                        )),
-                    );
+                    if native_anthropic {
+                        // Native adapter defaults to the official endpoint;
+                        // a stale baseURL would redirect it elsewhere.
+                        opt.remove("baseURL");
+                    } else {
+                        opt.insert(
+                            "baseURL".to_string(),
+                            serde_json::Value::String(normalize_openai_compatible_base_url(
+                                &api_profile.api_url,
+                            )),
+                        );
+                    }
                 }
 
                 // 模型列表：把 profile.models、默认模型和模型配置里的每个模型写进
@@ -627,7 +577,7 @@ impl ConfigAdapter for OpenCodeAdapter {
 
         // small_model 从不由档案管理：若指向当前 provider 但模型已不在管理集，
         // 或指向已不存在的 provider，视为僵尸引用一并清理，避免切走后残留。
-        // 跨 provider 的 small_model（如用户手动配的别的 provider）予以保留。
+        // 跨 provider 但目标仍存在的 small_model（如用户手动配的别的 provider）予以保留。
         {
             let desired: std::collections::HashSet<String> =
                 Self::resolve_model_ids(api_profile).into_iter().collect();
@@ -637,7 +587,14 @@ impl ConfigAdapter for OpenCodeAdapter {
                 .and_then(|m| m.split_once('/'))
                 .map(|(p, mid)| (p.to_string(), mid.to_string()));
             if let Some((p, mid)) = stale_small {
-                if p.eq_ignore_ascii_case(&provider_id) && !desired.contains(&mid) {
+                let provider_gone = config
+                    .get("provider")
+                    .and_then(|v| v.as_object())
+                    .map(|providers| !providers.keys().any(|k| k.eq_ignore_ascii_case(&p)))
+                    .unwrap_or(false);
+                if provider_gone
+                    || (p.eq_ignore_ascii_case(&provider_id) && !desired.contains(&mid))
+                {
                     if let Some(obj) = config.as_object_mut() {
                         obj.remove("small_model");
                     }
@@ -695,56 +652,106 @@ mod tests {
     }
 
     #[test]
+    fn test_official_anthropic_uses_native_adapter() {
+        let (_dir, adapter) = temp_adapter();
+        let profile = ApiProfile {
+            provider: "anthropic".into(),
+            api_url: "https://api.anthropic.com".into(),
+            api_key: "sk-ant".into(),
+            model: Some("claude-opus-5".into()),
+            ..sample_profile()
+        };
+        let merged = adapter.merge_config(&profile, &serde_json::json!({}));
+        assert_eq!(merged["provider"]["anthropic"]["npm"], "@ai-sdk/anthropic");
+        assert!(merged["provider"]["anthropic"]["options"]
+            .get("baseURL")
+            .is_none());
+        assert_eq!(
+            merged["provider"]["anthropic"]["options"]["apiKey"],
+            "sk-ant"
+        );
+        assert_eq!(merged["model"], "anthropic/claude-opus-5");
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_url_or_key() {
+        let (_dir, adapter) = temp_adapter();
+        let mut profile = sample_profile();
+        profile.api_url = String::new();
+        assert!(adapter.validate_profile(&profile).is_err());
+        profile.api_url = "https://x.example/v1".into();
+        profile.api_key = String::new();
+        assert!(adapter.validate_profile(&profile).is_err());
+        profile.api_key = "sk-x".into();
+        assert!(adapter.validate_profile(&profile).is_ok());
+    }
+
+    #[test]
+    fn test_lookalike_domains_are_not_rewritten() {
+        assert_eq!(
+            normalize_openai_compatible_base_url("https://deepseek.com.evil.example/v1"),
+            "https://deepseek.com.evil.example/v1"
+        );
+        assert_eq!(
+            normalize_openai_compatible_base_url("https://api.z.ai/api/paas/v4"),
+            "https://api.z.ai/api/paas/v4"
+        );
+    }
+    /// Hermetic adapter: unit tests must never read the real ~/.config.
+    /// (merge_config restores credentials from disk; with new() the developer
+    /// machine state would leak into assertions and make tests flaky.)
+    fn temp_adapter() -> (tempfile::TempDir, OpenCodeAdapter) {
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = OpenCodeAdapter {
+            config_dir: dir.path().to_path_buf(),
+        };
+        (dir, adapter)
+    }
+    #[test]
     fn test_normalize_openai_compatible_base_url() {
         assert_eq!(
-            OpenCodeAdapter::normalize_openai_compatible_base_url("https://api.astrdark.cyou"),
+            normalize_openai_compatible_base_url("https://api.astrdark.cyou"),
             "https://api.astrdark.cyou/v1"
         );
         assert_eq!(
-            OpenCodeAdapter::normalize_openai_compatible_base_url("https://api.astrdark.cyou/"),
+            normalize_openai_compatible_base_url("https://api.astrdark.cyou/"),
             "https://api.astrdark.cyou/v1"
         );
         assert_eq!(
-            OpenCodeAdapter::normalize_openai_compatible_base_url("https://api.astrdark.cyou/v1"),
+            normalize_openai_compatible_base_url("https://api.astrdark.cyou/v1"),
             "https://api.astrdark.cyou/v1"
         );
         assert_eq!(
-            OpenCodeAdapter::normalize_openai_compatible_base_url("https://api.astrdark.cyou/v1/"),
+            normalize_openai_compatible_base_url("https://api.astrdark.cyou/v1/"),
             "https://api.astrdark.cyou/v1"
         );
         assert_eq!(
-            OpenCodeAdapter::normalize_openai_compatible_base_url("http://127.0.0.1:8317/v1"),
+            normalize_openai_compatible_base_url("http://127.0.0.1:8317/v1"),
             "http://127.0.0.1:8317/v1"
         );
         assert_eq!(
-            OpenCodeAdapter::normalize_openai_compatible_base_url(
+            normalize_openai_compatible_base_url(
                 "https://dashscope.aliyuncs.com/compatible-mode/v1"
             ),
             "https://dashscope.aliyuncs.com/compatible-mode/v1"
         );
         assert_eq!(
-            OpenCodeAdapter::normalize_openai_compatible_base_url(
+            normalize_openai_compatible_base_url(
                 "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation/paas/v4"
             ),
             "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation/paas/v4"
         );
         assert_eq!(
-            OpenCodeAdapter::normalize_openai_compatible_base_url("  https://host.example  "),
+            normalize_openai_compatible_base_url("  https://host.example  "),
             "https://host.example/v1"
         );
-        assert_eq!(
-            OpenCodeAdapter::normalize_openai_compatible_base_url(""),
-            ""
-        );
-        assert_eq!(
-            OpenCodeAdapter::normalize_openai_compatible_base_url("   "),
-            ""
-        );
+        assert_eq!(normalize_openai_compatible_base_url(""), "");
+        assert_eq!(normalize_openai_compatible_base_url("   "), "");
     }
 
     #[test]
     fn test_protocol_mode_maps_to_provider_npm() {
-        let adapter = OpenCodeAdapter::new();
+        let (_dir, adapter) = temp_adapter();
         let profile = ApiProfile {
             provider: "openai".into(),
             opencode: OpenCodeProfileFields {
@@ -779,7 +786,7 @@ mod tests {
 
     #[test]
     fn test_merge_writes_model_config_and_preserves_unknown_fields() {
-        let adapter = OpenCodeAdapter::new();
+        let (_dir, adapter) = temp_adapter();
         let profile = ApiProfile {
             provider: "openai".into(),
             model: Some("gpt-5".into()),
@@ -890,7 +897,7 @@ mod tests {
     fn test_merge_appends_v1_when_api_url_has_no_version_root() {
         // 与 Hermes 习惯对齐：用户只填域名时，OpenCode 写入须补 /v1，
         // 否则 @ai-sdk/openai-compatible 会打到 /chat/completions 站点 HTML。
-        let adapter = OpenCodeAdapter::new();
+        let (_dir, adapter) = temp_adapter();
         let profile = ApiProfile {
             api_url: "https://api.astrdark.cyou".to_string(),
             provider: "openai".to_string(),
@@ -907,7 +914,7 @@ mod tests {
 
     #[test]
     fn test_merge_does_not_double_append_v1() {
-        let adapter = OpenCodeAdapter::new();
+        let (_dir, adapter) = temp_adapter();
         let profile = ApiProfile {
             api_url: "https://api.astrdark.cyou/v1".to_string(),
             provider: "openai".to_string(),
@@ -937,7 +944,7 @@ mod tests {
     #[test]
     fn test_extract_shared_strips_credentials() {
         // key 不落 shared_configs；其他配置原样保留。
-        let adapter = OpenCodeAdapter::new();
+        let (_dir, adapter) = temp_adapter();
         let config = serde_json::json!({
             "provider": {
                 "anthropic": {
@@ -1002,7 +1009,7 @@ mod tests {
     #[test]
     fn test_merge_coexist_preserves_other_provider_creds() {
         // 切换到 anthropic 时，已存在的 cpa provider 的凭据必须原样保留（共存可用）
-        let adapter = OpenCodeAdapter::new();
+        let (_dir, adapter) = temp_adapter();
         let shared = serde_json::json!({
             "provider": {
                 "cpa": {
@@ -1032,7 +1039,7 @@ mod tests {
     #[test]
     fn test_merge_no_model_removes_stale_top_level_model() {
         // profile 无 model 也无 models：删掉顶层旧 model（用户选项：用 OpenCode 内置默认）
-        let adapter = OpenCodeAdapter::new();
+        let (_dir, adapter) = temp_adapter();
         let shared = serde_json::json!({ "model": "cpa/claude-opus-4-8" });
         // sample_profile 不带 model/models
         let merged = adapter.merge_config(&sample_profile(), &shared);
@@ -1046,7 +1053,7 @@ mod tests {
     #[test]
     fn test_merge_uses_first_models_when_no_default() {
         // 无 model 但有 models：顶层用 provider/models[0]
-        let adapter = OpenCodeAdapter::new();
+        let (_dir, adapter) = temp_adapter();
         let profile = ApiProfile {
             opencode: OpenCodeProfileFields {
                 models: Some(vec![
@@ -1063,7 +1070,7 @@ mod tests {
 
     #[test]
     fn test_merge_inserts_api() {
-        let adapter = OpenCodeAdapter::new();
+        let (_dir, adapter) = temp_adapter();
         let shared = serde_json::json!({
             "mcp": { "fs": { "type": "local" } },
             "permission": { "edit": "ask" }
@@ -1095,7 +1102,7 @@ mod tests {
     #[test]
     fn test_merge_mcp_only_from_shared_config() {
         // MCP 只来自共享配置,不读本机 ~/.claude.json(即使本机有 8 个 MCP 也不混入)
-        let adapter = OpenCodeAdapter::new();
+        let (_dir, adapter) = temp_adapter();
         let shared = serde_json::json!({
             "mcp": { "test-only-srv": { "type": "local", "command": ["x"] } }
         });
@@ -1109,7 +1116,7 @@ mod tests {
 
     #[test]
     fn test_merge_writes_multiple_models() {
-        let adapter = OpenCodeAdapter::new();
+        let (_dir, adapter) = temp_adapter();
         let profile = ApiProfile {
             model: Some("claude-opus-4-8".to_string()),
             opencode: OpenCodeProfileFields {
@@ -1137,7 +1144,7 @@ mod tests {
 
     #[test]
     fn test_merge_writes_default_model() {
-        let adapter = OpenCodeAdapter::new();
+        let (_dir, adapter) = temp_adapter();
         let profile = ApiProfile {
             model: Some("claude-opus-4-8".to_string()),
             ..sample_profile()
@@ -1152,7 +1159,7 @@ mod tests {
 
     #[test]
     fn test_merge_preserves_existing_provider_npm_and_models() {
-        let adapter = OpenCodeAdapter::new();
+        let (_dir, adapter) = temp_adapter();
         // 已有同名 provider，带自定义 npm / name / models
         let shared = serde_json::json!({
             "provider": {
@@ -1186,7 +1193,7 @@ mod tests {
 
     #[test]
     fn test_merge_preserves_other_providers() {
-        let adapter = OpenCodeAdapter::new();
+        let (_dir, adapter) = temp_adapter();
         let shared = serde_json::json!({
             "provider": {
                 "openai": {
