@@ -3689,7 +3689,7 @@ dependencies = [
 
 [[package]]
 name = "switch-api"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3711,7 +3711,7 @@ dependencies = [
 
 [[package]]
 name = "switch-api-gui"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "chrono",
