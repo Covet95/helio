@@ -150,7 +150,11 @@ pub fn apply_profile_transaction(
         .and_then(|_| adapter.apply_auxiliary_config(shared_config))
     {
         if let Err(restore_error) = adapter.restore_files(&snapshots) {
-            anyhow::bail!("{error}; rollback failed: {restore_error}");
+            // 用标记类型而非纯文案：上层据此能区分「已回滚的干净失败」与
+            // 「部分生效、回滚也失败」，不必去匹配字符串。
+            return Err(anyhow::Error::new(crate::error::RollbackFailed::new(
+                format!("{error}；回滚失败：{restore_error}"),
+            )));
         }
         return Err(error);
     }

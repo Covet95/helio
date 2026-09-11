@@ -10,7 +10,8 @@ describe('isAppError', () => {
   });
 
   it('rejects everything that is not a structured error', () => {
-    // 未迁移的命令仍返回字符串——不能被误判
+    // 字符串不是结构化错误——即便现在所有命令都返回对象，判据也不能放宽，
+    // 否则 Tauri 自身抛的字符串（如命令 panic）会被误判成 AppError。
     expect(isAppError('Profile id=42 不存在')).toBe(false);
     // 普通 Error 只有 message，没有 kind
     expect(isAppError(new Error('boom'))).toBe(false);
@@ -34,10 +35,23 @@ describe('humanizeError', () => {
     expect(humanizeError({ kind: 'conflict', message: 'Profile id=42 已经归属明确工具' })).toBe(
       'Profile id=42 已经归属明确工具',
     );
-    // 英文文案也不应被正则二次加工
+    // 英文文案也不应被正则二次加工（这三条正则已删除，见下一条用例）
     expect(humanizeError({ kind: 'io', message: 'no such table: profiles' })).toBe(
       'no such table: profiles',
     );
+  });
+
+  it('appends the technical detail so the root cause is never hidden', () => {
+    // detail 只含 anyhow 链上 message 之外的部分，因此拼接后不重复。
+    // 这条断言的意义：后端把根因放进 detail 时，前端必须真的显示它，
+    // 否则等于把失败原因藏起来。
+    expect(
+      humanizeError({
+        kind: 'io',
+        message: '加载 Profile 列表失败',
+        detail: 'no such table: profiles',
+      }),
+    ).toBe('加载 Profile 列表失败：no such table: profiles');
   });
 
   it('falls back when a structured error carries an empty message', () => {
@@ -45,11 +59,20 @@ describe('humanizeError', () => {
     expect(humanizeError({ kind: 'internal', message: '' }, '操作失败')).toBe('操作失败');
   });
 
-  it('keeps the legacy string path working for unmigrated commands', () => {
+  it('no longer rewrites messages by matching their text', () => {
+    // 回归保护：被删掉的三条正则会把「not found」改写成
+    // 「未找到对应数据,可能尚未初始化」、把「permission denied」改写成
+    // 「权限不足,无法访问该资源」。现在所有 #[tauri::command] 都返回 AppError，
+    // 后端文案本身就是中文且准确，这类改写只会把准确信息改成错误信息。
+    expect(humanizeError(new Error('not found'))).toBe('not found');
+    expect(humanizeError(new Error('permission denied'))).toBe('permission denied');
+    expect(humanizeError('EACCES')).toBe('EACCES');
+  });
+
+  it('keeps the plain-string path for non-backend errors', () => {
     expect(humanizeError(new Error('TypeError: unavailable'))).toBe('unavailable');
     expect(humanizeError('TypeError: nothing')).toBe('nothing');
     expect(humanizeError('')).toBe('发生未知错误');
-    expect(humanizeError(new Error('not found'))).toBe('未找到对应数据,可能尚未初始化');
   });
 
   it('still detects a missing Tauri runtime', () => {

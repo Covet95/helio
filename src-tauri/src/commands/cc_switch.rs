@@ -1,6 +1,6 @@
 //! 从本机 cc-switch 数据库导入 provider → Helio ApiProfile。
-use crate::commands::helpers::{claude_extract_models, str_field};
-use crate::commands::AppState;
+use crate::commands::helpers::{claude_extract_models, home_dir, str_field};
+use crate::commands::{unknown_target_app, AppError, AppState};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use switch_api::models::{
@@ -27,31 +27,33 @@ pub struct CcSwitchProvider {
     pub is_current: bool,
 }
 
-fn supported_cc_switch_app_type(app_type: &str) -> Result<&'static str, String> {
+fn supported_cc_switch_app_type(app_type: &str) -> Result<&'static str, AppError> {
     match app_type.trim().to_ascii_lowercase().as_str() {
         "claude" | "claude-code" => Ok("claude"),
         "codex" => Ok("codex"),
-        other => Err(format!(
+        other => Err(AppError::invalid_input(format!(
             "当前仅支持导入 cc-switch 的 Claude Code 和 Codex provider，不支持 `{other}`"
-        )),
+        ))),
     }
 }
 
 #[tauri::command]
-pub async fn scan_cc_switch(target_app: String) -> Result<Vec<CcSwitchProvider>, String> {
+pub async fn scan_cc_switch(target_app: String) -> Result<Vec<CcSwitchProvider>, AppError> {
     let app_type = supported_cc_switch_app_type(&target_app)?;
-    let home = dirs::home_dir().ok_or("无法获取主目录")?;
-    let db_path = home.join(".cc-switch").join("cc-switch.db");
+    let db_path = home_dir()?.join(".cc-switch").join("cc-switch.db");
     if !db_path.exists() {
-        return Err(format!("未找到 cc-switch 数据库: {}", db_path.display()));
+        return Err(AppError::not_found(format!(
+            "未找到 cc-switch 数据库：{}",
+            db_path.display()
+        )));
     }
     let conn = rusqlite::Connection::open(&db_path)
-        .map_err(|e| format!("打开 cc-switch 数据库失败: {}", e))?;
+        .map_err(|e| AppError::from(e).with_context("打开 cc-switch 数据库失败"))?;
     let mut stmt = conn
         .prepare(
             "SELECT name, settings_config, is_current FROM providers WHERE app_type = ?1 ORDER BY sort_index",
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| AppError::from(e).with_context("读取 cc-switch providers 表失败"))?;
     let rows = stmt
         .query_map([app_type], |row| {
             Ok((
@@ -60,10 +62,11 @@ pub async fn scan_cc_switch(target_app: String) -> Result<Vec<CcSwitchProvider>,
                 row.get::<_, i64>(2).unwrap_or(0) != 0,
             ))
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| AppError::from(e).with_context("查询 cc-switch providers 失败"))?;
     let mut out = Vec::new();
     for r in rows {
-        let (name, settings, is_current) = r.map_err(|e| e.to_string())?;
+        let (name, settings, is_current) =
+            r.map_err(|e| AppError::from(e).with_context("解析 cc-switch provider 行失败"))?;
         let mut parsed = parse_cc_provider(app_type, &settings);
         parsed.name = name;
         parsed.app_type = app_type.to_string();
@@ -78,11 +81,10 @@ pub async fn import_cc_switch(
     target_app: String,
     providers: Vec<CcSwitchProvider>,
     state: State<'_, AppState>,
-) -> Result<usize, String> {
+) -> Result<usize, AppError> {
     let _ = supported_cc_switch_app_type(&target_app)?;
-    let target = TargetApp::parse(&target_app)
-        .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let target = TargetApp::parse(&target_app).ok_or_else(|| unknown_target_app(&target_app))?;
+    let db = state.db.lock()?;
     let mut count = 0;
     for p in providers {
         let mut name = p.name.clone();
@@ -235,8 +237,31 @@ pub(crate) fn parse_cc_provider(app_type: &str, settings: &str) -> CcSwitchProvi
 
 #[cfg(test)]
 mod tests {
-    use super::parse_cc_provider;
+    use super::{parse_cc_provider, supported_cc_switch_app_type};
     use serde_json::json;
+    use switch_api::error::ErrorKind;
+
+    #[test]
+    fn unsupported_app_type_is_invalid_input_and_names_the_value() {
+        // 迁移前这里是英文 format! 加 String 错误，前端只能拿到一段无类别的文本。
+        let err = supported_cc_switch_app_type("gemini").expect_err("gemini 必须被拒绝");
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert!(
+            err.message.contains("gemini"),
+            "文案要带上被拒绝的取值，实际为：{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn app_type_aliases_are_normalized() {
+        assert_eq!(
+            supported_cc_switch_app_type("claude-code").unwrap(),
+            "claude"
+        );
+        assert_eq!(supported_cc_switch_app_type(" Claude ").unwrap(), "claude");
+        assert_eq!(supported_cc_switch_app_type("CODEX").unwrap(), "codex");
+    }
 
     #[test]
     fn test_parse_claude_role_mapping_and_one_m() {

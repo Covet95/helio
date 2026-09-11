@@ -36,30 +36,35 @@ export function isAppError(err: unknown): err is AppError {
  * 避免把 `TypeError: Cannot read properties of undefined (reading 'invoke')`
  * 这类技术堆栈直接显示给用户。
  *
- * - **结构化错误（新命令）**:后端已经把「机器可读的类别」和「给人看的文案」
+ * - **结构化错误（全部命令）**:后端已经把「机器可读的类别」和「给人看的文案」
  *   分开返回了,直接用 `message`,**不再**按文案做正则猜测。
  * - 在浏览器里跑(非 Tauri 容器)时 `invoke` 不存在,识别为「桌面环境不可用」
  * - 其余情况尽量提取可读信息,实在没有再退回原始字符串
  *
- * 下面那几条正则只服务于**尚未迁移**、仍返回字符串的命令。它们天生不可靠:
- * `Profile id=42 不存在` 会被 `/不存在/` 命中,改写成
- * 「未找到对应数据,可能尚未初始化」——既丢了 id,又给了错误的排查方向
- * (实际是 profile 被删了,不是「尚未初始化」)。迁移完成后可以整段删掉。
+ * 历史上这里有三条正则,用来把**尚未迁移**、仍返回字符串的命令的英文报错
+ * 翻译成中文。它们天生不可靠:`Profile id=42 不存在` 会被 `/不存在/` 命中,
+ * 改写成「未找到对应数据,可能尚未初始化」——既丢了 id,又给了错误的排查方向
+ * (实际是 profile 被删了,不是「尚未初始化」)。现在所有 `#[tauri::command]`
+ * 都返回 `AppError`,后端文案本身就是中文且准确,这三条正则已全部删除。
+ * 新增命令请直接返回 `AppError`,不要试图在这里加回文案匹配。
  */
 export function humanizeError(err: unknown, fallback = '发生未知错误'): string {
-  if (isAppError(err)) return err.message || fallback;
+  if (isAppError(err)) {
+    const message = err.message || fallback;
+    // detail 只含 anyhow 链上「message 之外」的部分（根因 + 中间层），
+    // 拼起来正好是完整信息且不重复。必须真的显示出来——否则后端的根因
+    // （如 `no such table: profiles`）对用户就是不可见的，
+    // 那等于把「失败原因」藏起来，比不做结构化还糟。
+    const detail = errorDetail(err);
+    return detail ? `${message}：${detail}` : message;
+  }
 
   const raw = err instanceof Error ? err.message : String(err);
 
-  // 没有 Tauri runtime —— 通常是在普通浏览器里打开了前端
+  // 没有 Tauri runtime —— 通常是在普通浏览器里打开了前端。
+  // 这**不是**后端返回的错误，走不到上面的 isAppError 分支，必须单独识别。
   if (/invoke|__TAURI__|is not a function|reading 'invoke'/i.test(raw)) {
     return '无法连接到桌面后端(请在 Helio 应用内打开,而非普通浏览器)';
-  }
-  if (/not found|不存在|no such/i.test(raw)) {
-    return '未找到对应数据,可能尚未初始化';
-  }
-  if (/permission|denied|EACCES/i.test(raw)) {
-    return '权限不足,无法访问该资源';
   }
   // 退回:去掉冗长的 "TypeError:/Error:" 前缀,保留核心信息
   return raw.replace(/^\s*(TypeError|Error):\s*/i, '').trim() || fallback;

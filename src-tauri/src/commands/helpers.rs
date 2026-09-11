@@ -1,5 +1,21 @@
 //! 扫描/导入共用小工具
+use switch_api::error::AppError;
 use switch_api::models::TargetApp;
+
+/// 定位用户主目录；失败时给出可行动的 `AppError`。
+///
+/// `dirs::home_dir()` 返回 `None` 属于**环境异常**（`HOME` 未设置、容器里没有
+/// passwd 条目等），不是调用方传参不合法，也不是权限不足，所以归 `Internal`，
+/// 并在 detail 里点明可能的原因。
+///
+/// 迁移前这里在每个命令里各写了一遍 `ok_or("Failed to get home directory")`，
+/// 一共 6 处英文文案，而且都归到了同一种「未知错误」里。
+pub(crate) fn home_dir() -> Result<std::path::PathBuf, AppError> {
+    dirs::home_dir().ok_or_else(|| {
+        AppError::internal("无法定位用户主目录")
+            .with_detail("dirs::home_dir() 返回 None（HOME 环境变量可能未设置）")
+    })
+}
 
 pub(crate) fn str_field(v: &serde_json::Value, key: &str) -> String {
     v.get(key)

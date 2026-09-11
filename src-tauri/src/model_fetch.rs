@@ -6,6 +6,7 @@ pub use switch_api::probe::{
 };
 
 use serde::{Deserialize, Serialize};
+use switch_api::error::AppError;
 use switch_api::probe;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,12 +135,14 @@ fn is_local_url(api_url: &str) -> bool {
     lower.contains("127.0.0.1") || lower.contains("localhost") || lower.contains("0.0.0.0")
 }
 
-fn http_client(api_url: &str) -> Result<reqwest::Client, String> {
+fn http_client(api_url: &str) -> Result<reqwest::Client, AppError> {
     let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(15));
     if is_local_url(api_url) {
         builder = builder.no_proxy();
     }
-    builder.build().map_err(|e| e.to_string())
+    builder
+        .build()
+        .map_err(|e| AppError::from(e).with_context("创建 HTTP 客户端失败"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,7 +229,7 @@ fn bedrock_auth_context(request: &FetchModelsRequest) -> String {
     }
 }
 
-fn resolved_api_key(request: &FetchModelsRequest) -> Result<String, String> {
+fn resolved_api_key(request: &FetchModelsRequest) -> Result<String, AppError> {
     let env_key = request
         .env_key
         .as_deref()
@@ -254,12 +257,13 @@ fn resolved_api_key(request: &FetchModelsRequest) -> Result<String, String> {
     };
     if key.is_empty() {
         if request.has_command_auth {
-            Err(
-                "该档案使用 auth 命令获取 token，Helio 不执行外部命令，无法加载模型列表"
-                    .to_string(),
-            )
+            Err(AppError::invalid_input(
+                "该档案使用 auth 命令获取 token，Helio 不执行外部命令，无法加载模型列表",
+            ))
         } else {
-            Err("需要 API Key、Bearer Token 或环境变量才能加载模型".to_string())
+            Err(AppError::invalid_input(
+                "需要 API Key、Bearer Token 或环境变量才能加载模型",
+            ))
         }
     } else {
         Ok(key.to_string())
@@ -344,15 +348,15 @@ fn parse_models_response(
 
 /// 拉取供应商可用模型列表
 #[tauri::command]
-pub async fn fetch_models(request: FetchModelsRequest) -> Result<Vec<FetchedModel>, String> {
+pub async fn fetch_models(request: FetchModelsRequest) -> Result<Vec<FetchedModel>, AppError> {
     if is_bedrock_request(&request) {
-        return Err(format!(
+        return Err(AppError::invalid_input(format!(
             "Amazon Bedrock 使用 Codex 内置 AWS 认证，模型列表由 Codex 管理{}",
             bedrock_auth_context(&request)
-        ));
+        )));
     }
     if request.api_url.trim().is_empty() {
-        return Err("需要 API URL 才能加载模型".to_string());
+        return Err(AppError::invalid_input("需要 API URL 才能加载模型"));
     }
     let protocol = discovery_protocol(&request);
     let api_key = resolved_api_key(&request)?;
@@ -374,24 +378,22 @@ pub async fn fetch_models(request: FetchModelsRequest) -> Result<Vec<FetchedMode
                         models.sort_by(|a, b| a.id.cmp(&b.id));
                         return Ok(models);
                     }
-                    Err(error) => last_err = format!("{} 解析失败: {}", url, error),
+                    Err(error) => last_err = format!("{} 解析失败：{}", url, error),
                 },
-                Err(error) => last_err = format!("{} 读取响应失败: {}", url, error),
+                Err(error) => last_err = format!("{} 读取响应失败：{}", url, error),
             },
             Ok(r) => last_err = format!("{} 返回 {}", url, r.status()),
-            Err(e) => last_err = format!("{} 请求失败: {}", url, e),
+            Err(e) => last_err = format!("{} 请求失败：{}", url, e),
         }
     }
-    Err(format!(
-        "加载模型失败（试了 {} 个端点）: {}",
-        urls.len(),
-        last_err
-    ))
+    // message 只说「失败了、试了几个端点」，逐个端点的具体原因进 detail：
+    // 前者是用户需要知道的，后者是排查时需要看的，混在一行里两头都读不清。
+    Err(AppError::io(format!("加载模型失败（试了 {} 个端点）", urls.len())).with_detail(last_err))
 }
 
 /// 按目标工具协议探活
 #[tauri::command]
-pub async fn test_model(request: TestModelRequest) -> Result<ModelTestResult, String> {
+pub async fn test_model(request: TestModelRequest) -> Result<ModelTestResult, AppError> {
     let resolved_api_key = choose_non_empty_env_value(
         request
             .env_key
@@ -402,7 +404,9 @@ pub async fn test_model(request: TestModelRequest) -> Result<ModelTestResult, St
         request.api_key,
     );
     if resolved_api_key.trim().is_empty() && request.has_command_auth {
-        return Err("该档案使用 auth 命令获取 token，Helio 不执行外部命令，无法探活".to_string());
+        return Err(AppError::invalid_input(
+            "该档案使用 auth 命令获取 token，Helio 不执行外部命令，无法探活",
+        ));
     }
     probe::probe_with_params(probe::ProbeRequest {
         target_app: &request.target_app,
@@ -415,6 +419,9 @@ pub async fn test_model(request: TestModelRequest) -> Result<ModelTestResult, St
         key_label: request.key_label,
     })
     .await
+    // 探活失败的具体原因（超时 / 401 / 模型不存在）由 probe 层给出，已经是中文，
+    // 这里只负责归类。归 Io：探活本质是一次网络 I/O，失败即端点不可用。
+    .map_err(AppError::io)
 }
 
 #[cfg(test)]

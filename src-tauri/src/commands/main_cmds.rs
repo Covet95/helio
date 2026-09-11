@@ -8,7 +8,8 @@ use switch_api::models::{ApiProfile, TargetApp};
 use tauri::State;
 
 use crate::commands::helpers::{
-    claude_extract_models, codex_context_1m, codex_string_field, default_provider, str_field,
+    claude_extract_models, codex_context_1m, codex_string_field, default_provider, home_dir,
+    str_field,
 };
 use crate::commands::{unknown_target_app, AppError};
 
@@ -133,8 +134,11 @@ pub struct LocalConfigInfo {
 }
 
 #[tauri::command]
-pub async fn copy_text(text: String) -> Result<(), String> {
-    copy_text_native(&text)
+pub async fn copy_text(text: String) -> Result<(), AppError> {
+    // 平台实现保持返回 String：Windows / Linux 分支在本机（macOS）不参与编译，
+    // 改它们等于改一段无法验证的代码。边界处统一包成 Io 类错误即可，
+    // 原始信息原样保留在 message 里。
+    copy_text_native(&text).map_err(AppError::io)
 }
 
 /// 跨平台剪贴板写入：macOS pbcopy / Windows PowerShell Set-Clipboard / Linux wl-copy|xclip。
@@ -161,7 +165,7 @@ fn copy_text_native(text: &str) -> Result<(), String> {
     )))]
     {
         let _ = text;
-        Err("Clipboard copy is not implemented on this platform".to_string())
+        Err("当前平台不支持写入剪贴板".to_string())
     }
 }
 
@@ -170,26 +174,26 @@ fn copy_text_with_pbcopy(text: &str) -> Result<(), String> {
     let mut child = Command::new("/usr/bin/pbcopy")
         .stdin(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("Failed to start pbcopy: {}", e))?;
+        .map_err(|e| format!("无法启动 pbcopy：{e}"))?;
 
     {
         let stdin = child
             .stdin
             .as_mut()
-            .ok_or_else(|| "Failed to open pbcopy stdin".to_string())?;
+            .ok_or_else(|| "无法打开 pbcopy 的标准输入".to_string())?;
         stdin
             .write_all(text.as_bytes())
-            .map_err(|e| format!("Failed to write clipboard text: {}", e))?;
+            .map_err(|e| format!("写入剪贴板失败：{e}"))?;
     }
 
     let status = child
         .wait()
-        .map_err(|e| format!("Failed to wait for pbcopy: {}", e))?;
+        .map_err(|e| format!("等待 pbcopy 结束失败：{e}"))?;
 
     if status.success() {
         Ok(())
     } else {
-        Err(format!("pbcopy exited with status {}", status))
+        Err(format!("pbcopy 以非零状态退出：{status}"))
     }
 }
 
@@ -213,28 +217,28 @@ fn copy_text_with_powershell(text: &str) -> Result<(), String> {
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("Failed to start PowerShell for clipboard: {}", e))?;
+        .map_err(|e| format!("无法启动 PowerShell 写入剪贴板：{e}"))?;
 
     {
         let stdin = child
             .stdin
             .as_mut()
-            .ok_or_else(|| "Failed to open PowerShell stdin".to_string())?;
+            .ok_or_else(|| "无法打开 PowerShell 的标准输入".to_string())?;
         stdin
             .write_all(text.as_bytes())
-            .map_err(|e| format!("Failed to write clipboard text: {}", e))?;
+            .map_err(|e| format!("写入剪贴板失败：{e}"))?;
     }
 
     let output = child
         .wait_with_output()
-        .map_err(|e| format!("Failed to wait for PowerShell clipboard: {}", e))?;
+        .map_err(|e| format!("等待 PowerShell 结束失败：{e}"))?;
 
     if output.status.success() {
         Ok(())
     } else {
         let err = String::from_utf8_lossy(&output.stderr);
         Err(format!(
-            "Set-Clipboard failed (status {}): {}",
+            "Set-Clipboard 失败（状态 {}）：{}",
             output.status,
             err.trim()
         ))
@@ -244,7 +248,7 @@ fn copy_text_with_powershell(text: &str) -> Result<(), String> {
 /// Linux：优先 Wayland `wl-copy`，否则 X11 `xclip`。
 #[cfg(all(unix, not(target_os = "macos")))]
 fn copy_text_with_linux_clipboard(text: &str) -> Result<(), String> {
-    let mut last_err = String::from("no clipboard backend found (tried wl-copy, xclip)");
+    let mut last_err = String::from("未找到可用的剪贴板后端（已尝试 wl-copy、xclip）");
 
     for (bin, args) in [
         ("wl-copy", vec![] as Vec<&str>),
@@ -260,37 +264,36 @@ fn copy_text_with_linux_clipboard(text: &str) -> Result<(), String> {
             Ok(mut child) => {
                 if let Some(stdin) = child.stdin.as_mut() {
                     if let Err(e) = stdin.write_all(text.as_bytes()) {
-                        last_err = format!("{bin}: write stdin failed: {e}");
+                        last_err = format!("{bin}：写入标准输入失败：{e}");
                         continue;
                     }
                 } else {
-                    last_err = format!("{bin}: no stdin");
+                    last_err = format!("{bin}：无法打开标准输入");
                     continue;
                 }
                 match child.wait_with_output() {
                     Ok(out) if out.status.success() => return Ok(()),
                     Ok(out) => {
                         last_err = format!(
-                            "{bin} exited {}: {}",
+                            "{bin} 以状态 {} 退出：{}",
                             out.status,
                             String::from_utf8_lossy(&out.stderr).trim()
                         );
                     }
-                    Err(e) => last_err = format!("{bin}: wait failed: {e}"),
+                    Err(e) => last_err = format!("{bin}：等待进程结束失败：{e}"),
                 }
             }
-            Err(e) => last_err = format!("{bin}: {e}"),
+            Err(e) => last_err = format!("{bin}：{e}"),
         }
     }
 
-    Err(format!("Clipboard copy failed: {last_err}"))
+    Err(format!("写入剪贴板失败：{last_err}"))
 }
 
 // 新增：获取完整的本地配置信息
 #[tauri::command]
-pub async fn get_local_config_info(target_app: String) -> Result<LocalConfigInfo, String> {
-    let target = TargetApp::parse(&target_app)
-        .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
+pub async fn get_local_config_info(target_app: String) -> Result<LocalConfigInfo, AppError> {
+    let target = TargetApp::parse(&target_app).ok_or_else(|| unknown_target_app(&target_app))?;
 
     use switch_api::adapters::get_adapter;
     let adapter = get_adapter(target);
@@ -319,7 +322,7 @@ pub async fn get_local_config_info(target_app: String) -> Result<LocalConfigInfo
         .unwrap_or_default();
 
     // Skills
-    info.skills = read_local_skills(target)?;
+    info.skills = read_local_skills(target).map_err(AppError::io)?;
 
     // Hooks
     // Codex 的真正 hook 定义在 ~/.codex/hooks.json（{"hooks":{...}}），而 config.toml 里
@@ -377,9 +380,9 @@ pub async fn get_local_config_info(target_app: String) -> Result<LocalConfigInfo
 }
 
 #[tauri::command]
-pub async fn list_profiles(state: State<'_, AppState>) -> Result<Vec<ApiProfile>, String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.list_profiles().map_err(|e| e.to_string())
+pub async fn list_profiles(state: State<'_, AppState>) -> Result<Vec<ApiProfile>, AppError> {
+    let db = state.db.lock()?;
+    Ok(db.list_profiles()?)
 }
 
 #[tauri::command]
@@ -559,16 +562,17 @@ pub async fn switch_profile(
     profile_name: String,
     probe: Option<bool>,
     state: State<'_, AppState>,
-) -> Result<(), String> {
-    let target = TargetApp::parse(&target_app)
-        .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
+) -> Result<(), AppError> {
+    let target = TargetApp::parse(&target_app).ok_or_else(|| unknown_target_app(&target_app))?;
     let do_probe = probe.unwrap_or(false);
 
     if do_probe {
+        // run_failover 已返回结构化 AppError（未知 Profile / 缺模型 / 无可用 Key 等
+        // 都已归类），这里直接透传，不再二次包装——二次包装会把原有类别冲掉。
         let result = run_failover(&state, target, &profile_name, false).await?;
         if !result.success {
-            return Err(format!(
-                "探活 failover 失败，未写入配置: {}",
+            return Err(AppError::io(format!(
+                "探活失败，未写入配置：{}",
                 result
                     .tried
                     .iter()
@@ -576,27 +580,28 @@ pub async fn switch_profile(
                     .cloned()
                     .collect::<Vec<_>>()
                     .join("; ")
-            ));
+            )));
         }
     }
 
     let (mut api_profile, persisted_shared_config) = {
-        let db = state.db.lock().map_err(|e| e.to_string())?;
-        let api_profile = db
-            .get_profile_by_name_and_target(&profile_name, target)
-            .map_err(|e| e.to_string())?;
-        let persisted_shared_config = db.get_shared_config(target).map_err(|e| e.to_string())?;
+        let db = state.db.lock()?;
+        let api_profile = db.get_profile_by_name_and_target(&profile_name, target)?;
+        let persisted_shared_config = db.get_shared_config(target)?;
         (api_profile, persisted_shared_config)
     };
     api_profile.normalize_keys();
     // 全局写锁：与其他切换/写盘命令互斥
-    let _write_guard = state.config_lock.lock().map_err(|e| e.to_string())?;
+    let _write_guard = state.config_lock.lock()?;
     let shared_config =
         switch_api::adapters::resolve_shared_config(target, persisted_shared_config)
-            .map_err(|e| e.to_string())?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+            .map_err(|e| AppError::from(e.context("读取当前共享配置失败")))?;
+    let db = state.db.lock()?;
+    // 用 anyhow 的 context 补中文上下文，而不是自己 format 成新字符串：
+    // 这样类别（含「回滚失败 → PartialFailure」）仍按错误类型判定，
+    // 根因也留在 detail 里由前端一并显示。
     switch_api::adapters::apply_profile_switch(&db, target, &api_profile, &shared_config, true)
-        .map_err(|e| format!("切换失败: {e}"))?;
+        .map_err(|e| AppError::from(e.context("切换配置失败")))?;
 
     Ok(())
 }
@@ -675,13 +680,14 @@ pub async fn restore_config_backup(
 /// 读取 Codex 的 config.toml 原始文本（不经 JSON 往返，保留用户格式/注释）。
 /// 文件不存在时返回空字符串。仅 Codex 提供此能力。
 #[tauri::command]
-pub async fn read_codex_config_raw() -> Result<String, String> {
+pub async fn read_codex_config_raw() -> Result<String, AppError> {
     use switch_api::adapters::get_adapter;
     let path = get_adapter(TargetApp::Codex).config_path();
     if !path.exists() {
         return Ok(String::new());
     }
-    std::fs::read_to_string(&path).map_err(|e| format!("读取 config.toml 失败：{}", e))
+    std::fs::read_to_string(&path)
+        .map_err(|e| AppError::from(e).with_context("读取 config.toml 失败"))
 }
 
 fn toml_string_field(value: Option<&toml::Value>, key: &str) -> Option<String> {
@@ -821,28 +827,49 @@ fn restore_codex_profile_state(
     }
 }
 
-fn persist_codex_raw_config(content: &str, state: &AppState) -> Result<(), String> {
+/// 把回滚结果并入错误：**回滚失败 = 部分生效 → PartialFailure**。
+///
+/// 这条判断很关键。回滚成功的失败是干净的（什么都没落地，可以放心重试）；
+/// 回滚失败的失败意味着磁盘上可能留着半套配置，前端必须提示用户去核对工具
+/// 实际状态，而不是让用户重试一遍。
+fn with_rollback(err: AppError, rollback_errors: Vec<String>) -> AppError {
+    if rollback_errors.is_empty() {
+        return err;
+    }
+    AppError::partial_failure(format!(
+        "{}；回滚失败：{}",
+        err.message,
+        rollback_errors.join("；")
+    ))
+    .with_detail(err.detail.unwrap_or_default())
+}
+
+fn persist_codex_raw_config(content: &str, state: &AppState) -> Result<(), AppError> {
     let parsed = toml::from_str::<toml::Value>(content)
-        .map_err(|error| format!("TOML 语法错误，未保存：{error}"))?;
+        .map_err(|error| AppError::invalid_input(format!("TOML 语法错误，未保存：{error}")))?;
     let adapter = switch_api::adapters::get_adapter(TargetApp::Codex);
     let path = adapter.config_path();
     let shared = adapter.extract_shared_config(
-        &serde_json::to_value(&parsed).map_err(|error| format!("转换 TOML 失败：{error}"))?,
+        &serde_json::to_value(&parsed)
+            .map_err(|error| AppError::internal(format!("转换 TOML 失败：{error}")))?,
     );
-    let previous_contents = if path.exists() {
-        Some(std::fs::read(&path).map_err(|error| format!("读取当前 Codex config 失败：{error}"))?)
-    } else {
-        None
-    };
+    let previous_contents =
+        if path.exists() {
+            Some(std::fs::read(&path).map_err(|error| {
+                AppError::from(error).with_context("读取当前 Codex config 失败")
+            })?)
+        } else {
+            None
+        };
 
-    let _write_guard = state.config_lock.lock().map_err(|e| e.to_string())?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let _write_guard = state.config_lock.lock()?;
+    let db = state.db.lock()?;
     let previous_profile = db
         .get_active_profile_full(TargetApp::Codex)
-        .map_err(|error| format!("读取 Codex active Profile 失败：{error}"))?;
+        .map_err(|error| AppError::from(error).with_context("读取 Codex active Profile 失败"))?;
     let previous_shared_config = db
         .get_shared_config(TargetApp::Codex)
-        .map_err(|error| format!("读取 Codex shared config 失败：{error}"))?
+        .map_err(|error| AppError::from(error).with_context("读取 Codex shared config 失败"))?
         .map(|config| config.config);
     let synced_profile = previous_profile
         .as_ref()
@@ -851,53 +878,40 @@ fn persist_codex_raw_config(content: &str, state: &AppState) -> Result<(), Strin
     if path.exists() {
         adapter
             .backup_config()
-            .map_err(|error| format!("备份当前配置失败：{error}"))?;
+            .map_err(|error| AppError::from(error).with_context("备份当前配置失败"))?;
     }
 
     if let Some(profile) = synced_profile.as_ref() {
+        // db 层已经返回 AppError，直接补上下文即可；再套一层 AppError::from 是空转。
         db.update_profile(profile)
-            .map_err(|error| format!("同步 Codex active Profile 失败：{error}"))?;
+            .map_err(|error| error.with_context("同步 Codex active Profile 失败"))?;
     }
 
-    if let Err(error) = validate_and_write_codex_config_raw(content, &path) {
-        let mut rollback_errors = Vec::new();
-        if let Err(rollback) = restore_codex_profile_state(
-            &db,
+    // 两处写盘失败走同一套补偿：数据库行 + config.toml 都要还原。
+    let rollback = |db: &Database| -> Vec<String> {
+        let mut errors = Vec::new();
+        if let Err(e) = restore_codex_profile_state(
+            db,
             previous_profile.as_ref(),
             previous_shared_config.as_ref(),
         ) {
-            rollback_errors.push(rollback);
+            errors.push(e);
         }
-        if let Err(rollback) = restore_codex_raw_file(&path, previous_contents.as_deref()) {
-            rollback_errors.push(rollback);
+        if let Err(e) = restore_codex_raw_file(&path, previous_contents.as_deref()) {
+            errors.push(e);
         }
-        return Err(if rollback_errors.is_empty() {
-            error
-        } else {
-            format!("{error}；回滚失败: {}", rollback_errors.join("；"))
-        });
+        errors
+    };
+
+    if let Err(error) = validate_and_write_codex_config_raw(content, &path) {
+        return Err(with_rollback(AppError::io(error), rollback(&db)));
     }
 
     if let Err(error) = db.save_shared_config(TargetApp::Codex, shared) {
-        let mut rollback_errors = Vec::new();
-        if let Err(rollback) = restore_codex_profile_state(
-            &db,
-            previous_profile.as_ref(),
-            previous_shared_config.as_ref(),
-        ) {
-            rollback_errors.push(rollback);
-        }
-        if let Err(rollback) = restore_codex_raw_file(&path, previous_contents.as_deref()) {
-            rollback_errors.push(rollback);
-        }
-        return Err(if rollback_errors.is_empty() {
-            format!("保存 Codex shared config 失败：{error}")
-        } else {
-            format!(
-                "保存 Codex shared config 失败：{error}；回滚失败: {}",
-                rollback_errors.join("；")
-            )
-        });
+        return Err(with_rollback(
+            error.with_context("保存 Codex shared config 失败"),
+            rollback(&db),
+        ));
     }
 
     Ok(())
@@ -909,7 +923,7 @@ fn persist_codex_raw_config(content: &str, state: &AppState) -> Result<(), Strin
 pub async fn save_codex_config_raw(
     content: String,
     state: State<'_, AppState>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     persist_codex_raw_config(&content, &state)
 }
 
@@ -959,21 +973,21 @@ fn apply_field_updates(config: &mut serde_json::Value, fields: &serde_json::Valu
 pub async fn update_codex_fields(
     fields: serde_json::Value,
     state: State<'_, AppState>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     use switch_api::adapters::get_adapter;
     let adapter = get_adapter(TargetApp::Codex);
 
     // 读 live config（不存在则为空对象），在完整配置上做最小改动。
     let mut config = adapter
         .read_config()
-        .map_err(|e| format!("读取 config.toml 失败：{}", e))?;
+        .map_err(|e| AppError::from(e).with_context("读取 config.toml 失败"))?;
     apply_field_updates(&mut config, &fields);
 
     // JSON → TOML 文本。toml::Value::try_from 走 Serialize，自动处理表/值排序。
-    let toml_value =
-        toml::Value::try_from(&config).map_err(|e| format!("转换为 TOML 失败：{}", e))?;
-    let content =
-        toml::to_string_pretty(&toml_value).map_err(|e| format!("序列化 TOML 失败：{}", e))?;
+    let toml_value = toml::Value::try_from(&config)
+        .map_err(|e| AppError::internal(format!("转换为 TOML 失败：{e}")))?;
+    let content = toml::to_string_pretty(&toml_value)
+        .map_err(|e| AppError::internal(format!("序列化 TOML 失败：{e}")))?;
 
     // 与原始文本编辑使用同一事务路径：字段编辑也必须同步 active Profile。
     persist_codex_raw_config(&content, &state)
@@ -1037,13 +1051,14 @@ fn configured_opencode_provider_id(config: &serde_json::Value) -> Option<String>
 
 /// 读取某工具当前配置文件，提取其中的 API URL / Key（不写库，仅返回供预览）
 #[tauri::command]
-pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, String> {
+pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, AppError> {
     use switch_api::adapters::get_adapter;
-    let target = TargetApp::parse(&target_app)
-        .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
+    let target = TargetApp::parse(&target_app).ok_or_else(|| unknown_target_app(&target_app))?;
     let adapter = get_adapter(target);
     let source = adapter.config_path().to_string_lossy().to_string();
-    let cfg = adapter.read_config().map_err(|e| e.to_string())?;
+    let cfg = adapter
+        .read_config()
+        .map_err(|e| AppError::from(e).with_context("读取本地配置文件失败"))?;
     Ok(scan_api_from_config(
         target,
         &cfg,
@@ -1650,14 +1665,14 @@ pub async fn import_shared_config(
 pub async fn export_database(
     output_path: String,
     state: State<'_, AppState>,
-) -> Result<(), String> {
-    let _db = state.db.lock().map_err(|e| e.to_string())?;
+) -> Result<(), AppError> {
+    let _db = state.db.lock()?;
     let db_path = default_db_path()?;
 
     // 快照而非文件拷贝：拷主文件会漏掉还在 -wal 里的已提交数据（实测可导出成空档案库）。
     // 导出目标由用户选择，snapshot_to 只收紧文件本身权限，不动其所在目录。
     Database::snapshot_to(&db_path, std::path::Path::new(&output_path))
-        .map_err(|e| format!("Failed to export database: {}", e))?;
+        .map_err(|e| AppError::from(e).with_context("导出数据库失败"))?;
 
     Ok(())
 }
@@ -1666,19 +1681,19 @@ pub async fn export_database(
 pub async fn export_portable_backup(
     output_path: String,
     state: State<'_, AppState>,
-) -> Result<switch_api::utils::portable_backup::PortableBackupExportResult, String> {
-    let _write_guard = state.config_lock.lock().map_err(|e| e.to_string())?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+) -> Result<switch_api::utils::portable_backup::PortableBackupExportResult, AppError> {
+    let _write_guard = state.config_lock.lock()?;
+    let db = state.db.lock()?;
     switch_api::adapters::sync_all_shared_configs(&db)
-        .map_err(|e| format!("Failed to synchronize configuration before export: {e:#}"))?;
+        .map_err(|e| AppError::from(e).with_context("导出前同步共享配置失败"))?;
     let db_path = default_db_path()?;
-    let home = dirs::home_dir().ok_or("Failed to get home directory")?;
+    let home = home_dir()?;
     switch_api::utils::portable_backup::export_portable_backup(
         &home,
         &db_path,
         std::path::Path::new(&output_path),
     )
-    .map_err(|e| format!("Failed to export portable backup: {e:#}"))
+    .map_err(|e| AppError::from(e).with_context("导出便携备份失败"))
 }
 
 /// 把全部 skills 目录打包为 tar.gz（manifest + {app}/{skill}/...）。
@@ -1687,12 +1702,12 @@ pub async fn export_portable_backup(
 pub async fn export_skills(
     output_path: String,
     state: State<'_, AppState>,
-) -> Result<switch_api::utils::skills_backup::SkillsExportResult, String> {
+) -> Result<switch_api::utils::skills_backup::SkillsExportResult, AppError> {
     // 与配置写路径互斥：导出期间避免并发切换改到半截 skill 目录。
-    let _write_guard = state.config_lock.lock().map_err(|e| e.to_string())?;
-    let home = dirs::home_dir().ok_or("Failed to get home directory")?;
+    let _write_guard = state.config_lock.lock()?;
+    let home = home_dir()?;
     switch_api::utils::skills_backup::export_skills(&home, std::path::Path::new(&output_path))
-        .map_err(|e| format!("Failed to export skills: {e}"))
+        .map_err(|e| AppError::from(e).with_context("导出 Skills 失败"))
 }
 
 /// 从 tar.gz 归档恢复 skills。整体校验不通过则拒绝且不写盘；
@@ -1701,31 +1716,31 @@ pub async fn export_skills(
 pub async fn import_skills(
     input_path: String,
     state: State<'_, AppState>,
-) -> Result<switch_api::utils::skills_backup::SkillsImportResult, String> {
+) -> Result<switch_api::utils::skills_backup::SkillsImportResult, AppError> {
     // 与切换/写配置互斥；skills_backup 内部另有进程级 IMPORT_LOCK 防重入。
-    let _write_guard = state.config_lock.lock().map_err(|e| e.to_string())?;
-    let home = dirs::home_dir().ok_or("Failed to get home directory")?;
+    let _write_guard = state.config_lock.lock()?;
+    let home = home_dir()?;
     switch_api::utils::skills_backup::import_skills(&home, std::path::Path::new(&input_path))
-        .map_err(|e| format!("Failed to import skills: {e}"))
+        .map_err(|e| AppError::from(e).with_context("导入 Skills 失败"))
 }
 
 #[tauri::command]
-pub async fn import_database(input_path: String, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn import_database(
+    input_path: String,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
     let db_path = default_db_path()?;
 
     // 与切换/写配置互斥：导入会替换 live 库文件，期间绝不能有其他命令仍持有旧连接写盘。
-    let _write_guard = state.config_lock.lock().map_err(|e| e.to_string())?;
+    let _write_guard = state.config_lock.lock()?;
     let snapshots = switch_api::adapters::snapshot_all_managed_files()
-        .map_err(|e| format!("导入前快照工具配置失败: {e:#}"))?;
-    let mut db = state.db.lock().map_err(|e| e.to_string())?;
+        .map_err(|e| AppError::from(e).with_context("导入前快照工具配置失败"))?;
+    let mut db = state.db.lock()?;
     let backup = replace_database_locked(std::path::Path::new(&input_path), &db_path, &mut db)?;
     if let Err(error) = switch_api::adapters::materialize_active_profiles(&db) {
         let rollback =
             rollback_import_state(&db_path, &mut db, backup.as_deref(), &snapshots, None);
-        return Err(format!(
-            "Database imported but active configuration restore failed: {error:#}{}",
-            rollback_suffix(rollback)
-        ));
+        return Err(import_after_apply_failure("恢复生效配置", error, rollback));
     }
     Ok(())
 }
@@ -1740,32 +1755,29 @@ pub struct PortableBackupImportResult {
 pub async fn import_portable_backup(
     input_path: String,
     state: State<'_, AppState>,
-) -> Result<PortableBackupImportResult, String> {
-    let _write_guard = state.config_lock.lock().map_err(|e| e.to_string())?;
+) -> Result<PortableBackupImportResult, AppError> {
+    let _write_guard = state.config_lock.lock()?;
     let archive = switch_api::utils::portable_backup::extract_portable_backup(
         std::path::Path::new(&input_path),
     )
-    .map_err(|e| format!("Failed to validate portable backup: {e:#}"))?;
+    .map_err(|e| AppError::from(e).with_context("便携备份校验失败"))?;
     Database::validate_import_candidate(&archive.database_path)
-        .map_err(|e| format!("Portable backup database is invalid: {e:#}"))?;
+        .map_err(|e| AppError::from(e).with_context("便携备份中的数据库无效"))?;
 
     let db_path = default_db_path()?;
     let snapshots = switch_api::adapters::snapshot_all_managed_files()
-        .map_err(|e| format!("导入前快照工具配置失败: {e:#}"))?;
-    let mut db = state.db.lock().map_err(|e| e.to_string())?;
+        .map_err(|e| AppError::from(e).with_context("导入前快照工具配置失败"))?;
+    let mut db = state.db.lock()?;
     let backup = replace_database_locked(&archive.database_path, &db_path, &mut db)?;
 
-    let home = dirs::home_dir().ok_or("Failed to get home directory")?;
+    let home = home_dir()?;
     let skills = match switch_api::utils::skills_backup::import_skills(&home, &archive.skills_path)
     {
         Ok(skills) => skills,
         Err(error) => {
             let rollback =
                 rollback_import_state(&db_path, &mut db, backup.as_deref(), &snapshots, None);
-            return Err(format!(
-                "Database imported but Skills restore failed: {error:#}{}",
-                rollback_suffix(rollback)
-            ));
+            return Err(import_after_apply_failure("恢复 Skills", error, rollback));
         }
     };
     let restored_targets = match switch_api::adapters::materialize_active_profiles(&db) {
@@ -1781,10 +1793,7 @@ pub async fn import_portable_backup(
                 &snapshots,
                 Some((&home, &skills)),
             );
-            return Err(format!(
-                "Database imported but active configuration restore failed: {error:#}{}",
-                rollback_suffix(rollback)
-            ));
+            return Err(import_after_apply_failure("恢复生效配置", error, rollback));
         }
     };
     Ok(PortableBackupImportResult {
@@ -1793,12 +1802,37 @@ pub async fn import_portable_backup(
     })
 }
 
+/// 导入流程「数据库已替换、但后续步骤失败」的统一构造。
+///
+/// 两个分支的语义差别很大，不能共用一句话：
+///
+/// - **回滚成功**：磁盘已复原到导入前，用户什么都不用做，只是这次导入没生效。
+///   类别沿用底层错误的真实类型（`AppError::from` 按类型分类），不要一律标成
+///   `PartialFailure`——否则前端会提示「请核对工具实际状态」，而实际什么都没落地。
+/// - **回滚失败**：数据库/工具配置留在半成品状态，用户必须去核对，才叫
+///   `PartialFailure`。这与 `error.rs` 里「回滚失败才算部分生效」的判定一致。
+fn import_after_apply_failure(
+    what_failed: &str,
+    error: anyhow::Error,
+    rollback: Result<(), String>,
+) -> AppError {
+    match rollback {
+        Ok(()) => AppError::from(error)
+            .with_context(format!("导入失败（{what_failed}出错），已回滚到导入前状态")),
+        Err(rollback_error) => AppError::partial_failure(format!(
+            "导入已部分生效（{what_failed}出错），回滚也失败，请核对工具当前配置"
+        ))
+        .with_detail(format!("{error:#}；回滚失败：{rollback_error}")),
+    }
+}
+
 fn replace_database_locked(
     input_path: &std::path::Path,
     db_path: &std::path::Path,
     db: &mut Database,
-) -> Result<Option<std::path::PathBuf>, String> {
-    let placeholder = Database::open(":memory:").map_err(|e| e.to_string())?;
+) -> Result<Option<std::path::PathBuf>, AppError> {
+    let placeholder = Database::open(":memory:")
+        .map_err(|e| AppError::from(e).with_context("导入前创建数据库占位连接失败"))?;
     let previous = std::mem::replace(db, placeholder);
     drop(previous);
 
@@ -1806,11 +1840,10 @@ fn replace_database_locked(
         Ok(backup) => backup,
         Err(error) => {
             *db = Database::open(db_path).map_err(|restore| {
-                format!(
-                    "Failed to stage and import database: {error}; failed to reopen current database: {restore}"
-                )
+                AppError::partial_failure("导入失败，且无法重新打开原数据库")
+                    .with_detail(format!("{error:#}；重新打开失败：{restore:#}"))
             })?;
-            return Err(format!("Failed to stage and import database: {error}"));
+            return Err(AppError::from(error).with_context("导入数据库文件失败"));
         }
     };
     match Database::open(db_path) {
@@ -1823,26 +1856,20 @@ fn replace_database_locked(
         }
         Err(error) => {
             if let Some(backup_path) = backup.as_ref() {
-                Database::restore_replaced_file(db_path, backup_path).map_err(|restore| {
-                    format!(
-                        "Failed to reload imported database: {error}; rollback failed: {restore}"
+                if let Err(restore) = Database::restore_replaced_file(db_path, backup_path) {
+                    return Err(AppError::partial_failure(
+                        "导入后无法重新打开数据库，且回滚失败，请核对数据库文件",
                     )
-                })?;
+                    .with_detail(format!("{error:#}；回滚失败：{restore:#}")));
+                }
                 *db = Database::open(db_path).map_err(|restore| {
-                    format!(
-                        "Failed to reload imported database: {error}; failed to reopen restored database: {restore}"
+                    AppError::partial_failure("导入失败，已回滚但无法重新打开数据库").with_detail(
+                        format!("{error:#}；重新打开回滚后的数据库失败：{restore:#}"),
                     )
                 })?;
             }
-            Err(format!("Failed to reload imported database: {error}"))
+            Err(AppError::from(error).with_context("导入后重新打开数据库失败"))
         }
-    }
-}
-
-fn rollback_suffix(result: Result<(), String>) -> String {
-    match result {
-        Ok(()) => String::new(),
-        Err(error) => format!("；导入回滚失败: {error}"),
     }
 }
 
@@ -1881,7 +1908,7 @@ fn rollback_import_state(
         None => {
             if let Err(error) = std::fs::remove_file(db_path) {
                 if error.kind() != std::io::ErrorKind::NotFound {
-                    errors.push(format!("删除失败导入数据库失败: {error}"));
+                    errors.push(format!("删除导入失败的数据库失败: {error}"));
                 }
             }
         }
@@ -1901,14 +1928,21 @@ fn rollback_import_state(
     }
 }
 
+/// 读取某工具的活跃 Profile；失败时补上「是哪个工具」的上下文。
+///
+/// `get_status` / `probe_active_profiles` 都要对全部工具做同样的事，逐处写
+/// `map_err` 会得到 7 段除了工具名完全相同的代码，且报错时用户看不出是哪个工具。
+fn read_active_profile(db: &Database, target: TargetApp) -> Result<Option<ApiProfile>, AppError> {
+    db.get_active_profile_full(target)
+        .map_err(|e| AppError::from(e).with_context(format!("读取 {} 状态失败", target.as_str())))
+}
+
 #[tauri::command]
-pub async fn get_status(state: State<'_, AppState>) -> Result<StatusInfo, String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+pub async fn get_status(state: State<'_, AppState>) -> Result<StatusInfo, AppError> {
+    let db = state.db.lock()?;
 
     // Claude Code status
-    let claude_code_profile = db
-        .get_active_profile_full(TargetApp::ClaudeCode)
-        .map_err(|e| e.to_string())?;
+    let claude_code_profile = read_active_profile(&db, TargetApp::ClaudeCode)?;
     // connected = 已配置活跃 profile（不发外网探活）
     let claude_code = Some(TargetStatus {
         connected: claude_code_profile.is_some(),
@@ -1917,9 +1951,7 @@ pub async fn get_status(state: State<'_, AppState>) -> Result<StatusInfo, String
     });
 
     // Codex status
-    let codex_profile = db
-        .get_active_profile_full(TargetApp::Codex)
-        .map_err(|e| e.to_string())?;
+    let codex_profile = read_active_profile(&db, TargetApp::Codex)?;
     let codex = Some(TargetStatus {
         connected: codex_profile.is_some(),
         profile: codex_profile,
@@ -1927,9 +1959,7 @@ pub async fn get_status(state: State<'_, AppState>) -> Result<StatusInfo, String
     });
 
     // Pi status
-    let pi_profile = db
-        .get_active_profile_full(TargetApp::Pi)
-        .map_err(|e| e.to_string())?;
+    let pi_profile = read_active_profile(&db, TargetApp::Pi)?;
     let pi = Some(TargetStatus {
         connected: pi_profile.is_some(),
         profile: pi_profile,
@@ -1937,9 +1967,7 @@ pub async fn get_status(state: State<'_, AppState>) -> Result<StatusInfo, String
     });
 
     // OpenCode status
-    let opencode_profile = db
-        .get_active_profile_full(TargetApp::OpenCode)
-        .map_err(|e| e.to_string())?;
+    let opencode_profile = read_active_profile(&db, TargetApp::OpenCode)?;
     let opencode = Some(TargetStatus {
         connected: opencode_profile.is_some(),
         profile: opencode_profile,
@@ -1947,9 +1975,7 @@ pub async fn get_status(state: State<'_, AppState>) -> Result<StatusInfo, String
     });
 
     // Hermes status
-    let hermes_profile = db
-        .get_active_profile_full(TargetApp::Hermes)
-        .map_err(|e| e.to_string())?;
+    let hermes_profile = read_active_profile(&db, TargetApp::Hermes)?;
     let hermes = Some(TargetStatus {
         connected: hermes_profile.is_some(),
         profile: hermes_profile,
@@ -1957,9 +1983,7 @@ pub async fn get_status(state: State<'_, AppState>) -> Result<StatusInfo, String
     });
 
     // OpenClaw status
-    let openclaw_profile = db
-        .get_active_profile_full(TargetApp::OpenClaw)
-        .map_err(|e| e.to_string())?;
+    let openclaw_profile = read_active_profile(&db, TargetApp::OpenClaw)?;
     let openclaw = Some(TargetStatus {
         connected: openclaw_profile.is_some(),
         profile: openclaw_profile,
@@ -1967,9 +1991,7 @@ pub async fn get_status(state: State<'_, AppState>) -> Result<StatusInfo, String
     });
 
     // ZCode status
-    let zcode_profile = db
-        .get_active_profile_full(TargetApp::ZCode)
-        .map_err(|e| e.to_string())?;
+    let zcode_profile = read_active_profile(&db, TargetApp::ZCode)?;
     let zcode = Some(TargetStatus {
         connected: zcode_profile.is_some(),
         profile: zcode_profile,
@@ -1977,11 +1999,10 @@ pub async fn get_status(state: State<'_, AppState>) -> Result<StatusInfo, String
     });
 
     // Database info
-    let profiles = db.list_profiles().map_err(|e| e.to_string())?;
-    let db_path = dirs::home_dir()
-        .ok_or_else(|| "Failed to get home directory".to_string())?
-        .join(".switch-api")
-        .join("db.sqlite");
+    let profiles = db
+        .list_profiles()
+        .map_err(|e| AppError::from(e).with_context("读取 Profile 列表失败"))?;
+    let db_path = default_db_path()?;
     let size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
 
     Ok(StatusInfo {
@@ -2037,18 +2058,23 @@ async fn run_failover(
     target: TargetApp,
     profile_name: &str,
     re_switch: bool,
-) -> Result<crate::model_fetch::FailoverResult, String> {
+) -> Result<crate::model_fetch::FailoverResult, AppError> {
     use crate::model_fetch::{probe_with_params, FailoverResult, KeyProbeResult};
 
     let (mut profile, was_active) = {
-        let db = state.db.lock().map_err(|e| e.to_string())?;
+        let db = state.db.lock()?;
         let mut p = db
             .get_profile_by_name_and_target(profile_name, target)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| {
+                AppError::from(e).with_context(format!(
+                    "读取 {} 的 Profile「{profile_name}」失败",
+                    target.as_str()
+                ))
+            })?;
         p.normalize_keys();
         let active_id = db
             .get_active_profile(target)
-            .map_err(|e| e.to_string())?
+            .map_err(|e| AppError::from(e).with_context("读取当前活跃 Profile 失败"))?
             .map(|a| a.profile_id);
         let was = p.id.zip(active_id).map(|(a, b)| a == b).unwrap_or(false);
         (p, was)
@@ -2057,14 +2083,16 @@ async fn run_failover(
     if target == TargetApp::Codex
         && switch_api::adapters::codex::CodexAdapter::is_amazon_bedrock_profile(&profile)
     {
-        return Err(
-            "Amazon Bedrock 使用 Codex 内置 AWS 认证，不能通过 HTTP API Key 探活或 failover".into(),
-        );
+        return Err(AppError::invalid_input(
+            "Amazon Bedrock 使用 Codex 内置 AWS 认证，不能通过 HTTP API Key 探活或 failover",
+        ));
     }
 
     let model = model_for_probe(&profile);
     if model.is_empty() {
-        return Err("先为该 Profile 填写默认模型再 failover".into());
+        return Err(AppError::invalid_input(
+            "先为该 Profile 填写默认模型再 failover",
+        ));
     }
     let wire_api = if target == TargetApp::Codex {
         profile.codex.wire_api.clone()
@@ -2085,7 +2113,7 @@ async fn run_failover(
         keys = profile.api_keys.clone().unwrap_or_default();
     }
     if keys.is_empty() {
-        return Err("没有可 failover 的 Key".into());
+        return Err(AppError::invalid_input("没有可 failover 的 Key"));
     }
 
     keys.sort_by_key(|e| if e.is_active { 0 } else { 1 });
@@ -2205,11 +2233,14 @@ async fn run_failover(
     }
 
     let persisted_shared_config = {
-        let db = state.db.lock().map_err(|e| e.to_string())?;
-        db.update_profile(&profile).map_err(|e| e.to_string())?;
+        let db = state.db.lock()?;
+        db.update_profile(&profile)?;
         let should_switch = re_switch || (was_active && success);
         if should_switch && success {
-            Some(db.get_shared_config(target).map_err(|e| e.to_string())?)
+            Some(
+                db.get_shared_config(target)
+                    .map_err(|e| AppError::from(e).with_context("读取共享配置失败"))?,
+            )
         } else {
             None
         }
@@ -2218,13 +2249,13 @@ async fn run_failover(
     let mut re_switched = false;
     if let Some(persisted_shared_config) = persisted_shared_config {
         // 全局写锁：与其他切换/写盘命令互斥
-        let _write_guard = state.config_lock.lock().map_err(|e| e.to_string())?;
+        let _write_guard = state.config_lock.lock()?;
         let shared_config =
             switch_api::adapters::resolve_shared_config(target, persisted_shared_config)
-                .map_err(|e| e.to_string())?;
-        let db = state.db.lock().map_err(|e| e.to_string())?;
+                .map_err(|e| AppError::from(e).with_context("解析共享配置失败"))?;
+        let db = state.db.lock()?;
         switch_api::adapters::apply_profile_switch(&db, target, &profile, &shared_config, true)
-            .map_err(|e| format!("切换失败: {e}"))?;
+            .map_err(|e| AppError::from(e).with_context("切换配置失败"))?;
         re_switched = true;
     }
 
@@ -2243,9 +2274,8 @@ pub async fn failover_profile_keys(
     profile_name: String,
     re_switch: Option<bool>,
     state: State<'_, AppState>,
-) -> Result<crate::model_fetch::FailoverResult, String> {
-    let target = TargetApp::parse(&target_app)
-        .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
+) -> Result<crate::model_fetch::FailoverResult, AppError> {
+    let target = TargetApp::parse(&target_app).ok_or_else(|| unknown_target_app(&target_app))?;
     // re_switch=Some(true) 强制 re-switch；None/false 时由 run_failover 在「已是 active profile」时自动 re-switch
     let force = re_switch == Some(true);
     run_failover(&state, target, &profile_name, force).await
@@ -2284,11 +2314,11 @@ pub struct ToolProbeResult {
 #[tauri::command]
 pub async fn probe_active_profiles(
     state: State<'_, AppState>,
-) -> Result<Vec<ToolProbeResult>, String> {
+) -> Result<Vec<ToolProbeResult>, AppError> {
     use crate::model_fetch::{probe_reachability, ReachabilityConfig};
 
     let snapshots: Vec<(TargetApp, Option<ApiProfile>)> = {
-        let db = state.db.lock().map_err(|e| e.to_string())?;
+        let db = state.db.lock()?;
         let tools = [
             TargetApp::ClaudeCode,
             TargetApp::Codex,
@@ -2300,8 +2330,7 @@ pub async fn probe_active_profiles(
         ];
         let mut out = Vec::new();
         for t in tools {
-            let p = db.get_active_profile_full(t).map_err(|e| e.to_string())?;
-            out.push((t, p));
+            out.push((t, read_active_profile(&db, t)?));
         }
         out
     };
@@ -2470,10 +2499,8 @@ fn read_codex_hooks(path: &std::path::Path) -> serde_json::Value {
     }
 }
 
-fn default_db_path() -> Result<std::path::PathBuf, String> {
-    dirs::home_dir()
-        .ok_or("Failed to get home directory".to_string())
-        .map(|home| home.join(".switch-api").join("db.sqlite"))
+fn default_db_path() -> Result<std::path::PathBuf, AppError> {
+    Ok(home_dir()?.join(".switch-api").join("db.sqlite"))
 }
 
 #[cfg(test)]
@@ -3488,6 +3515,173 @@ mod update_profile_error_kind_tests {
             err.kind(),
             ErrorKind::Conflict,
             "「不能改目标工具」是状态冲突，不是传参错误"
+        );
+    }
+}
+
+/// 导入流程「已落地后失败」的归类。
+///
+/// `import_after_apply_failure` 是纯函数（不改磁盘、不碰数据库），
+/// 所以两个分支都能直接测——这正是把它从 `import_database` /
+/// `import_portable_backup` 里抽出来的原因：留在命令里就只能靠集成测试碰运气。
+#[cfg(test)]
+mod import_failure_tests {
+    use super::import_after_apply_failure;
+    use switch_api::error::ErrorKind;
+
+    fn io_error() -> anyhow::Error {
+        anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::NotFound))
+    }
+
+    #[test]
+    fn a_clean_rollback_keeps_the_underlying_kind_instead_of_partial_failure() {
+        // 回滚成功 = 磁盘已复原，用户什么都不用做。此时报「部分生效」会误导用户
+        // 去核对工具状态，而实际上什么都没落地。类别应沿用底层错误的真实类型。
+        let err = import_after_apply_failure("恢复生效配置", io_error(), Ok(()));
+
+        assert_eq!(
+            err.kind(),
+            ErrorKind::Io,
+            "已回滚的失败要保留底层类别（io），不能被改写成 PartialFailure"
+        );
+        assert!(
+            err.message.contains("已回滚到导入前状态"),
+            "文案要告诉用户「没留下痕迹」，实际为：{}",
+            err.message
+        );
+        assert!(
+            err.message.contains("恢复生效配置"),
+            "文案要说清是哪一步失败，实际为：{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn a_failed_rollback_is_partial_failure_and_keeps_both_errors_in_detail() {
+        let err = import_after_apply_failure(
+            "恢复生效配置",
+            io_error(),
+            Err("恢复工具配置失败: 权限不足".to_string()),
+        );
+
+        assert_eq!(
+            err.kind(),
+            ErrorKind::PartialFailure,
+            "回滚也失败才叫「部分生效」"
+        );
+        assert!(
+            err.message.contains("请核对"),
+            "部分生效必须给出可行动的下一步，实际为：{}",
+            err.message
+        );
+        let detail = err.detail.as_deref().expect("detail 必须保留原始错误");
+        assert!(
+            detail.contains("恢复工具配置失败"),
+            "detail 要带上回滚错误，实际为：{detail}"
+        );
+    }
+
+    #[test]
+    fn a_failed_rollback_does_not_claim_the_state_was_restored() {
+        // 回归保护：两个分支曾共用同一句文案「Database imported but ...」，
+        // 回滚失败时也在说「导入已生效」，用户无法判断该不该动手。
+        let err = import_after_apply_failure("恢复 Skills", io_error(), Err("磁盘只读".into()));
+        assert!(
+            !err.message.contains("已回滚到导入前状态"),
+            "回滚失败时绝不能声称已复原，实际为：{}",
+            err.message
+        );
+    }
+}
+
+/// `replace_database_locked` 的真实文件级测试。
+///
+/// 这是本次迁移改动最激进的一段：占位连接 → 替换文件 → 重新打开 → 失败时还原。
+/// 纯函数单测覆盖不到它，只跑「编译通过」也不算验证——必须拿真实 sqlite 文件
+/// 跑一遍，才能确认换库和失败恢复都还对。
+#[cfg(test)]
+mod replace_database_tests {
+    use super::*;
+    use switch_api::error::ErrorKind;
+
+    fn named_profile(name: &str) -> ApiProfile {
+        ApiProfile {
+            name: name.into(),
+            provider: "custom".into(),
+            api_url: "https://x.example".into(),
+            api_key: "k".into(),
+            target_app: Some(TargetApp::Codex),
+            ..Default::default()
+        }
+    }
+
+    /// 建一个含若干 profile 的库，返回其路径。
+    fn make_db(path: &std::path::Path, names: &[&str]) -> std::path::PathBuf {
+        let db = Database::open(path).expect("open");
+        for name in names {
+            db.add_profile(&named_profile(name)).expect("add_profile");
+        }
+        drop(db);
+        path.to_path_buf()
+    }
+
+    fn profile_names(db: &Database) -> Vec<String> {
+        db.list_profiles()
+            .expect("list_profiles")
+            .into_iter()
+            .map(|p| p.name)
+            .collect()
+    }
+
+    #[test]
+    fn swapping_in_an_import_keeps_the_new_content_and_returns_a_usable_backup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let live = dir.path().join("live.sqlite");
+        let incoming = dir.path().join("incoming.sqlite");
+        make_db(&live, &["old"]);
+        make_db(&incoming, &["new-a", "new-b"]);
+
+        let mut db = Database::open(&live).expect("open live");
+        let backup = replace_database_locked(&incoming, &live, &mut db).expect("导入应成功");
+
+        // 换进来的是候选库的内容
+        let names = profile_names(&db);
+        assert_eq!(names.len(), 2, "实际：{names:?}");
+        assert!(names.contains(&"new-a".to_string()), "实际：{names:?}");
+
+        // 原库被快照成备份，且文件真实存在、内容确为替换前的样子——
+        // 只返回一个路径但文件是空的，回滚能力就是假的。
+        let backup = backup.expect("原库存在时必须返回备份路径");
+        assert!(
+            backup.exists(),
+            "备份文件必须真实存在：{}",
+            backup.display()
+        );
+        let backup_db = Database::open(&backup).expect("备份库必须可打开");
+        assert_eq!(profile_names(&backup_db), vec!["old".to_string()]);
+    }
+
+    #[test]
+    fn a_missing_import_file_fails_cleanly_and_leaves_the_live_db_usable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let live = dir.path().join("live.sqlite");
+        make_db(&live, &["old"]);
+
+        let mut db = Database::open(&live).expect("open live");
+        let err = replace_database_locked(&dir.path().join("nope.sqlite"), &live, &mut db)
+            .expect_err("不存在的候选库必须失败");
+
+        assert_ne!(
+            err.kind(),
+            ErrorKind::PartialFailure,
+            "替换前就中止、且原库能重新打开，不算「部分生效」"
+        );
+        // 关键：db 句柄必须被重新打开回真实库，而不是停在 :memory: 占位连接上。
+        // 停在占位连接上会让后续命令读到空库——这是最难在人工点测里发现的失败形态。
+        assert_eq!(
+            profile_names(&db),
+            vec!["old".to_string()],
+            "原库内容必须仍然可读"
         );
     }
 }

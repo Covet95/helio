@@ -38,7 +38,7 @@ pub enum ErrorKind {
     Permission,
     /// 与当前状态冲突（如编辑时试图改目标工具）
     Conflict,
-    /// 磁盘 / 数据库读写失败
+    /// 磁盘 / 数据库 / 网络等 I/O 失败
     Io,
     /// 操作已部分生效后失败；已完成的部分已尝试补偿回滚
     PartialFailure,
@@ -107,6 +107,22 @@ impl AppError {
     pub fn kind(&self) -> ErrorKind {
         self.kind
     }
+
+    /// 在 message 前加一层中文上下文，保留原有 message 与 detail。
+    ///
+    /// 用于「上层知道自己在做什么、底层只知道自己失败了」的场景：
+    /// 例如底层给出「读写文件失败」，上层补上「读取 config.toml 失败」，
+    /// 用户才知道是哪个文件。
+    ///
+    /// 之所以用**前缀拼接**而不是替换：替换会把底层已有的信息挤进 detail，
+    /// 一旦某处只显示 message 就会丢信息。宁可稍微啰嗦，也不要静默丢东西。
+    pub fn with_context(mut self, context: impl AsRef<str>) -> Self {
+        let context = context.as_ref();
+        if !context.is_empty() {
+            self.message = format!("{context}：{}", self.message);
+        }
+        self
+    }
 }
 
 impl std::fmt::Display for AppError {
@@ -139,19 +155,92 @@ impl From<rusqlite::Error> for AppError {
 
 impl From<anyhow::Error> for AppError {
     fn from(e: anyhow::Error) -> Self {
-        // 用 anyhow 自己的最外层 context 当 message，而不是固定文案「操作失败」：
+        // message 取 anyhow 的**最外层** context，而不是固定文案「操作失败」：
         // 核心层写的提示往往已经是准确的中文（如 `Profile id=42 不存在`），
-        // 覆盖掉会让用户只看到一句空话、真信息被折进 detail。
-        // `{e:#}` 展开整条 context 链；无额外链时与 `{e}` 相同，此时不重复填 detail。
-        let full = format!("{e:#}");
-        let err = AppError::internal(format!("{e}"));
-        if full == err.message {
+        // 覆盖掉会让用户只看到一句空话。
+        //
+        // detail 只放**链上剩余部分**（根因 + 中间层），不重复 message 那句。
+        // 这样 message + detail 合起来正好是完整信息、且没有冗余——前端把两者
+        // 一起显示时（见 gui/src/lib/utils.ts 的 humanizeError）用户能看到全貌，
+        // 而不是像以前那样只知道「失败了」却不知道为什么。
+        let mut chain = e.chain();
+        let message = chain
+            .next()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| e.to_string());
+        let rest: Vec<String> = chain.map(ToString::to_string).collect();
+
+        let err = AppError::new(classify_anyhow_chain(&e), message);
+        if rest.is_empty() {
             err
         } else {
-            err.with_detail(full)
+            err.with_detail(rest.join(": "))
         }
     }
 }
+
+/// 沿 anyhow 的 context 链下钻，按**错误类型**判定类别。
+///
+/// 这是让 `?` 自动带上正确类别的关键：db / adapter 层大量返回
+/// `anyhow::Result`，如果一律归为 `Internal`，前端就仍然无法区分
+/// 「磁盘坏了」和「逻辑错了」。
+///
+/// 注意这里判的是**类型**而不是文案——按类型不会因为改措辞而失效，
+/// 这正是 `humanizeError` 用正则猜文案那套做法要解决的问题。
+fn classify_anyhow_chain(e: &anyhow::Error) -> ErrorKind {
+    for cause in e.chain() {
+        // 必须放在最前：回滚失败才是「部分生效」，比底层是 io 还是 sqlite 更重要。
+        if cause.downcast_ref::<RollbackFailed>().is_some() {
+            return ErrorKind::PartialFailure;
+        }
+        // reqwest 要排在 io 之前：reqwest::Error 内部常常再包一层 io::Error
+        // （超时、连接被拒都是），按 io 判会把「网络不通」误报成「磁盘读写失败」。
+        if cause.downcast_ref::<reqwest::Error>().is_some() {
+            return ErrorKind::Io;
+        }
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            return if io.kind() == std::io::ErrorKind::PermissionDenied {
+                ErrorKind::Permission
+            } else {
+                ErrorKind::Io
+            };
+        }
+        if cause.downcast_ref::<rusqlite::Error>().is_some() {
+            return ErrorKind::Io;
+        }
+        if cause.downcast_ref::<serde_json::Error>().is_some() {
+            return ErrorKind::InvalidInput;
+        }
+    }
+    // 链上没有可识别的具体错误类型：诚实地标为未分类，而不是猜。
+    ErrorKind::Internal
+}
+
+/// 「切换事务已部分生效，且补偿回滚也失败了」的标记错误。
+///
+/// 单独做成一个类型，是为了让 `classify_anyhow_chain` 能**按类型**识别出
+/// `PartialFailure`，而不是去匹配 "rollback failed" 这段文案——文案会改，
+/// 类型不会。这也是本模块反复强调的原则：类别来自类型，不来自措辞。
+#[derive(Debug)]
+pub struct RollbackFailed {
+    message: String,
+}
+
+impl RollbackFailed {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for RollbackFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for RollbackFailed {}
 
 impl From<std::io::Error> for AppError {
     fn from(e: std::io::Error) -> Self {
@@ -184,6 +273,27 @@ impl<T> From<std::sync::PoisonError<T>> for AppError {
 impl From<serde_json::Error> for AppError {
     fn from(e: serde_json::Error) -> Self {
         AppError::invalid_input("配置内容不是合法的 JSON").with_detail(e.to_string())
+    }
+}
+
+/// 网络请求失败（超时 / 连接被拒 / TLS 握手失败等）。
+///
+/// 归入 `Io` 而不是新开一个 `Network` 变体：Rust 的 `std::io::Error` 本来就覆盖
+/// socket 层，reqwest 的错误链底下也常常就是 io::Error；单开变体只会让前端多一个
+/// 分支，却没有对应的不同处置方式。
+///
+/// 文案按 `reqwest::Error` 自带的分类给出——超时和连不上对用户是两件事：
+/// 前者要调超时或换网络，后者要检查地址/代理。
+impl From<reqwest::Error> for AppError {
+    fn from(e: reqwest::Error) -> Self {
+        let message = if e.is_timeout() {
+            "请求超时"
+        } else if e.is_connect() {
+            "无法连接到服务地址"
+        } else {
+            "网络请求失败"
+        };
+        AppError::io(message).with_detail(e.to_string())
     }
 }
 
@@ -314,5 +424,118 @@ mod tests {
             detail.contains("no such table: profiles"),
             "detail 要保留根因，实际为：{detail}"
         );
+    }
+
+    #[test]
+    fn anyhow_chain_is_classified_by_error_type_not_by_text() {
+        // 关键：类别来自错误的**类型**，不是文案。改措辞不会让它失效——
+        // 这正是 humanizeError 用正则猜文案那套做法的问题所在。
+        let missing = AppError::from(anyhow::Error::from(std::io::Error::from(
+            std::io::ErrorKind::NotFound,
+        )));
+        assert_eq!(missing.kind, ErrorKind::Io);
+
+        let denied = AppError::from(anyhow::Error::from(std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied,
+        )));
+        assert_eq!(denied.kind, ErrorKind::Permission);
+
+        let sqlite = AppError::from(anyhow::Error::from(rusqlite::Error::QueryReturnedNoRows));
+        assert_eq!(sqlite.kind, ErrorKind::Io);
+    }
+
+    #[test]
+    fn classification_looks_through_context_layers() {
+        use anyhow::Context;
+        // db / adapter 层的典型形态：具体错误外面包了好几层 context。
+        // 如果不穿透，db 层的失败会全部退化成 Internal，类别就白加了。
+        let err = AppError::from(
+            Err::<(), _>(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+                .context("写入配置失败")
+                .context("切换 Profile 失败")
+                .unwrap_err(),
+        );
+        assert_eq!(
+            err.kind,
+            ErrorKind::Permission,
+            "必须穿透 context 链看到根因"
+        );
+        assert_eq!(
+            err.message, "切换 Profile 失败",
+            "最外层 context 仍然是给用户看的 message"
+        );
+    }
+
+    #[test]
+    fn unclassifiable_anyhow_stays_internal_rather_than_guessing() {
+        // 链上没有可识别的具体类型时，诚实标为未分类，而不是硬塞进 Io。
+        let err = AppError::from(anyhow::anyhow!("纯粹的业务逻辑错误"));
+        assert_eq!(err.kind, ErrorKind::Internal);
+        assert_eq!(err.message, "纯粹的业务逻辑错误");
+    }
+
+    #[tokio::test]
+    async fn reqwest_errors_become_io_with_a_chinese_message() {
+        // 用「空 host」的 URL 触发 reqwest::Error：不依赖网络，也不会超时挂住。
+        let raw = reqwest::Client::new()
+            .get("http://")
+            .send()
+            .await
+            .expect_err("空 host 的 URL 必须构造失败");
+
+        let err = AppError::from(raw);
+        assert_eq!(
+            err.kind,
+            ErrorKind::Io,
+            "网络失败归 Io，不能退化成 Internal"
+        );
+        assert!(
+            ["请求超时", "无法连接到服务地址", "网络请求失败"].contains(&err.message.as_str()),
+            "文案要区分超时 / 连不上 / 其它网络失败，实际为：{}",
+            err.message
+        );
+        assert!(err.detail.is_some(), "reqwest 的原始报错必须进 detail");
+    }
+
+    #[tokio::test]
+    async fn reqwest_error_inside_a_context_chain_still_classifies_as_io() {
+        // 关键：reqwest::Error 底下常常还包着一层 io::Error。如果不把 reqwest 的
+        // 判断排在 io 之前，链上先被命中的会是那个 io::Error——语义就从「网络不通」
+        // 漂移成了「磁盘读写失败」。
+        let raw = reqwest::Client::new()
+            .get("http://")
+            .send()
+            .await
+            .expect_err("空 host 的 URL 必须构造失败");
+        let err = AppError::from(anyhow::Error::from(raw).context("加载模型列表失败"));
+
+        assert_eq!(err.kind, ErrorKind::Io);
+        assert_eq!(err.message, "加载模型列表失败");
+        assert!(
+            err.detail.as_deref().is_some_and(|d| !d.trim().is_empty()),
+            "detail 要保留 reqwest 的原始报错，实际为：{:?}",
+            err.detail
+        );
+    }
+
+    #[test]
+    fn rollback_failure_is_partial_failure_not_io() {
+        // 回滚失败意味着「部分生效」，这个判断比「底层是 io 还是 sqlite」更重要，
+        // 所以分类必须优先命中 PartialFailure。注意它内部把底层错误格式化成了
+        // 文本，链上不会再出现 io::Error——这正是用标记类型而不是匹配文案的原因。
+        let err = AppError::from(anyhow::Error::new(RollbackFailed::new(
+            "写入配置失败；回滚失败：权限不足",
+        )));
+        assert_eq!(err.kind, ErrorKind::PartialFailure);
+    }
+
+    #[test]
+    fn a_switch_failure_that_rolled_back_cleanly_is_not_partial() {
+        // 回滚成功的失败是干净的 Io，不能被误标成部分失败——否则前端会去提示
+        // 「请核对工具实际状态」，而实际上什么都没落地。
+        let err = AppError::from(anyhow::Error::from(std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied,
+        )));
+        assert_eq!(err.kind, ErrorKind::Permission);
     }
 }

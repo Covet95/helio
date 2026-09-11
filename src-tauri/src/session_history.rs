@@ -3,6 +3,7 @@ use std::fs;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek};
 use std::path::{Component, Path, PathBuf};
+use switch_api::error::AppError;
 use walkdir::WalkDir;
 
 /// 预览输入上限：最多读取 8 MiB，避免超大 jsonl 阻塞预览。
@@ -613,16 +614,24 @@ fn selected_readers(tool: Option<&str>) -> Vec<Box<dyn SessionReader>> {
     }
 }
 
+/// `spawn_blocking` 的 JoinError 只可能是任务 panic 或被取消，属于内部故障。
+///
+/// 单独抽出来是因为会话历史有 5 个命令都走 blocking 线程，每处都要处理一次；
+/// 泛型参数避免依赖 `tauri::async_runtime::JoinError` 的具体类型名。
+fn background_task_failed<E: std::fmt::Display>(e: E) -> AppError {
+    AppError::internal("后台任务异常终止").with_detail(e.to_string())
+}
+
 /// 清理时间窗口换算：days 天 -> unix 秒截止点。溢出时返回 Err。
-pub(crate) fn cleanup_cutoff(now: i64, older_than_days: i64) -> Result<i64, String> {
+pub(crate) fn cleanup_cutoff(now: i64, older_than_days: i64) -> Result<i64, AppError> {
     if older_than_days <= 0 {
-        return Err("天数须为正整数".into());
+        return Err(AppError::invalid_input("天数须为正整数"));
     }
     let window = older_than_days
         .checked_mul(86400)
-        .ok_or_else(|| "天数过大，无法计算".to_string())?;
+        .ok_or_else(|| AppError::invalid_input("天数过大，无法计算"))?;
     now.checked_sub(window)
-        .ok_or_else(|| "天数过大，无法计算".to_string())
+        .ok_or_else(|| AppError::invalid_input("天数过大，无法计算"))
 }
 
 /// 按 tool / search 过滤（search 命中 cwd 或 title）
@@ -666,7 +675,7 @@ fn reader_for(tool: &str) -> Option<Box<dyn SessionReader>> {
 pub async fn list_sessions(
     tool: Option<String>,
     search: Option<String>,
-) -> Result<Vec<SessionMeta>, String> {
+) -> Result<Vec<SessionMeta>, AppError> {
     // 磁盘扫描是同步阻塞 I/O，放到 blocking 线程，避免占用 async worker。
     // Reader 在阻塞线程内构造，只移动 tool/search 字符串进闭包。
     tauri::async_runtime::spawn_blocking(move || {
@@ -679,32 +688,36 @@ pub async fn list_sessions(
         apply_filters(all, tool.as_deref(), search.as_deref())
     })
     .await
-    .map_err(|e| e.to_string())
+    .map_err(background_task_failed)
 }
 
 #[tauri::command]
-pub async fn read_session_preview(tool: String, id: String) -> Result<Vec<PreviewMessage>, String> {
+pub async fn read_session_preview(
+    tool: String,
+    id: String,
+) -> Result<Vec<PreviewMessage>, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
-        let reader = reader_for(&tool).ok_or_else(|| format!("未知工具: {tool}"))?;
+        let reader = reader_for(&tool)
+            .ok_or_else(|| AppError::invalid_input(format!("未知工具：{tool}")))?;
         reader
             .read_preview(&id, PREVIEW_MAX_CHARS)
-            .map_err(|e| e.to_string())
+            .map_err(|e| AppError::io("读取会话预览失败").with_detail(e.to_string()))
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(background_task_failed)?
 }
 
 #[tauri::command]
-pub async fn delete_session(tool: String, id: String) -> Result<DeleteResult, String> {
+pub async fn delete_session(tool: String, id: String) -> Result<DeleteResult, AppError> {
     if reader_for(&tool).is_none() {
-        return Err(format!("未知工具: {tool}"));
+        return Err(AppError::invalid_input(format!("未知工具：{tool}")));
     }
     tauri::async_runtime::spawn_blocking(move || {
         let reader = reader_for(&tool).expect("tool checked above");
         delete_one(reader.as_ref(), &id)
     })
     .await
-    .map_err(|e| e.to_string())
+    .map_err(background_task_failed)
 }
 
 #[derive(serde::Deserialize)]
@@ -714,7 +727,7 @@ pub struct DeleteItem {
 }
 
 #[tauri::command]
-pub async fn delete_sessions(items: Vec<DeleteItem>) -> Result<Vec<DeleteResult>, String> {
+pub async fn delete_sessions(items: Vec<DeleteItem>) -> Result<Vec<DeleteResult>, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         let mut out = Vec::new();
         for it in items {
@@ -731,14 +744,14 @@ pub async fn delete_sessions(items: Vec<DeleteItem>) -> Result<Vec<DeleteResult>
         out
     })
     .await
-    .map_err(|e| e.to_string())
+    .map_err(background_task_failed)
 }
 
 #[tauri::command]
 pub async fn cleanup_sessions(
     tool: Option<String>,
     older_than_days: i64,
-) -> Result<Vec<DeleteResult>, String> {
+) -> Result<Vec<DeleteResult>, AppError> {
     let now = chrono::Utc::now().timestamp();
     let cutoff = cleanup_cutoff(now, older_than_days)?;
     tauri::async_runtime::spawn_blocking(move || {
@@ -753,7 +766,7 @@ pub async fn cleanup_sessions(
         out
     })
     .await
-    .map_err(|e| e.to_string())
+    .map_err(background_task_failed)
 }
 
 #[cfg(test)]
@@ -1098,6 +1111,21 @@ mod tests {
         assert!(
             cleanup_cutoff(1_000_000, i64::MAX).is_err(),
             "溢出天数应拒绝而非回绕"
+        );
+    }
+
+    #[test]
+    fn test_cleanup_cutoff_rejects_bad_days_as_invalid_input() {
+        // 天数来自用户输入，归类必须是 InvalidInput：前端据此提示「请检查输入」，
+        // 而不是像以前那样只能给一句无类别的字符串。
+        use switch_api::error::ErrorKind;
+        assert_eq!(
+            cleanup_cutoff(1_000_000, 0).unwrap_err().kind(),
+            ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            cleanup_cutoff(1_000_000, i64::MAX).unwrap_err().kind(),
+            ErrorKind::InvalidInput
         );
     }
 

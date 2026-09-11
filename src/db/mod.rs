@@ -26,6 +26,23 @@ fn parent_dir(path: &Path) -> PathBuf {
     }
 }
 
+/// 「导入替换失败，且补偿回滚也失败」的统一构造。
+///
+/// 必须返回 `RollbackFailed` 这个**标记类型**，而不是 `anyhow::anyhow!` 拼出的
+/// 纯文本：命令层是按**类型**判定「部分生效」的（见
+/// `crate::error::classify_anyhow_chain`）。拼成字符串后链上只剩一段文案，
+/// 分类只能退回 `Internal`，前端就不会提示用户去核对工具的实际状态——
+/// 而这里恰恰是「磁盘上可能留着半套配置」的情况，最需要那句提示。
+///
+/// 抽成具名函数是为了可测：要真实触发这条分支，得构造「替换失败 + 回滚也失败」
+/// 的文件系统状态（例如把 live 库设成不可删除），测试里无法稳定复现，
+/// 所以把这段纯逻辑单独拿出来验证。
+fn rollback_failed(error: anyhow::Error, restore_error: anyhow::Error) -> anyhow::Error {
+    anyhow::Error::new(crate::error::RollbackFailed::new(format!(
+        "{error}；回滚失败：{restore_error}"
+    )))
+}
+
 pub struct Database {
     conn: Connection,
 }
@@ -764,7 +781,7 @@ impl Database {
             if let Some(backup) = backup_path.as_ref() {
                 // restore_replaced_file 内部会先清掉 live 及其边车文件再回滚。
                 if let Err(restore) = Self::restore_replaced_file(live_path, backup) {
-                    return anyhow::anyhow!("{error}; rollback failed: {restore}");
+                    return rollback_failed(error, restore);
                 }
             }
             error
@@ -1543,6 +1560,33 @@ impl Database {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn a_failed_rollback_carries_the_marker_type_not_just_text() {
+        // 关键：命令层按**类型**判定 PartialFailure。这里若退回 anyhow::anyhow!
+        // 拼字符串，AppError::from 只能给出 Internal——用户就看不到
+        // 「请核对工具当前配置」那句提示，而磁盘上其实留着半套配置。
+        let err = rollback_failed(
+            anyhow::anyhow!("替换数据库失败"),
+            anyhow::anyhow!("磁盘只读"),
+        );
+
+        assert!(
+            err.downcast_ref::<crate::error::RollbackFailed>().is_some(),
+            "必须是 RollbackFailed 标记类型，而不是一段纯文本"
+        );
+        assert!(
+            err.to_string().contains("替换数据库失败") && err.to_string().contains("磁盘只读"),
+            "两个错误都要留在文案里，实际为：{err}"
+        );
+
+        let app = crate::error::AppError::from(err);
+        assert_eq!(
+            app.kind(),
+            crate::error::ErrorKind::PartialFailure,
+            "跨到命令层必须变成 PartialFailure"
+        );
+    }
 
     #[test]
     fn test_open_rejects_garbage_file_accepts_valid_db() {
