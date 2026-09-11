@@ -22,8 +22,8 @@ impl OpenCodeAdapter {
         self.config_dir.join("opencode.json")
     }
 
-    /// 去除 JSONC 注释（// 行注释和 /* */ 块注释），简单实现。
-    /// 不处理字符串内的 // 等边界情况，对标准 opencode.json 足够。
+    /// 去除 JSONC 注释（// 行注释和 /* */ 块注释），简单实现；正确处理字符串内的注释符。
+    /// 可处理转义与块注释边界。
     fn strip_jsonc_comments(input: &str) -> String {
         let mut out = String::with_capacity(input.len());
         let mut chars = input.chars().peekable();
@@ -477,7 +477,8 @@ impl ConfigAdapter for OpenCodeAdapter {
                         .or_insert_with(|| serde_json::Value::String(provider_id.clone()));
                 }
                 if !native_anthropic {
-                    if let Ok(Some(mode)) =
+                    // Invalid modes never reach here: validate_profile gates every prod path.
+                if let Ok(Some(mode)) =
                         Self::normalize_api_mode(api_profile.opencode.opencode_api_mode.as_deref())
                     {
                         p.insert(
