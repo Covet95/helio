@@ -1050,7 +1050,10 @@ mod tests {
                 // 修之前发出去的是 ?key=***，必吃 401；修之后 200。
                 let authorized = req.contains("key=SECRET123");
                 let (status, body) = if authorized {
-                    ("200 OK", r#"{"output":[{}],"status":"completed"}"#.to_string())
+                    (
+                        "200 OK",
+                        r#"{"output":[{}],"status":"completed"}"#.to_string(),
+                    )
                 } else {
                     ("401 Unauthorized", r#"{"error":"bad key"}"#.to_string())
                 };
