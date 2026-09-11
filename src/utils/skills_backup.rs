@@ -853,8 +853,6 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use anyhow::Result;
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
 
     /// 手工构造归档(绕过 HOME 依赖,精确控制恶意内容)。
     fn build_archive(path: &Path, manifest: &serde_json::Value, entries: &[(&str, &[u8])]) {
@@ -915,10 +913,14 @@ mod tests {
         assert_eq!(result.total, 2);
         assert_eq!(result.apps.len(), 2);
 
-        let meta = fs::metadata(&arc)?.permissions().mode();
+        // mode() 仅 Unix 存在（Windows 无 POSIX mode）：整个断言进 cfg，
+        // 而不是先取值再断言，否则 Windows 下 check --all-targets 编译失败。
         #[cfg(unix)]
-        assert_eq!(meta & 0o777, 0o600, "归档应收紧为 owner-only");
-        let _ = meta;
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = fs::metadata(&arc)?.permissions().mode();
+            assert_eq!(meta & 0o777, 0o600, "归档应收紧为 owner-only");
+        }
         Ok(())
     }
 
