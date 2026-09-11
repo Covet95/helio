@@ -1149,12 +1149,15 @@ impl Database {
     ///
     /// 按 `id` 定位记录（而非 name），因此**支持改名**。
     /// id 为空时回退到按旧 name 定位（理论上现有 profile 都带 id）。
-    pub fn update_profile(&self, profile: &ApiProfile) -> Result<()> {
+    ///
+    /// 与 `add_profile` 一致：返回 `AppError`，让调用方能区分「参数不合法」
+    /// 与「数据库/磁盘故障」，而不是只拿到一段文本。
+    pub fn update_profile(&self, profile: &ApiProfile) -> Result<(), AppError> {
         let mut profile = profile.clone();
         if profile.target_app.is_none() {
-            anyhow::bail!(
-                "API Profile requires target_app; universal profiles are not supported yet"
-            );
+            return Err(AppError::invalid_input(
+                "API Profile 必须指定目标工具；暂不支持通用 Profile",
+            ));
         }
         profile.normalize_keys();
         let now = chrono::Utc::now().timestamp();
@@ -2904,6 +2907,35 @@ mod tests {
         let to_delete = insert_legacy("legacy-delete")?;
         assert!(db.delete_legacy_profile(to_delete)?);
         assert!(!db.delete_legacy_profile(to_delete)?);
+
+        Ok(())
+    }
+
+    /// `update_profile` 与 `add_profile` 现在返回同一类错误，命令层那份重复的
+    /// target_app 校验已删除——所以这里是唯一防线，必须真的返回 InvalidInput。
+    #[test]
+    fn update_profile_rejects_missing_target_app_as_invalid_input() -> Result<()> {
+        use crate::error::ErrorKind;
+
+        let dir = tempfile::tempdir()?;
+        let db = Database::open(dir.path().join("live.sqlite"))?;
+        let id = db.add_profile(&ApiProfile {
+            name: "p".into(),
+            provider: "custom".into(),
+            api_url: "https://x.example".into(),
+            api_key: "k".into(),
+            target_app: Some(TargetApp::Codex),
+            ..Default::default()
+        })?;
+
+        let err = db
+            .update_profile(&ApiProfile {
+                id: Some(id),
+                target_app: None,
+                ..Default::default()
+            })
+            .expect_err("缺 target_app 的更新必须失败");
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
 
         Ok(())
     }

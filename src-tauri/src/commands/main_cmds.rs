@@ -413,50 +413,61 @@ pub async fn add_profile(profile: ApiProfile, state: State<'_, AppState>) -> Res
 }
 
 #[tauri::command]
-pub async fn update_profile(profile: ApiProfile, state: State<'_, AppState>) -> Result<(), String> {
-    let Some(target) = profile.target_app else {
-        return Err(
-            "API Profile requires target_app; universal profiles are not supported yet".into(),
-        );
-    };
-
+pub async fn update_profile(
+    profile: ApiProfile,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
     // 全局写锁：与其他切换/写盘命令互斥，避免并发写配置。
     // 走 apply_profile_switch（含 journal）：写盘失败时立即回滚，并保持 active 语义一致。
-    let _write_guard = state.config_lock.lock().map_err(|e| e.to_string())?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    let profile_id = profile.id.ok_or("更新 Profile 缺少 id")?;
+    let _write_guard = state.config_lock.lock()?;
+    let db = state.db.lock()?;
+    update_profile_locked(&db, profile)
+}
+
+/// `update_profile` 的核心逻辑（从 async 包装里提出来，便于单测）。
+///
+/// 前四个分支在真正碰磁盘之前就返回，因此可以用临时库 hermetic 测试；
+/// 涉及 `apply_profile_switch` 的部分会写真实配置目录，不在单测覆盖范围内。
+fn update_profile_locked(db: &Database, profile: ApiProfile) -> Result<(), AppError> {
+    // 这里取 target_app 不是重复 db 的校验，而是下面「不许改目标工具」的
+    // 比较需要它；取不到就先按传参问题挡掉，避免落进冲突分支给出误导提示。
+    let Some(target) = profile.target_app else {
+        return Err(AppError::invalid_input(
+            "API Profile 必须指定目标工具；暂不支持通用 Profile",
+        ));
+    };
+
+    let profile_id = profile
+        .id
+        .ok_or_else(|| AppError::invalid_input("更新 Profile 缺少 id"))?;
+    // NotFound 而不是 Internal：前端据此能提示「档案已被删除，请刷新」。
+    // 以前这段文本会被前端正则改写掉，既丢掉 id，又误导成「尚未初始化」。
     let previous_profile = db
-        .get_profile_by_id(profile_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Profile id={} 不存在", profile_id))?;
+        .get_profile_by_id(profile_id)?
+        .ok_or_else(|| AppError::not_found(format!("Profile id={profile_id} 不存在")))?;
     if previous_profile.target_app != Some(target) {
-        return Err("不能在编辑时修改 Profile 的目标工具".into());
+        return Err(AppError::conflict("不能在编辑时修改 Profile 的目标工具"));
     }
 
     // 先保存每个 active target 的共享配置；这些快照用于失败补偿，
     // 不能在数据库更新后再从磁盘推导，否则可能读到半写入配置。
-    let active_targets = db
-        .get_active_targets_for_profile(profile_id)
-        .map_err(|e| e.to_string())?;
+    let active_targets = db.get_active_targets_for_profile(profile_id)?;
     let mut active_contexts = Vec::with_capacity(active_targets.len());
     for active_target in active_targets {
-        let persisted = db
-            .get_shared_config(active_target)
-            .map_err(|e| e.to_string())?;
+        let persisted = db.get_shared_config(active_target)?;
         let shared = switch_api::adapters::resolve_shared_config(active_target, persisted)
-            .map_err(|e| format!("读取 {active_target} 当前共享配置失败: {e}"))?;
+            .map_err(|e| AppError::io(format!("读取 {active_target} 当前共享配置失败：{e:#}")))?;
         active_contexts.push((active_target, shared));
     }
 
     let mut updated_profile = profile;
     updated_profile.id = Some(profile_id);
-    db.update_profile(&updated_profile)
-        .map_err(|e| e.to_string())?;
+    db.update_profile(&updated_profile)?;
 
     let mut applied_targets = Vec::new();
     for (active_target, shared_config) in &active_contexts {
         if let Err(error) = switch_api::adapters::apply_profile_switch(
-            &db,
+            db,
             *active_target,
             &updated_profile,
             shared_config,
@@ -468,7 +479,7 @@ pub async fn update_profile(profile: ApiProfile, state: State<'_, AppState>) -> 
             for (rollback_target, rollback_shared) in active_contexts.iter().rev() {
                 if applied_targets.contains(rollback_target) {
                     if let Err(rollback_error) = switch_api::adapters::apply_profile_switch(
-                        &db,
+                        db,
                         *rollback_target,
                         &previous_profile,
                         rollback_shared,
@@ -481,14 +492,18 @@ pub async fn update_profile(profile: ApiProfile, state: State<'_, AppState>) -> 
             if let Err(rollback_error) = db.update_profile(&previous_profile) {
                 rollback_errors.push(format!("数据库 Profile 回滚失败: {rollback_error}"));
             }
+            // 数据库已改过、部分 target 已写盘，补偿也做了——这正是 PartialFailure
+            // 的语义：不是「什么都没发生」。前端可据此提示用户先核对工具实际状态，
+            // 而不是当成一次可以无脑重试的干净失败。
             let suffix = if rollback_errors.is_empty() {
                 String::new()
             } else {
                 format!("；补偿回滚失败: {}", rollback_errors.join("；"))
             };
-            return Err(format!(
-                "更新后同步配置失败 ({active_target}): {error}{suffix}"
-            ));
+            return Err(AppError::partial_failure(format!(
+                "更新后同步配置失败（{active_target}）：{error}{suffix}"
+            ))
+            .with_detail(format!("{error:#}")));
         }
         applied_targets.push(*active_target);
     }
@@ -500,40 +515,42 @@ pub async fn delete_profile(
     name: String,
     target_app: String,
     state: State<'_, AppState>,
-) -> Result<bool, String> {
-    let target = TargetApp::parse(&target_app)
-        .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
+) -> Result<bool, AppError> {
+    let target = TargetApp::parse(&target_app).ok_or_else(|| unknown_target_app(&target_app))?;
     // Provider cleanup and profile deletion both affect persistent state and,
     // for OpenCode/ZCode, local files. Serialize them with other write paths.
-    let _write_guard = state.config_lock.lock().map_err(|e| e.to_string())?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let _write_guard = state.config_lock.lock()?;
+    let db = state.db.lock()?;
     if let Some(profile) = db
-        .list_profiles()
-        .map_err(|e| e.to_string())?
+        .list_profiles()?
         .into_iter()
         .find(|profile| profile.name == name && profile.target_app == Some(target))
     {
         let active_id = db
-            .get_active_profile(target)
-            .map_err(|e| e.to_string())?
+            .get_active_profile(target)?
             .map(|active| active.profile_id);
         if active_id == profile.id {
-            return Err("不能删除当前启用的 Profile，请先启用其他 Profile".into());
+            return Err(AppError::conflict(
+                "不能删除当前启用的 Profile，请先启用其他 Profile",
+            ));
         }
     }
+    // 下面三条都是「删档案 + 清理本地文件」，本质是磁盘/数据库写失败，归为 Io。
+    // 原始错误链保留在 message 里，不做信息删减。
     if target == TargetApp::OpenCode {
         return switch_api::adapters::opencode::OpenCodeAdapter::delete_profile_and_cleanup_local(
             &db, &name,
         )
-        .map_err(|e| format!("删除 OpenCode 档案失败: {e}"));
+        .map_err(|e| AppError::io(format!("删除 OpenCode 档案失败：{e:#}")));
     }
     if target == TargetApp::ZCode {
         return switch_api::adapters::zcode::ZCodeAdapter::delete_profile_and_cleanup_local(
             &db, &name,
         )
-        .map_err(|e| format!("删除 ZCode 档案失败: {e}"));
+        .map_err(|e| AppError::io(format!("删除 ZCode 档案失败：{e:#}")));
     }
-    db.delete_profile(&name, target).map_err(|e| e.to_string())
+    db.delete_profile(&name, target)
+        .map_err(|e| AppError::io(format!("删除档案失败：{e:#}")))
 }
 
 #[tauri::command]
@@ -595,16 +612,16 @@ pub struct ConfigBackupInfo {
 
 /// 列出 target_app 的配置备份（新→旧）。
 #[tauri::command]
-pub async fn list_config_backups(target_app: String) -> Result<Vec<ConfigBackupInfo>, String> {
+pub async fn list_config_backups(target_app: String) -> Result<Vec<ConfigBackupInfo>, AppError> {
     use switch_api::adapters::{backup, get_adapter};
-    let target = TargetApp::parse(&target_app)
-        .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
+    let target = TargetApp::parse(&target_app).ok_or_else(|| unknown_target_app(&target_app))?;
     let config_dir = get_adapter(target).config_path();
     let config_dir = config_dir
         .parent()
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let backups = backup::list_backups(&config_dir).map_err(|e| e.to_string())?;
+    let backups = backup::list_backups(&config_dir)
+        .map_err(|e| AppError::io(format!("读取配置备份失败：{e:#}")))?;
     Ok(backups
         .into_iter()
         .map(|b| ConfigBackupInfo {
@@ -624,19 +641,15 @@ pub async fn restore_config_backup(
     target_app: String,
     backup_file: String,
     state: State<'_, AppState>,
-) -> Result<String, String> {
+) -> Result<String, AppError> {
     use switch_api::adapters::{backup, get_adapter};
-    let target = TargetApp::parse(&target_app)
-        .ok_or_else(|| format!("Unknown target app: {}", target_app))?;
+    let target = TargetApp::parse(&target_app).ok_or_else(|| unknown_target_app(&target_app))?;
     let config_dir = get_adapter(target).config_path();
     let config_dir = config_dir
         .parent()
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let _guard = state
-        .config_lock
-        .lock()
-        .map_err(|e| format!("获取配置写锁失败：{e}"))?;
+    let _guard = state.config_lock.lock()?;
     let restored = if target == TargetApp::OpenClaw
         && std::path::Path::new(&backup_file)
             .file_name()
@@ -655,7 +668,7 @@ pub async fn restore_config_backup(
     } else {
         backup::restore_backup(&config_dir, std::path::Path::new(&backup_file))
     }
-    .map_err(|e| format!("恢复失败：{e:#}"))?;
+    .map_err(|e| AppError::io(format!("恢复失败：{e:#}")))?;
     Ok(restored.display().to_string())
 }
 
@@ -3395,5 +3408,86 @@ mod scan_api_baseline_tests {
             );
             assert_eq!(s.source, "fixture.json", "source 必须原样回传: {target:?}");
         }
+    }
+}
+
+// ------------------------------------------------- update_profile 错误类别
+//
+// update_profile 是命令层里最容易给出误导提示的一个：档案被删掉时原本返回
+// `Profile id=42 不存在`，被前端正则改写成「未找到对应数据,可能尚未初始化」，
+// 既丢掉 id，又指错排查方向。这里把四个「碰磁盘之前就返回」的分支钉死。
+//
+// 有意不覆盖：真正走 apply_profile_switch 的路径会写开发者真实的配置目录，
+// 不适合放进单测；那部分依赖 db 层与 adapter 层已有的测试。
+
+#[cfg(test)]
+mod update_profile_error_kind_tests {
+    use super::*;
+    use switch_api::error::ErrorKind;
+
+    fn temp_db() -> (tempfile::TempDir, Database) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::open(dir.path().join("live.sqlite")).expect("open db");
+        (dir, db)
+    }
+
+    fn profile_with(id: Option<i64>, target: Option<TargetApp>) -> ApiProfile {
+        ApiProfile {
+            id,
+            name: "p".into(),
+            provider: "custom".into(),
+            api_url: "https://x.example".into(),
+            api_key: "k".into(),
+            target_app: target,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn missing_id_is_invalid_input() {
+        let (_dir, db) = temp_db();
+        let err = update_profile_locked(&db, profile_with(None, Some(TargetApp::Codex)))
+            .expect_err("缺 id 必须失败");
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn missing_target_app_is_invalid_input() {
+        let (_dir, db) = temp_db();
+        let err = update_profile_locked(&db, profile_with(Some(1), None))
+            .expect_err("缺 target_app 必须失败");
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn unknown_profile_id_is_not_found_and_keeps_the_id() {
+        let (_dir, db) = temp_db();
+        let err = update_profile_locked(&db, profile_with(Some(4242), Some(TargetApp::Codex)))
+            .expect_err("不存在的 profile 必须失败");
+        assert_eq!(
+            err.kind(),
+            ErrorKind::NotFound,
+            "档案被删是 NotFound 而不是 Internal；前端据此才能提示「请刷新」"
+        );
+        assert!(
+            err.message.contains("4242"),
+            "文案必须带上 id，实际为：{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn changing_target_app_is_conflict() {
+        let (_dir, db) = temp_db();
+        let id = db
+            .add_profile(&profile_with(None, Some(TargetApp::Codex)))
+            .expect("add_profile");
+        let err = update_profile_locked(&db, profile_with(Some(id), Some(TargetApp::ClaudeCode)))
+            .expect_err("编辑时改目标工具必须失败");
+        assert_eq!(
+            err.kind(),
+            ErrorKind::Conflict,
+            "「不能改目标工具」是状态冲突，不是传参错误"
+        );
     }
 }
