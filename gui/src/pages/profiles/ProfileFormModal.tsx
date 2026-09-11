@@ -26,8 +26,8 @@ import {
 } from './helpers';
 
 // OpenCode 推理强度档位：官方 OpenAI variant 六档（variant 行唯一的选项控件）。
-const OPENCODE_EFFORT_LEVELS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'];
-const OPENCODE_VARIANT_QUICK_ADD = ['none', 'minimal', 'low', 'medium', 'high', 'max'];
+const OPENCODE_EFFORT_LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+const OPENCODE_VARIANT_QUICK_ADD = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 function newKeyId(): string {
   return `k${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
@@ -95,6 +95,8 @@ export function ProfileModal({
   );
   const [variantDrafts, setVariantDrafts] = useState<Record<string, string>>({});
   const [variantNameDrafts, setVariantNameDrafts] = useState<Record<string, string>>({});
+  const [optionsDrafts, setOptionsDrafts] = useState<Record<string, string>>({});
+  const [optionsErrors, setOptionsErrors] = useState<Record<string, string>>({});
 
   const keys = form.api_keys && form.api_keys.length > 0 ? form.api_keys : ensureKeyPool(form);
   const activeKey =
@@ -395,8 +397,8 @@ export function ProfileModal({
       target_app: tool,
       catalog_models,
       model_configs,
-      opencode_api_mode: tool === 'opencode'
-        ? normalized.opencode_api_mode || 'chat_completions'
+      opencode_api_mode: tool === "opencode"
+        ? normalized.opencode_api_mode?.trim() || undefined
         : undefined,
       });
     } catch (error) {
@@ -722,6 +724,7 @@ export function ProfileModal({
                     <span className="mb-1.5 block text-[12px] font-medium text-ink-dim">协议模式</span>
                     <div className="flex gap-1.5">
                       {[
+                        { value: "", label: "默认" },
                         { value: 'chat_completions', label: 'Chat Completions' },
                         { value: 'responses', label: 'Responses' },
                       ].map((mode) => (
@@ -730,7 +733,7 @@ export function ProfileModal({
                           type="button"
                           onClick={() => setForm({ ...form, opencode_api_mode: mode.value })}
                           className={`flex-1 rounded-md border px-2 py-1.5 text-[12px] font-medium transition-all ${
-                            (form.opencode_api_mode || 'chat_completions') === mode.value
+                            (form.opencode_api_mode || "") === mode.value
                               ? 'border-accent bg-accent/8 text-accent'
                               : 'border-line text-ink-dim hover:border-line-strong'
                           }`}
@@ -762,7 +765,7 @@ export function ProfileModal({
                         const setConfig = (patch: Partial<OpenCodeModelConfig>) => {
                           patchOpenCodeModelConfig(modelId, patch);
                         };
-                        const setLimit = (key: 'context' | 'output', value: string) => {
+                        const setLimit = (key: "context" | "input" | "output", value: string) => {
                           const n = Number(value);
                           const next = { ...limit };
                           if (!value || !Number.isFinite(n) || n <= 0) delete next[key];
@@ -835,6 +838,14 @@ export function ProfileModal({
                                 placeholder="output"
                                 className="h-7 w-24 rounded border border-line bg-surface px-1.5 font-mono"
                               />
+                                <input
+                                  type="number"
+                                  min={1}
+                                  value={limit.input ?? ""}
+                                  onChange={(e) => setLimit("input", e.target.value)}
+                                  placeholder="input"
+                                  className="h-7 w-24 rounded border border-line bg-surface px-1.5 font-mono"
+                                />
                             </div>
                             <div className="space-y-1.5">
                               <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-medium text-ink-dim">
@@ -910,6 +921,51 @@ export function ProfileModal({
                                   </button>
                                 </div>
                               ))}
+                              <div className="space-y-1">
+                                <div className="text-[11px] font-medium text-ink-dim">options 高级 JSON（temperature / thinking 等，留空不管）</div>
+                                <textarea
+                                  value={optionsDrafts[modelId] ?? (config.options && Object.keys(config.options).length > 0 ? JSON.stringify(config.options, null, 2) : "")}
+                                  onChange={(e) => {
+                                    setOptionsDrafts({ ...optionsDrafts, [modelId]: e.target.value });
+                                    setOptionsErrors((errs) => {
+                                      const next = { ...errs };
+                                      delete next[modelId];
+                                      return next;
+                                    });
+                                  }}
+                                  onBlur={(e) => {
+                                    const raw = e.target.value.trim();
+                                    if (!raw) {
+                                      setConfig({ options: undefined });
+                                      setOptionsDrafts((drafts) => {
+                                        const nd = { ...drafts };
+                                        delete nd[modelId];
+                                        return nd;
+                                      });
+                                      return;
+                                    }
+                                    try {
+                                      const parsed = JSON.parse(raw);
+                                      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("bad shape");
+                                      setConfig({ options: parsed });
+                                      setOptionsDrafts((drafts) => {
+                                        const nd = { ...drafts };
+                                        delete nd[modelId];
+                                        return nd;
+                                      });
+                                    } catch {
+                                      setOptionsErrors({ ...optionsErrors, [modelId]: "JSON 解析失败，未保存" });
+                                    }
+                                  }}
+                                  placeholder="如 temperature / thinking，须为 JSON 对象"
+                                  rows={2}
+                                  spellCheck={false}
+                                  className="w-full rounded border border-line bg-surface px-1.5 py-1 font-mono text-[11px]"
+                                />
+                                {optionsErrors[modelId] && (
+                                  <div className="text-[11px] text-danger">{optionsErrors[modelId]}</div>
+                                )}
+                              </div>
                               <div className="flex items-center gap-1.5">
                                 <input
                                   value={variantDrafts[modelId] || ''}

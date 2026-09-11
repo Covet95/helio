@@ -133,7 +133,7 @@ export function emptyProfileForTool(tool: TargetApp, seedFrom?: ApiProfile): Api
   if (tool === 'opencode') {
     return {
       ...base,
-      opencode_api_mode: 'chat_completions',
+      opencode_api_mode: "",
     };
   }
   if (tool === 'hermes') {

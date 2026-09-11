@@ -165,7 +165,7 @@ describe('ProfileModal edit rendering', () => {
     expect(screen.getByLabelText('删除模型 gpt-5')).toBeTruthy();
     const effort = screen.getByLabelText('Variant low 推理强度') as HTMLSelectElement;
     expect(Array.from(effort.options).map((o) => o.value)).toEqual(
-      ['', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh'],
+      ['', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
     );
     expect(container.querySelectorAll('select').length).toBe(1);
     // variant quick-add covers the official OpenAI set names.

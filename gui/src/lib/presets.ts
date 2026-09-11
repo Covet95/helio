@@ -32,6 +32,7 @@ export const PROVIDER_PRESETS: Record<TargetApp, ProviderPreset[]> = {
   opencode: [
     { id: 'anthropic', label: 'Anthropic', provider: 'anthropic', api_url: 'https://api.anthropic.com', category: 'official' },
     { id: 'openai', label: 'OpenAI', provider: 'openai', api_url: 'https://api.openai.com/v1', category: 'official' },
+    { id: 'local', label: '本地中转', provider: 'cpa', api_url: 'http://127.0.0.1:8317/v1', category: 'third_party' },
     { id: 'custom', label: '自定义', provider: 'custom', api_url: '', category: 'custom' },
   ],
   hermes: [

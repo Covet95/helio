@@ -23,7 +23,7 @@ describe('profile helpers', () => {
     });
     expect(emptyProfileForTool('opencode')).toMatchObject({
       target_app: 'opencode',
-      opencode_api_mode: 'chat_completions',
+      opencode_api_mode: "",
     });
     expect(emptyProfileForTool('zcode')).toMatchObject({
       target_app: 'zcode',
