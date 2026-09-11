@@ -2839,16 +2839,57 @@ mod skills_tests {
 mod clipboard_tests {
     use super::copy_text_native;
 
+    /// 无头 Linux（如 CI）既无 wl-copy 也无 xclip，硬断言只会让 CI 常红；
+    /// 后端缺失时跳过，有后端的开发机照常真测。macOS/Windows 后端随系统自带，不跳过。
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn backend_in_path(path_var: Option<std::ffi::OsString>) -> bool {
+        let Some(path_var) = path_var else {
+            return false;
+        };
+        std::env::split_paths(&path_var)
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .any(|dir| dir.join("wl-copy").is_file() || dir.join("xclip").is_file())
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn backend_available() -> bool {
+        backend_in_path(std::env::var_os("PATH"))
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    macro_rules! require_backend {
+        () => {
+            if !backend_available() {
+                println!("SKIP: no wl-copy/xclip on PATH (headless environment)");
+                return;
+            }
+        };
+    }
+
     #[test]
     fn test_copy_text_native_accepts_empty_text() {
+        #[cfg(all(unix, not(target_os = "macos")))]
+        require_backend!();
         // 空串在各平台后端都应可接受（不崩、不拒）。
         copy_text_native("").expect("empty clipboard text should copy");
     }
 
     #[test]
     fn test_copy_text_native_accepts_unicode() {
+        #[cfg(all(unix, not(target_os = "macos")))]
+        require_backend!();
         copy_text_native("Helio 剪贴板 ✓")
             .expect("unicode clipboard text should copy on this platform");
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn test_backend_detection_matches_tool_presence() {
+        assert!(!backend_in_path(None));
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!backend_in_path(Some(dir.path().as_os_str().to_owned())));
+        std::fs::write(dir.path().join("wl-copy"), "fake").unwrap();
+        assert!(backend_in_path(Some(dir.path().as_os_str().to_owned())));
     }
 }
 
