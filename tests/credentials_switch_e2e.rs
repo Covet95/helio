@@ -13,7 +13,10 @@
 //! - 连续切换 alpha → beta → 重切 beta（文件型库，走 journal 与
 //!   `already_active` 分支），验证「切走再切回」不丢凭据。
 //!
-//! 适配器经 `dirs` 实时读取 `$HOME`，故本文件独占进程级 `$HOME`，
+//! 适配器经 `dirs` 实时读取 `$HOME`（仅 Unix；Windows 的 `dirs::home_dir()`
+//! 走系统 API 而不读 `$HOME`，跑起来会读写 runner 真实用户目录且断言必败，
+//! 故整个文件 `cfg(unix)`），本文件独占进程级 `$HOME`，
+#![cfg(unix)]
 //! 全文件仅此一个测试，避免与其它测试并行冲突。
 
 use serde_json::json;

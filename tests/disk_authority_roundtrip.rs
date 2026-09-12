@@ -1,8 +1,10 @@
 //! 真实链路回归：用户在 Helio 之外手改工具配置后切换档案，
 //! 磁盘的新内容必须赢，旧库不得复活已删条目；反之库更新时补缺保留。
 //!
-//! 全文件仅此一个测试：独占进程级 `$HOME`（各适配器经 `dirs` 实时读取），
-//! 不与其它测试并行冲突。
+//! 全文件仅此一个测试：独占进程级 `$HOME`（各适配器经 `dirs` 实时读取，
+//! 仅 Unix 有效；Windows 的 `dirs::home_dir()` 不读 `$HOME`，故整个文件
+//! `cfg(unix)`），不与其它测试并行冲突。
+#![cfg(unix)]
 
 use switch_api::adapters;
 use switch_api::db::Database;
