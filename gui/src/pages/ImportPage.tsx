@@ -10,6 +10,7 @@ import {
 import { SUPPORTED_TOOLS } from '../types';
 import type { OpenCodeModelConfig, TargetApp } from '../types';
 import { tauriApi, type CcSwitchProvider } from '../lib/tauri';
+import { AppSelector } from './profiles/helpers';
 import { cn, humanizeError, maskApiKey } from '../lib/utils';
 
 interface Scanned {
@@ -178,27 +179,7 @@ function ImportToolPage({ tool, onToolChange }: { tool: TargetApp; onToolChange:
       />
 
       <div className="max-w-4xl space-y-4 px-4 py-4 sm:px-7 sm:py-5">
-        <div className="flex w-fit max-w-full flex-wrap items-center gap-1 rounded-lg border border-line bg-surface p-1">
-          {SUPPORTED_TOOLS.map((t) => {
-            const active = tool === t.id;
-            return (
-              <button
-                key={t.id}
-                type="button"
-                aria-pressed={active}
-                disabled={importing}
-                onClick={() => onToolChange(t.id)}
-                className={cn(
-                  'flex shrink-0 items-center gap-2 whitespace-nowrap rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors',
-                  active ? 'bg-card text-ink shadow-soft' : 'text-ink-dim hover:text-ink',
-                )}
-              >
-                <span className="h-2 w-2 rounded-full" style={{ background: t.color }} />
-                {t.displayName}
-              </button>
-            );
-          })}
-        </div>
+        <AppSelector value={tool} onChange={onToolChange} disabled={importing} />
 
         <p className="text-[12px] leading-relaxed text-ink-faint">
           这里只把本机 API 做成档案。共享配置（MCP / Hooks / 权限）打开应用即自动同步，切换时以本机最新内容为准，无需手动导入。

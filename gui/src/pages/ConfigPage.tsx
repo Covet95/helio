@@ -261,11 +261,20 @@ function CodexBehaviorSettings({
   const [err, setErr] = useState('');
   const [saved, setSaved] = useState(false);
 
-  // current 刷新后（load() 之后）重新同步初始值与编辑值。
+  // current 刷新后只同步服务端基线 initStr；有未保存修改时保留用户输入，
+  // 避免后台 load() 用旧值覆盖新输入（新配置被旧值覆盖）。
   useEffect(() => {
     const s = buildStr();
-    setStrVals(s);
-    setInitStr(s);
+    setInitStr((prevInit) => {
+      const prevKey = JSON.stringify(prevInit);
+      const nextKey = JSON.stringify(s);
+      if (prevKey === nextKey) return prevInit;
+      // 服务端确实变了：基线跟进；用户无脏修改时才跟进编辑值。
+      setStrVals((prevVals) =>
+        JSON.stringify(prevVals) === prevKey ? s : prevVals,
+      );
+      return s;
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [current]);
 

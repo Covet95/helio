@@ -25,9 +25,8 @@ import {
   normalizeOpenCodeModelConfigs,
 } from './helpers';
 
-// OpenCode 推理强度档位：官方 OpenAI variant 六档（variant 行唯一的选项控件）。
+// OpenCode 推理强度档位：variant 快捷添加与 reasoningEffort 下拉共用同一组官方档位。
 const OPENCODE_EFFORT_LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
-const OPENCODE_VARIANT_QUICK_ADD = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 function newKeyId(): string {
   return `k${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
@@ -228,25 +227,41 @@ export function ProfileModal({
     setCheckingApi(false);
   };
 
+  const savedName = initialProfile?.name.trim() ?? '';
+  const nameDirty = form.name.trim() !== savedName;
   const failoverKeys = async () => {
     if (!form.name.trim()) {
       setApiHealth({ kind: 'error', text: '请先保存档案名称后再 failover' });
       return;
     }
+    // 用已入库的名字做 failover：表单改名未保存时按新名查库会命中错误档案。
+    if (!initialProfile || nameDirty) {
+      setApiHealth({ kind: 'error', text: '档案名称已修改，请先保存后再 failover' });
+      return;
+    }
+    const targetName = initialProfile.name;
     setCheckingApi(true);
     setApiHealth(null);
     try {
       // 未保存的多 key 先保存由用户负责；这里对 DB 中档案 failover
-      const r = await tauriApi.failoverProfileKeys(tool, form.name);
+      const r = await tauriApi.failoverProfileKeys(tool, targetName);
       if (r.success) {
+        // 刷新表单活跃标记：函数式更新，只改 is_active，不覆盖等待期间的用户编辑。
+        if (r.active_key_id) {
+          const activeId = r.active_key_id;
+          const activeLabel = r.active_label;
+          setForm((f) => {
+            if (!f.api_keys) return f;
+            return withActiveKey(
+              f,
+              f.api_keys.map((k) => ({ ...k, is_active: k.id === activeId || k.label === activeLabel })),
+            );
+          });
+        }
         setApiHealth({
           kind: 'success',
           text: `Failover 成功 → ${r.active_label || r.active_key_id || 'key'}${r.re_switched ? '（已 re-switch）' : ''}`,
         });
-        // 刷新表单活跃标记（按 label 匹配）
-        if (r.active_key_id && form.api_keys) {
-          setKeys(form.api_keys.map((k) => ({ ...k, is_active: k.id === r.active_key_id || k.label === r.active_label })));
-        }
       } else {
         setApiHealth({
           kind: 'error',
@@ -261,7 +276,6 @@ export function ProfileModal({
   };
 
   const presets = PROVIDER_PRESETS[tool];
-  const showModelParams = tool === 'codex' || tool === 'claude-code' || tool === 'pi' || tool === 'opencode' || tool === 'hermes' || tool === 'openclaw' || tool === 'zcode';
   // OpenCode 模型的单一读写口：三片存储（默认模型 / 挂载列表 / 逐模型配置）在渲染时
   // 归一为条目列表，结构性修改（挂载、打补丁、删除）只走 setOpenCodeModels 写回。
   // 默认模型输入框仍直写 form.model（单字段、无结构分叉，归一时自动纳入）。
@@ -287,18 +301,27 @@ export function ProfileModal({
     for (const e of entries) {
       if (e.config) nextConfigs[e.id] = e.config;
     }
-    setForm({
-      ...form,
-      model: entries.find((e) => e.isDefault)?.id ?? '',
-      models: entries.filter((e) => e.mounted).map((e) => e.id),
-      model_configs: Object.keys(nextConfigs).length > 0 ? nextConfigs : undefined,
-    });
+    const nextModel = entries.find((e) => e.isDefault)?.id ?? '';
+    const nextModels = entries.filter((e) => e.mounted).map((e) => e.id);
+    const nextModelConfigs = Object.keys(nextConfigs).length > 0 ? nextConfigs : undefined;
+    setForm((f) => ({
+      ...f,
+      model: nextModel,
+      models: nextModels,
+      model_configs: nextModelConfigs,
+    }));
   };
 
   const patchOpenCodeModelConfig = (modelId: string, patch: Partial<OpenCodeModelConfig>) => {
-    setOpenCodeModels(openCodeModels.map((e) =>
-      e.id === modelId ? { ...e, config: { ...(e.config || {}), ...patch } } : e,
-    ));
+    // 函数式写回：直接基于最新 form 合并，避免用渲染时刻 openCodeModels 覆盖并发编辑。
+    setForm((f) => {
+      const prev = f.model_configs?.[modelId] || {};
+      const merged = { ...prev, ...patch };
+      return {
+        ...f,
+        model_configs: { ...(f.model_configs || {}), [modelId]: merged },
+      };
+    });
   };
 
   // 彻底移除一个 OpenCode 模型：同时清理 models 挂载、model_configs 卡片和默认引用。
@@ -482,22 +505,22 @@ export function ProfileModal({
           )}
 
           <Field label="名称" value={form.name} required
-                 onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="my-proxy" />
+                 onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} placeholder="my-proxy" />
           <Field label="Provider" value={form.provider} required
-                 onChange={(e) => setForm({ ...form, provider: e.target.value })} placeholder="anthropic / openai / google" />
+                 onChange={(e) => setForm((f) => ({ ...f, provider: e.target.value }))} placeholder="anthropic / openai / google" />
           {isBedrock ? (
             <div className="space-y-3 rounded-md border border-line bg-surface/60 p-3">
               <div className="text-[12px] text-ink-dim">
                 Amazon Bedrock 使用 Codex 内置 AWS 认证，不写入 API URL 或 API Key。
               </div>
               <Field label="AWS Profile（可选）" value={form.aws_profile || ''} mono
-                     onChange={(e) => setForm({ ...form, aws_profile: e.target.value.trim() || undefined })} />
+                     onChange={(e) => setForm((f) => ({ ...f, aws_profile: e.target.value.trim() || undefined }))} />
               <Field label="AWS Region（可选）" value={form.aws_region || ''} mono
-                     onChange={(e) => setForm({ ...form, aws_region: e.target.value.trim() || undefined })} />
+                     onChange={(e) => setForm((f) => ({ ...f, aws_region: e.target.value.trim() || undefined }))} />
             </div>
           ) : (
             <Field label="API URL" type="url" value={form.api_url} required mono
-                   onChange={(e) => { setForm({ ...form, api_url: e.target.value }); setApiHealth(null); }} />
+                   onChange={(e) => { setForm((f) => ({ ...f, api_url: e.target.value })); setApiHealth(null); }} />
           )}
 
           {!isBedrock && !multiKeyMode ? (
@@ -633,7 +656,7 @@ export function ProfileModal({
             )}
             {/* Failover 操作库里档案的 key，新建未入库时点它必报错，故仅编辑时显示 */}
             {multiKeyMode && initialProfile && (
-              <Button type="button" variant="ghost" size="sm" onClick={failoverKeys} disabled={checkingApi}>
+              <Button type="button" variant="ghost" size="sm" onClick={failoverKeys} disabled={checkingApi} title={nameDirty ? '档案名称已修改，请先保存后再 failover' : undefined}>
                 Failover
               </Button>
             )}
@@ -648,11 +671,11 @@ export function ProfileModal({
           </div>
           )}
 
-          {showModelParams && (
+          {(
             <div className="rounded-lg border border-line bg-surface/60 p-3.5 space-y-3.5">
               <div className="text-[12px] font-medium text-ink-dim">模型参数</div>
               <Field label="默认模型" value={form.model || ''} mono
-                     onChange={(e) => setForm({ ...form, model: e.target.value })} placeholder="gpt-5.5 / claude-opus-4" />
+                     onChange={(e) => setForm((f) => ({ ...f, model: e.target.value }))} placeholder="gpt-5.5 / claude-opus-4" />
               <div>
                 <div className="flex items-center gap-2">
                   <Button type="button" variant="secondary" size="sm" onClick={loadModels} disabled={loadingModels || isBedrock}>
@@ -661,7 +684,7 @@ export function ProfileModal({
                   {models.length > 0 && (
                     <select
                       value={form.model || ''}
-                      onChange={(e) => setForm({ ...form, model: e.target.value })}
+                      onChange={(e) => setForm((f) => ({ ...f, model: e.target.value }))}
                       className="h-8 flex-1 rounded-md border border-line bg-card px-2 text-[12.5px] text-ink outline-none focus:border-accent/50"
                     >
                       <option value="">（选择模型）</option>
@@ -731,7 +754,7 @@ export function ProfileModal({
                         <button
                           key={mode.value}
                           type="button"
-                          onClick={() => setForm({ ...form, opencode_api_mode: mode.value })}
+                          onClick={() => setForm((f) => ({ ...f, opencode_api_mode: mode.value }))}
                           className={`flex-1 rounded-md border px-2 py-1.5 text-[12px] font-medium transition-all ${
                             (form.opencode_api_mode || "") === mode.value
                               ? 'border-accent bg-accent/8 text-accent'
@@ -850,7 +873,7 @@ export function ProfileModal({
                             <div className="space-y-1.5">
                               <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-medium text-ink-dim">
                                 <span>Variants</span>
-                                {OPENCODE_VARIANT_QUICK_ADD.map((variantId) => (
+                                {OPENCODE_EFFORT_LEVELS.map((variantId) => (
                                   <button
                                     key={variantId}
                                     type="button"
@@ -1006,9 +1029,12 @@ export function ProfileModal({
                         <input
                           value={entry.slug}
                           onChange={(e) => {
-                            const next = [...(form.catalog_models || [])];
-                            next[idx] = { ...next[idx], slug: e.target.value };
-                            setForm({ ...form, catalog_models: next });
+                            const v = e.target.value;
+                            setForm((f) => {
+                              const next = [...(f.catalog_models || [])];
+                              next[idx] = { ...next[idx], slug: v };
+                              return { ...f, catalog_models: next };
+                            });
                           }}
                           placeholder="slug（必填）"
                           className="h-8 min-w-0 flex-1 rounded-md border border-line bg-card px-2 font-mono text-[12px] text-ink outline-none focus:border-accent/50"
@@ -1016,12 +1042,12 @@ export function ProfileModal({
                         <input
                           value={entry.display_name || ''}
                           onChange={(e) => {
-                            const next = [...(form.catalog_models || [])];
-                            next[idx] = {
-                              ...next[idx],
-                              display_name: e.target.value || undefined,
-                            };
-                            setForm({ ...form, catalog_models: next });
+                            const v = e.target.value || undefined;
+                            setForm((f) => {
+                              const next = [...(f.catalog_models || [])];
+                              next[idx] = { ...next[idx], display_name: v };
+                              return { ...f, catalog_models: next };
+                            });
                           }}
                           placeholder="显示名"
                           className="h-8 w-28 shrink-0 rounded-md border border-line bg-card px-2 text-[12px] text-ink outline-none focus:border-accent/50"
@@ -1032,9 +1058,12 @@ export function ProfileModal({
                           disabled={idx === 0}
                           onClick={() => {
                             if (idx === 0) return;
-                            const next = [...(form.catalog_models || [])];
-                            [next[idx - 1], next[idx]] = [next[idx], next[idx - 1]];
-                            setForm({ ...form, catalog_models: next });
+                            setForm((f) => {
+                              const next = [...(f.catalog_models || [])];
+                              if (idx === 0 || idx >= next.length) return f;
+                              [next[idx - 1], next[idx]] = [next[idx], next[idx - 1]];
+                              return { ...f, catalog_models: next };
+                            });
                           }}
                           className="h-8 w-8 shrink-0 rounded-md border border-line text-[11px] text-ink-dim disabled:opacity-40"
                         >
@@ -1045,11 +1074,13 @@ export function ProfileModal({
                           title="下移"
                           disabled={idx >= (form.catalog_models || []).length - 1}
                           onClick={() => {
-                            const list = form.catalog_models || [];
-                            if (idx >= list.length - 1) return;
-                            const next = [...list];
-                            [next[idx], next[idx + 1]] = [next[idx + 1], next[idx]];
-                            setForm({ ...form, catalog_models: next });
+                            setForm((f) => {
+                              const list = f.catalog_models || [];
+                              if (idx >= list.length - 1) return f;
+                              const next = [...list];
+                              [next[idx], next[idx + 1]] = [next[idx + 1], next[idx]];
+                              return { ...f, catalog_models: next };
+                            });
                           }}
                           className="h-8 w-8 shrink-0 rounded-md border border-line text-[11px] text-ink-dim disabled:opacity-40"
                         >
@@ -1059,10 +1090,9 @@ export function ProfileModal({
                           type="button"
                           title="删除"
                           onClick={() => {
-                            const next = (form.catalog_models || []).filter((_, i) => i !== idx);
-                            setForm({
-                              ...form,
-                              catalog_models: next.length ? next : undefined,
+                            setForm((f) => {
+                              const next = (f.catalog_models || []).filter((_, i) => i !== idx);
+                              return { ...f, catalog_models: next.length ? next : undefined };
                             });
                           }}
                           className="h-8 w-8 shrink-0 rounded-md border border-line text-[11px] text-danger"
@@ -1076,9 +1106,12 @@ export function ProfileModal({
                             min={1}
                             value={entry.context_window || ''}
                             onChange={(e) => {
-                              const next = [...(form.catalog_models || [])];
-                              next[idx] = { ...next[idx], context_window: e.target.value ? Number(e.target.value) : undefined };
-                              setForm({ ...form, catalog_models: next });
+                              const v = e.target.value ? Number(e.target.value) : undefined;
+                              setForm((f) => {
+                                const next = [...(f.catalog_models || [])];
+                                next[idx] = { ...next[idx], context_window: v };
+                                return { ...f, catalog_models: next };
+                              });
                             }}
                             placeholder="上下文窗口"
                             className="h-7 w-28 rounded border border-line bg-surface px-1.5 font-mono text-[11px]"
@@ -1093,9 +1126,12 @@ export function ProfileModal({
                                 type="checkbox"
                                 checked={Boolean(entry[key as keyof typeof entry])}
                                 onChange={(e) => {
-                                  const next = [...(form.catalog_models || [])];
-                                  next[idx] = { ...next[idx], [key]: e.target.checked || undefined };
-                                  setForm({ ...form, catalog_models: next });
+                                  const v = e.target.checked || undefined;
+                                  setForm((f) => {
+                                    const next = [...(f.catalog_models || [])];
+                                    next[idx] = { ...next[idx], [key]: v };
+                                    return { ...f, catalog_models: next };
+                                  });
                                 }}
                               />
                               {key === 'supports_web_search' ? `${label}（需 Provider 支持）` : label}
@@ -1118,16 +1154,24 @@ export function ProfileModal({
                                   type="checkbox"
                                   checked={checked}
                                   onChange={(e) => {
-                                    const next = [...(form.catalog_models || [])];
-                                    const updated = e.target.checked
-                                      ? [...levels, level]
-                                      : levels.filter((item) => item !== level);
-                                    next[idx] = {
-                                      ...next[idx],
-                                      reasoning_levels: Array.from(new Set(updated)),
-                                      supports_reasoning: undefined,
-                                    };
-                                    setForm({ ...form, catalog_models: next });
+                                    const checked = e.target.checked;
+                                    setForm((f) => {
+                                      const next = [...(f.catalog_models || [])];
+                                      const cur = next[idx];
+                                      const curLevels = cur?.reasoning_levels
+                                        ?? (cur?.supports_reasoning
+                                          ? ['minimal', 'low', 'medium', 'high', 'xhigh']
+                                          : []);
+                                      const updated = checked
+                                        ? [...curLevels, level]
+                                        : curLevels.filter((item) => item !== level);
+                                      next[idx] = {
+                                        ...next[idx],
+                                        reasoning_levels: Array.from(new Set(updated)),
+                                        supports_reasoning: undefined,
+                                      };
+                                      return { ...f, catalog_models: next };
+                                    });
                                   }}
                                 />
                                 {level}
@@ -1144,10 +1188,10 @@ export function ProfileModal({
                       variant="secondary"
                       size="sm"
                       onClick={() =>
-                        setForm({
-                          ...form,
-                          catalog_models: [...(form.catalog_models || []), { slug: '' }],
-                        })
+                        setForm((f) => ({
+                          ...f,
+                          catalog_models: [...(f.catalog_models || []), { slug: '' }],
+                        }))
                       }
                     >
                       添加模型
@@ -1159,11 +1203,10 @@ export function ProfileModal({
                       onClick={() => {
                         const m = form.model?.trim();
                         if (!m) return;
-                        const cur = form.catalog_models || [];
-                        if (cur.some((e) => e.slug === m)) return;
-                        setForm({
-                          ...form,
-                          catalog_models: [{ slug: m }, ...cur],
+                        setForm((f) => {
+                          const cur = f.catalog_models || [];
+                          if (cur.some((e) => e.slug === m)) return f;
+                          return { ...f, catalog_models: [{ slug: m }, ...cur] };
                         });
                       }}
                     >
@@ -1175,13 +1218,15 @@ export function ProfileModal({
                         variant="secondary"
                         size="sm"
                         onClick={() => {
-                          const cur = form.catalog_models || [];
-                          const have = new Set(cur.map((e) => e.slug));
-                          const add = models
-                            .filter((m) => !have.has(m.id))
-                            .map((m) => ({ slug: m.id }));
-                          if (!add.length) return;
-                          setForm({ ...form, catalog_models: [...cur, ...add] });
+                          setForm((f) => {
+                            const cur = f.catalog_models || [];
+                            const have = new Set(cur.map((e) => e.slug));
+                            const add = models
+                              .filter((m) => !have.has(m.id))
+                              .map((m) => ({ slug: m.id }));
+                            if (!add.length) return f;
+                            return { ...f, catalog_models: [...cur, ...add] };
+                          });
                         }}
                       >
                         从已加载列表全部加入
@@ -1202,7 +1247,7 @@ export function ProfileModal({
                   {(['sonnet', 'opus', 'fable', 'haiku'] as const).map((role) => {
                     const labels: Record<string, string> = { sonnet: 'Sonnet', opus: 'Opus', fable: 'Fable', haiku: 'Haiku' };
                     const mm = form.model_mapping || {};
-                    const setMM = (k: string, v: string) => setForm({ ...form, model_mapping: { ...mm, [k]: v } });
+                    const setMM = (k: string, v: string) => setForm((f) => ({ ...f, model_mapping: { ...(f.model_mapping || {}), [k]: v } }));
                     return (
                       <div key={role} className="flex flex-wrap items-center gap-2">
                         <span className="w-14 shrink-0 text-[12px] font-medium text-ink">{labels[role]}</span>
@@ -1244,7 +1289,7 @@ export function ProfileModal({
                       <button
                         key={r.value}
                         type="button"
-                        onClick={() => setForm({ ...form, reasoning_effort: r.value || undefined })}
+                        onClick={() => setForm((f) => ({ ...f, reasoning_effort: r.value || undefined }))}
                         className={`flex-1 rounded-md px-2 py-1.5 text-[12px] font-medium border transition-all ${
                           (form.reasoning_effort || '') === r.value
                             ? 'border-accent text-accent bg-accent/8'
@@ -1261,7 +1306,7 @@ export function ProfileModal({
                       <button
                         key={r.value}
                         type="button"
-                        onClick={() => setForm({ ...form, reasoning_summary: r.value || undefined })}
+                        onClick={() => setForm((f) => ({ ...f, reasoning_summary: r.value || undefined }))}
                         className={`flex-1 rounded-md px-2 py-1.5 text-[12px] font-medium border transition-all ${
                           (form.reasoning_summary || '') === r.value
                             ? 'border-accent text-accent bg-accent/8'
@@ -1278,7 +1323,7 @@ export function ProfileModal({
                       <button
                         key={r.value}
                         type="button"
-                        onClick={() => setForm({ ...form, verbosity: r.value || undefined })}
+                        onClick={() => setForm((f) => ({ ...f, verbosity: r.value || undefined }))}
                         className={`flex-1 rounded-md px-2 py-1.5 text-[12px] font-medium border transition-all ${
                           (form.verbosity || '') === r.value
                             ? 'border-accent text-accent bg-accent/8'
@@ -1307,7 +1352,7 @@ export function ProfileModal({
                         <button
                           key={w.value}
                           type="button"
-                          onClick={() => setForm({ ...form, api_mode: w.value })}
+                          onClick={() => setForm((f) => ({ ...f, api_mode: w.value }))}
                           className={`flex-1 rounded-md border px-2 py-1.5 text-[12px] font-medium transition-all ${
                             (form.api_mode || 'chat_completions') === w.value
                               ? 'border-accent bg-accent/8 text-accent'
@@ -1338,7 +1383,7 @@ export function ProfileModal({
                           <button
                             key={opt.mode}
                             type="button"
-                            onClick={() => setForm({ ...form, context_1m: contextModeToBool(opt.mode) })}
+                            onClick={() => setForm((f) => ({ ...f, context_1m: contextModeToBool(opt.mode) }))}
                             className={`flex-1 rounded-md border px-2 py-1.5 text-[12px] font-medium transition-all ${
                               cur === opt.mode
                                 ? 'border-accent bg-accent/8 text-accent'
@@ -1374,7 +1419,7 @@ export function ProfileModal({
                         <button
                           key={w.value}
                           type="button"
-                          onClick={() => setForm({ ...form, api_mode: w.value })}
+                          onClick={() => setForm((f) => ({ ...f, api_mode: w.value }))}
                           className={`flex-1 rounded-md border px-2 py-1.5 text-[12px] font-medium transition-all ${
                             (form.api_mode || 'chat_completions') === w.value
                               ? 'border-accent bg-accent/8 text-accent'
@@ -1404,7 +1449,7 @@ export function ProfileModal({
                           <button
                             key={opt.mode}
                             type="button"
-                            onClick={() => setForm({ ...form, context_1m: contextModeToBool(opt.mode) })}
+                            onClick={() => setForm((f) => ({ ...f, context_1m: contextModeToBool(opt.mode) }))}
                             className={`flex-1 rounded-md border px-2 py-1.5 text-[12px] font-medium transition-all ${
                               cur === opt.mode
                                 ? 'border-accent bg-accent/8 text-accent'
@@ -1428,14 +1473,12 @@ export function ProfileModal({
                     onChange={(e) => {
                       const v = e.target.value.trim();
                       if (!v) {
-                        setForm({ ...form, max_tokens: undefined });
+                        setForm((f) => ({ ...f, max_tokens: undefined }));
                         return;
                       }
                       const n = Number(v);
-                      setForm({
-                        ...form,
-                        max_tokens: Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined,
-                      });
+                      const next = Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
+                      setForm((f) => ({ ...f, max_tokens: next }));
                     }}
                     placeholder="默认 128000 → models.providers.<id>.models[].maxTokens"
                   />
@@ -1451,23 +1494,23 @@ export function ProfileModal({
                   <input
                     type="checkbox"
                     checked={form.supports_standalone_web_search === true}
-                    onChange={(e) => setForm({
-                      ...form,
-                      supports_standalone_web_search: e.target.checked || undefined,
-                    })}
+                    onChange={(e) => {
+                      const v = e.target.checked || undefined;
+                      setForm((f) => ({ ...f, supports_standalone_web_search: v }));
+                    }}
                   />
                 </label>
               )}
 
               {tool === 'codex' && !isBedrock && !usesAuthCommand && (
                 <Field label="API Key 环境变量" value={form.env_key || ''} mono
-                       onChange={(e) => setForm({ ...form, env_key: e.target.value.trim() || undefined })}
+                       onChange={(e) => setForm((f) => ({ ...f, env_key: e.target.value.trim() || undefined }))}
                        placeholder="留空则由 Helio 安全写入 auth.json；例如 OPENAI_API_KEY" />
               )}
 
               {tool === 'codex' && !isBedrock && !usesAuthCommand && (
                 <Field label="Bearer Token" type="password" value={form.experimental_bearer_token || ''} mono
-                       onChange={(e) => setForm({ ...form, experimental_bearer_token: e.target.value.trim() || undefined })}
+                       onChange={(e) => setForm((f) => ({ ...f, experimental_bearer_token: e.target.value.trim() || undefined }))}
                        placeholder="写入 provider 的 experimental_bearer_token（不推荐，能用环境变量就用环境变量）" />
               )}
 
@@ -1483,7 +1526,7 @@ export function ProfileModal({
                       <button
                         key={o.label}
                         type="button"
-                        onClick={() => setForm({ ...form, requires_openai_auth: o.value })}
+                        onClick={() => setForm((f) => ({ ...f, requires_openai_auth: o.value }))}
                         className={`flex-1 rounded-md px-2 py-1.5 text-[12px] font-medium border transition-all ${
                           form.requires_openai_auth === o.value
                             ? 'border-accent text-accent bg-accent/8'
@@ -1506,31 +1549,31 @@ export function ProfileModal({
                     Auth 命令 <span className="font-normal text-ink-faint">（命令式 token，写入 [model_providers] auth 块；与环境变量 / API Key 互斥；Helio 不执行该命令）</span>
                   </div>
                   <Field label="Command" value={form.auth_command || ''} mono
-                         onChange={(e) => setForm({ ...form, auth_command: e.target.value.trim() || undefined })}
+                         onChange={(e) => setForm((f) => ({ ...f, auth_command: e.target.value.trim() || undefined }))}
                          placeholder="例如 gcloud auth print-access-token" />
                   {usesAuthCommand && (
                     <>
                       <Field label="Args（空格分隔）" value={(form.auth_args || []).join(' ')} mono
                              onChange={(e) => {
                                const args = e.target.value.split(/\s+/).map((a) => a.trim()).filter(Boolean);
-                               setForm({ ...form, auth_args: args.length ? args : undefined });
+                               setForm((f) => ({ ...f, auth_args: args.length ? args : undefined }));
                              }}
                              placeholder="例如 auth print-access-token" />
                       <div className="grid grid-cols-3 gap-2">
                         <Field label="超时 ms" value={form.auth_timeout_ms != null ? String(form.auth_timeout_ms) : ''} mono
                                onChange={(e) => {
                                  const n = Number(e.target.value.trim());
-                                 setForm({ ...form, auth_timeout_ms: e.target.value.trim() && Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined });
+                                 setForm((f) => ({ ...f, auth_timeout_ms: e.target.value.trim() && Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined }));
                                }}
                                placeholder="5000" />
                         <Field label="刷新间隔 ms" value={form.auth_refresh_interval_ms != null ? String(form.auth_refresh_interval_ms) : ''} mono
                                onChange={(e) => {
                                  const n = Number(e.target.value.trim());
-                                 setForm({ ...form, auth_refresh_interval_ms: e.target.value.trim() && Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined });
+                                 setForm((f) => ({ ...f, auth_refresh_interval_ms: e.target.value.trim() && Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined }));
                                }}
                                placeholder="300000" />
                         <Field label="工作目录" value={form.auth_cwd || ''} mono
-                               onChange={(e) => setForm({ ...form, auth_cwd: e.target.value.trim() || undefined })}
+                               onChange={(e) => setForm((f) => ({ ...f, auth_cwd: e.target.value.trim() || undefined }))}
                                placeholder="可选" />
                       </div>
                     </>
@@ -1546,7 +1589,7 @@ export function ProfileModal({
                       <button
                         key={r.value}
                         type="button"
-                        onClick={() => setForm({ ...form, service_tier: r.value || undefined })}
+                        onClick={() => setForm((f) => ({ ...f, service_tier: r.value || undefined }))}
                         className={`flex-1 rounded-md px-2 py-1.5 text-[12px] font-medium border transition-all ${
                           (form.service_tier || '') === r.value
                             ? 'border-accent text-accent bg-accent/8'
@@ -1575,7 +1618,7 @@ export function ProfileModal({
                         <button
                           key={opt.mode}
                           type="button"
-                          onClick={() => setForm({ ...form, context_1m: contextModeToBool(opt.mode) })}
+                          onClick={() => setForm((f) => ({ ...f, context_1m: contextModeToBool(opt.mode) }))}
                           className={`flex-1 rounded-md border px-2 py-1.5 text-[12px] font-medium transition-all ${
                             cur === opt.mode
                               ? 'border-accent bg-accent/8 text-accent'

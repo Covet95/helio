@@ -1643,24 +1643,6 @@ fn finalize_provider(target: TargetApp, cfg: &serde_json::Value, parts: &mut Sca
     }
 }
 
-/// 从某工具当前配置文件读取共享配置（permissions/hooks/MCP/skills 等），保存到数据库
-#[tauri::command]
-pub async fn import_shared_config(
-    target_app: String,
-    state: State<'_, AppState>,
-) -> Result<serde_json::Value, AppError> {
-    use switch_api::adapters::get_adapter;
-    let target = TargetApp::parse(&target_app).ok_or_else(|| unknown_target_app(&target_app))?;
-    let adapter = get_adapter(target);
-    let cfg = adapter.read_config()?;
-    let shared = adapter.extract_shared_config(&cfg);
-
-    let _write_guard = state.config_lock.lock()?;
-    let db = state.db.lock()?;
-    db.save_shared_config(target, shared.clone())?;
-    Ok(shared)
-}
-
 #[tauri::command]
 pub async fn export_database(
     output_path: String,

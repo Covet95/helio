@@ -1,8 +1,8 @@
 import { create } from 'zustand';
 import { tauriApi } from '@/lib/tauri';
 import { humanizeError } from '@/lib/utils';
+import { readSelectedTool, writeSelectedTool } from '@/lib/settings';
 import type { ApiProfile, StatusInfo, TargetApp } from '@/types';
-import { SUPPORTED_TOOLS } from '@/types';
 
 interface AppStore {
   profiles: ApiProfile[];
@@ -31,17 +31,8 @@ interface AppStore {
   setSelectedTool: (tool: TargetApp) => void;
 }
 
-const TOOL_IDS: ReadonlySet<string> = new Set(SUPPORTED_TOOLS.map((t) => t.id));
-
 function readStoredTool(): TargetApp | null {
-  try {
-    if (typeof localStorage === 'undefined') return null;
-    const saved = localStorage.getItem('helio-tool');
-    if (saved && TOOL_IDS.has(saved)) return saved as TargetApp;
-  } catch {
-    /* 忽略持久化失败 */
-  }
-  return null;
+  return readSelectedTool();
 }
 
 /** 请求序号：fetch 响应只接受最新一次（后发先至的过期响应丢弃） */
@@ -158,11 +149,7 @@ export const useStore = create<AppStore>((set, get) => ({
   },
 
   setSelectedTool: (tool) => {
-    try {
-      localStorage.setItem('helio-tool', tool);
-    } catch {
-      /* 忽略持久化失败 */
-    }
+    writeSelectedTool(tool);
     set({ selectedTool: tool });
   },
 }));

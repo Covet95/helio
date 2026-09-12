@@ -11,6 +11,7 @@ import type { ApiProfile, TargetApp } from '../types';
 import { SUPPORTED_TOOLS, toolById } from '../types';
 import { cn, humanizeError } from '../lib/utils';
 import { tauriApi } from '../lib/tauri';
+import { readSwitchProbe, writeSwitchProbe } from '../lib/settings';
 import { contextBadgeLabel } from '../lib/contextWindow';
 import { profileApiCredentialsText } from '../lib/profileCopy';
 import { copyText } from '../lib/clipboard';
@@ -42,7 +43,7 @@ export default function ProfilesPage() {
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState<ApiProfile | null>(null);
   const [switched, setSwitched] = useState<string | null>(null);
-  const [deleting, setDeleting] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<{ name: string; tool: TargetApp } | null>(null);
   const [query, setQuery] = useState('');
   const [feedback, setFeedback] = useState<{ kind: 'success' | 'error' | 'info'; text: string } | null>(null);
   const [dedupConfirm, setDedupConfirm] = useState(false);
@@ -52,13 +53,7 @@ export default function ProfilesPage() {
   // 每个 legacy 行的目标工具选择（默认当前页工具）
   const [legacyTool, setLegacyTool] = useState<Record<number, TargetApp>>({});
   // 启用时先探活：key 全挂则后端拒绝写入配置。偏好持久化到 localStorage。
-  const [switchProbe, setSwitchProbe] = useState(() => {
-    try {
-      return localStorage.getItem('helio-switch-probe') === '1';
-    } catch {
-      return false;
-    }
-  });
+  const [switchProbe, setSwitchProbe] = useState(() => readSwitchProbe());
 
   useEffect(() => {
     if (!switched) return;
@@ -134,19 +129,21 @@ export default function ProfilesPage() {
     }
   };
 
-  const handleSwitch = async (name: string) => {
+  const handleSwitch = async (tool: TargetApp, name: string) => {
     if (switchPending.current) return;
     switchPending.current = true;
-    setSwitching(name);
+    const switchKey = `${tool}:${name}`;
+    setSwitching(switchKey);
     setFeedback(null);
     try {
-      await switchProfile(targetApp, name, switchProbe || undefined);
-      setSwitched(`${name}→${targetApp}`);
+      await switchProfile(tool, name, switchProbe || undefined);
+      setSwitched(switchKey);
+      const toolLabel = toolById(tool)?.displayName ?? tool;
       setFeedback({
         kind: 'success',
         text: switchProbe
-          ? `已探活并启用 ${name}（已写入本地 ${selectedTool.displayName} 配置）`
-          : `已启用 ${name}（已写入本地 ${selectedTool.displayName} 配置）`,
+          ? `已探活并启用 ${name}（已写入本地 ${toolLabel} 配置）`
+          : `已启用 ${name}（已写入本地 ${toolLabel} 配置）`,
       });
     } catch (error) {
       setFeedback({ kind: 'error', text: `启用失败：${humanizeError(error)}` });
@@ -241,7 +238,7 @@ export default function ProfilesPage() {
 
       <div className="px-4 py-4 sm:px-7 sm:py-5">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <AppSelector value={targetApp} onChange={(tool) => { setTargetApp(tool); setFeedback(null); }} disabled={switching !== null} />
+          <AppSelector value={targetApp} onChange={(tool) => { setTargetApp(tool); setFeedback(null); }} disabled={switching !== null || deleting !== null || dedupConfirm || deletingLegacy !== null} />
           <div className="flex flex-wrap items-center gap-3">
             <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-[12px] text-ink-dim" title="启用档案前先探活 key，全部失败则不写入本地配置">
               <input
@@ -249,11 +246,7 @@ export default function ProfilesPage() {
                 checked={switchProbe}
                 onChange={(e) => {
                   setSwitchProbe(e.target.checked);
-                  try {
-                    localStorage.setItem('helio-switch-probe', e.target.checked ? '1' : '0');
-                  } catch {
-                    /* 忽略持久化失败 */
-                  }
+                  writeSwitchProbe(e.target.checked);
                 }}
               />
               启用时先探活
@@ -357,12 +350,12 @@ export default function ProfilesPage() {
                 key={p.id ?? `${p.target_app}:${p.name}`}
                 profile={p}
                 active={activeProfile?.name === p.name}
-                justSwitched={switched?.startsWith(`${p.name}→`) ?? false}
+                justSwitched={switched === `${p.target_app ?? targetApp}:${p.name}`}
                 onEdit={() => { setEditing(p); setShowModal(true); }}
-                onDelete={() => setDeleting(p.name)}
+                onDelete={() => setDeleting({ name: p.name, tool: p.target_app ?? targetApp })}
                 onCopyCredentials={() => handleCopy('URL + Key', profileApiCredentialsText(p))}
-                onSwitch={() => handleSwitch(p.name)}
-                switching={switching === p.name}
+                onSwitch={() => handleSwitch(p.target_app ?? targetApp, p.name)}
+                switching={switching === `${p.target_app ?? targetApp}:${p.name}`}
                 busy={switching !== null}
               />
             ))}
@@ -414,14 +407,15 @@ export default function ProfilesPage() {
       {deleting && (
         <ConfirmDialog
           title="删除配置档案"
-          message={`确定要删除「${deleting}」吗？此操作不可撤销。`}
+          message={`确定要删除「${deleting.name}」（${toolById(deleting.tool)?.displayName ?? deleting.tool}）吗？此操作不可撤销。`}
           confirmText="删除"
           danger
           onCancel={() => setDeleting(null)}
           onConfirm={async () => {
+            const target = deleting;
             try {
-              await deleteProfile(targetApp, deleting);
-              setFeedback({ kind: 'success', text: `已删除「${deleting}」` });
+              await deleteProfile(target.tool, target.name);
+              setFeedback({ kind: 'success', text: `已删除「${target.name}」` });
             } catch (e) {
               setFeedback({ kind: 'error', text: `删除失败：${humanizeError(e)}` });
             }

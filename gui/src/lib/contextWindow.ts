@@ -75,9 +75,21 @@ export function contextPreviewLine(
   return '不修改上下文窗口字段';
 }
 
-/** StatusInfo keys use underscores (claude_code). */
-export function statusKeyFor(targetApp: string): string {
-  return targetApp.replace(/-/g, '_');
+/** Tool → StatusInfo key.显式映射：加新工具时编译器会提醒补全，而不是运行时拼字符串。 */
+export type ToolStatusKey = 'claude_code' | 'codex' | 'pi' | 'opencode' | 'hermes' | 'openclaw' | 'zcode';
+
+const STATUS_KEY_BY_TOOL: Record<TargetApp, ToolStatusKey> = {
+  'claude-code': 'claude_code',
+  codex: 'codex',
+  pi: 'pi',
+  opencode: 'opencode',
+  hermes: 'hermes',
+  openclaw: 'openclaw',
+  zcode: 'zcode',
+};
+
+export function statusKeyFor(targetApp: TargetApp): ToolStatusKey {
+  return STATUS_KEY_BY_TOOL[targetApp];
 }
 
 export function profileKeyCount(p: ApiProfile): number {

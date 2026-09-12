@@ -77,7 +77,7 @@ export function providerTint(provider: string): string {
 
 export function activeProfileFor(status: StatusInfo | null, targetApp: TargetApp): ApiProfile | undefined {
   if (!status) return undefined;
-  const key = statusKeyFor(targetApp) as keyof StatusInfo;
+  const key = statusKeyFor(targetApp);
   const targetStatus = status[key];
   if (!targetStatus || typeof targetStatus !== 'object' || !('profile' in targetStatus)) return undefined;
   return (targetStatus as { profile?: ApiProfile }).profile;

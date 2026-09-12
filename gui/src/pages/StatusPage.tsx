@@ -12,9 +12,9 @@ import { describeLocalDrift, type LocalApiSnapshot } from '../lib/localDrift';
 import { SUPPORTED_TOOLS } from '../types';
 import type { StatusInfo, TargetApp, TargetStatus, ToolInfo, ToolProbeResult } from '../types';
 
-function statusForTool(status: StatusInfo | null, id: string): TargetStatus | undefined {
+function statusForTool(status: StatusInfo | null, id: TargetApp): TargetStatus | undefined {
   if (!status) return undefined;
-  const key = statusKeyFor(id) as keyof StatusInfo;
+  const key = statusKeyFor(id);
   const v = status[key];
   if (!v || typeof v !== 'object' || !('connected' in (v as object) || 'profile' in (v as object))) {
     return undefined;

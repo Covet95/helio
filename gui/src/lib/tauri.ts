@@ -209,8 +209,6 @@ export const tauriApi = {
       source: `${targetApp} config`,
     }),
 
-  importSharedConfig: (targetApp: TargetApp) =>
-    command<any>('import_shared_config', { targetApp }),
 
   // Codex config.toml 原始文本编辑（仅 Codex）
   readCodexConfigRaw: () =>
