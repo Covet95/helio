@@ -23,6 +23,12 @@ toml = "0.8"
 
 # Utilities
 dirs = "5.0"
+
+# 日志。核心库已在 journal 崩溃恢复等关键路径埋了 tracing 调用，
+# 但此前无人初始化 subscriber——所有日志被静默丢弃。桌面应用从 Finder/
+# Explorer 启动时 stderr 不可见，因此必须落盘。
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 reqwest = { version = "0.12", features = ["json"] }
