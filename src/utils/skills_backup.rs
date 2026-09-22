@@ -330,13 +330,16 @@ fn is_executable(_file: &fs::File) -> bool {
     false
 }
 
-/// 把归档条目声明的模式中的可执行位应用到目标文件(恢复后脚本仍可运行)。
+/// 应用归档条目声明的模式:可执行位照搬,其余一律收紧为 owner-only。
+///
+/// 导出侧 tar 用 0600 写盘，恢复侧原先只有 `fs::write`——权限取决于 umask
+/// （常见 022，即落成 0644，同机其他用户可读）。skills 里可能有含 token 的
+/// 脚本或配置，恢复后应当与导出前一致。
 #[cfg(unix)]
 fn apply_exec_bit(path: &Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt;
-    if mode & 0o111 != 0 {
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o755));
-    }
+    let bits = if mode & 0o111 != 0 { 0o755 } else { 0o600 };
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(bits));
 }
 
 #[cfg(not(unix))]
@@ -1316,6 +1319,35 @@ mod tests {
         import_skills(&dst_home, &arc)?;
         let restored = dst_home.join(".claude/skills/skill-a/run.sh");
         assert_eq!(fs::metadata(&restored)?.permissions().mode() & 0o111, 0o111);
+        Ok(())
+    }
+
+    /// 恢复出来的非可执行文件必须是 owner-only。
+    ///
+    /// 导出侧 tar 用 0600，恢复侧原先只有 `fs::write`——权限取决于 umask，
+    /// 常见 022 会落成 0644，同机其他用户可读。skills 里可能有含 token 的
+    /// 脚本或配置，恢复后应与导出前一致。
+    #[cfg(unix)]
+    #[test]
+    fn import_restores_non_executable_files_owner_only() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir()?;
+        let src_home = dir.path().join("src");
+        make_skill(
+            &src_home,
+            ".claude/skills",
+            "skill-a",
+            "SKILL.md",
+            "secret-ish",
+        );
+        let arc = dir.path().join("out.tar.gz");
+        export_skills(&src_home, &arc)?;
+
+        let dst_home = dir.path().join("dst");
+        import_skills(&dst_home, &arc)?;
+        let restored = dst_home.join(".claude/skills/skill-a/SKILL.md");
+        let mode = fs::metadata(&restored)?.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "恢复的文件应为 owner-only，实际 {mode:o}");
         Ok(())
     }
 
