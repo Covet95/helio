@@ -73,7 +73,7 @@ fn run_switch(
     stored.normalize_keys();
     let shared = adapters::resolve_shared_config(target, db.get_shared_config(target)?)?;
     adapters::apply_profile_switch(&db, target, &stored, &shared, false)?;
-    let disk = get_adapter(target).read_config()?;
+    let disk = get_adapter(target)?.read_config()?;
     let persisted = db
         .get_shared_config(target)?
         .map(|s| s.config)
@@ -95,8 +95,8 @@ fn assert_no_key_leak(label: &str, persisted: &serde_json::Value) {
 /// 按适配器自己的序列化方式写盘（JSON / YAML 由适配器决定），并确认可读回。
 fn write_fixture(target: TargetApp, dir: &Path, fixture: &serde_json::Value) -> anyhow::Result<()> {
     fs::create_dir_all(dir)?;
-    get_adapter(target).write_config(fixture)?;
-    let readback = get_adapter(target).read_config()?;
+    get_adapter(target)?.write_config(fixture)?;
+    let readback = get_adapter(target)?.read_config()?;
     anyhow::ensure!(
         readback.is_object(),
         "{target:?} 夹具写盘后读回不是对象：{readback}"
@@ -323,7 +323,7 @@ fn credentials_survive_real_switch_across_adapters() {
             ))?;
 
             switch_once(&db, alpha_id)?;
-            let disk = get_adapter(TargetApp::OpenCode).read_config()?;
+            let disk = get_adapter(TargetApp::OpenCode)?.read_config()?;
             assert_eq!(
                 disk["provider"]["alpha"]["options"]["apiKey"],
                 "sk-alpha-new"
@@ -338,7 +338,7 @@ fn credentials_survive_real_switch_across_adapters() {
             );
 
             switch_once(&db, beta_id)?;
-            let disk = get_adapter(TargetApp::OpenCode).read_config()?;
+            let disk = get_adapter(TargetApp::OpenCode)?.read_config()?;
             assert_eq!(disk["provider"]["beta"]["options"]["apiKey"], "sk-beta-new");
             assert_eq!(
                 disk["provider"]["alpha"]["options"]["apiKey"], "sk-alpha-new",
@@ -351,7 +351,7 @@ fn credentials_survive_real_switch_across_adapters() {
 
             // 重复切换同一 profile：命中 already_active 清理分支，结果必须稳定。
             switch_once(&db, beta_id)?;
-            let disk = get_adapter(TargetApp::OpenCode).read_config()?;
+            let disk = get_adapter(TargetApp::OpenCode)?.read_config()?;
             assert_eq!(disk["provider"]["beta"]["options"]["apiKey"], "sk-beta-new");
             assert_eq!(
                 disk["provider"]["alpha"]["options"]["apiKey"],

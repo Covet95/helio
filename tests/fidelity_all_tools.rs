@@ -86,7 +86,7 @@ fn check_tool(
     must_survive: &[&str],
     api_profile: &ApiProfile,
 ) -> anyhow::Result<()> {
-    let adapter = get_adapter(tool);
+    let adapter = get_adapter(tool)?;
     let path = adapter.config_path();
 
     std::fs::create_dir_all(path.parent().context("config dir")?)?;
@@ -129,7 +129,7 @@ fn check_aux_file(
     }
     std::fs::write(&path, live)?;
 
-    let adapter = get_adapter(tool);
+    let adapter = get_adapter(tool)?;
     let main_path = adapter.config_path();
     std::fs::create_dir_all(main_path.parent().context("config dir")?)?;
     if !main_path.exists() {
@@ -281,7 +281,7 @@ fn user_edits_between_switches_survive() {
     let _home = HomeGuard::new();
 
     (|| -> anyhow::Result<()> {
-        let adapter = get_adapter(TargetApp::Codex);
+        let adapter = get_adapter(TargetApp::Codex)?;
         let path = adapter.config_path();
         std::fs::create_dir_all(path.parent().context("config dir")?)?;
         std::fs::write(&path, "# 初始\nmodel_provider = \"custom\"\n")?;
@@ -347,7 +347,7 @@ fn opencode_multi_switch_keeps_user_content() {
     let _home = HomeGuard::new();
 
     (|| -> anyhow::Result<()> {
-        let adapter = get_adapter(TargetApp::OpenCode);
+        let adapter = get_adapter(TargetApp::OpenCode)?;
         let path = adapter.config_path();
         std::fs::create_dir_all(path.parent().context("config dir")?)?;
         std::fs::write(
@@ -415,7 +415,7 @@ fn non_object_live_file_is_replaced_not_crashed() {
     let _home = HomeGuard::new();
 
     (|| -> anyhow::Result<()> {
-        let adapter = get_adapter(TargetApp::ZCode);
+        let adapter = get_adapter(TargetApp::ZCode)?;
         let path = adapter.config_path();
         std::fs::create_dir_all(path.parent().context("config dir")?)?;
 
@@ -453,7 +453,7 @@ fn legacy_keys_are_actually_removed_from_disk() {
     let _home = HomeGuard::new();
 
     (|| -> anyhow::Result<()> {
-        let adapter = get_adapter(TargetApp::Codex);
+        let adapter = get_adapter(TargetApp::Codex)?;
         let path = adapter.config_path();
         std::fs::create_dir_all(path.parent().context("config dir")?)?;
 
@@ -499,7 +499,7 @@ fn claude_aux_jsonc_keeps_runtime_state() {
     let home = HomeGuard::new();
 
     (|| -> anyhow::Result<()> {
-        let adapter = get_adapter(TargetApp::ClaudeCode);
+        let adapter = get_adapter(TargetApp::ClaudeCode)?;
 
         let claude_json = home.path().join(".claude.json");
         std::fs::write(
@@ -539,7 +539,7 @@ fn opencode_jsonc_still_merges() {
     let _home = HomeGuard::new();
 
     (|| -> anyhow::Result<()> {
-        let adapter = get_adapter(TargetApp::OpenCode);
+        let adapter = get_adapter(TargetApp::OpenCode)?;
         let path = adapter.config_path();
         std::fs::create_dir_all(path.parent().context("config dir")?)?;
         std::fs::write(

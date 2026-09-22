@@ -220,7 +220,7 @@ pub fn restore_snapshots(snapshots: &[FileSnapshot]) -> Result<()> {
 pub fn snapshot_all_managed_files() -> Result<Vec<FileSnapshot>> {
     let mut snapshots = Vec::new();
     for target_app in TargetApp::all() {
-        let adapter = get_adapter(target_app);
+        let adapter = get_adapter(target_app)?;
         snapshots.extend(adapter.snapshot_files()?);
     }
     Ok(snapshots)
@@ -329,7 +329,7 @@ pub fn resolve_shared_config(
     target_app: TargetApp,
     persisted_shared_config: Option<crate::models::SharedConfig>,
 ) -> Result<serde_json::Value> {
-    let adapter = get_adapter(target_app);
+    let adapter = get_adapter(target_app)?;
     resolve_shared_config_with_adapter(persisted_shared_config, adapter.as_ref())
 }
 
@@ -381,7 +381,7 @@ pub fn apply_profile_configuration(
     create_backup: bool,
     previous_managed: Option<&serde_json::Value>,
 ) -> Result<ProfileApplicationResult> {
-    let adapter = get_adapter(target_app);
+    let adapter = get_adapter(target_app)?;
     adapter.validate_profile(api_profile)?;
     let backup_path = if create_backup && adapter.config_path().exists() {
         Some(adapter.backup_config()?)
@@ -415,9 +415,13 @@ pub fn derive_previous_managed(
     target_app: TargetApp,
     previous_active: Option<&ApiProfile>,
     shared_config: &serde_json::Value,
-) -> Option<serde_json::Value> {
-    let previous = previous_active?;
-    Some(get_adapter(target_app).merge_config(previous, shared_config))
+) -> Result<Option<serde_json::Value>> {
+    let Some(previous) = previous_active else {
+        return Ok(None);
+    };
+    Ok(Some(
+        get_adapter(target_app)?.merge_config(previous, shared_config),
+    ))
 }
 
 /// 一次完整的配置切换（GUI / 托盘共用入口）：
@@ -439,7 +443,7 @@ pub fn apply_profile_switch(
     let profile_id = api_profile
         .id
         .ok_or_else(|| anyhow::anyhow!("Profile '{}' has no id", api_profile.name))?;
-    let adapter = get_adapter(target_app);
+    let adapter = get_adapter(target_app)?;
     // 切换前的 active Profile，用于推导「上次写入的受管片段」。
     //
     // 必须在 `begin_switch` **之前**取：它恢复残留 journal 时可能改动 active，
@@ -518,7 +522,7 @@ pub fn apply_profile_switch(
             target_app,
             previous_active_profile.as_ref(),
             &effective_shared_config,
-        );
+        )?;
         let applied = apply_profile_configuration(
             target_app,
             api_profile,
@@ -567,7 +571,7 @@ pub fn apply_profile_switch(
 /// adapter 提取出的非档案配置，供便携备份取得导出瞬间的真实状态。
 pub fn sync_all_shared_configs(db: &crate::db::Database) -> Result<()> {
     for target_app in TargetApp::all() {
-        let adapter = get_adapter(target_app);
+        let adapter = get_adapter(target_app)?;
         sync_shared_config_if_present(db, target_app, adapter.as_ref())?;
     }
     Ok(())
@@ -581,7 +585,13 @@ pub fn sync_all_shared_configs(db: &crate::db::Database) -> Result<()> {
 pub fn sync_startup_shared_configs(db: &crate::db::Database) -> Vec<TargetApp> {
     let mut synced = Vec::new();
     for target_app in TargetApp::all() {
-        let adapter = get_adapter(target_app);
+        let adapter = match get_adapter(target_app) {
+            Ok(adapter) => adapter,
+            Err(error) => {
+                tracing::warn!("[Helio] startup sync: skip {target_app}: {error:#}");
+                continue;
+            }
+        };
         match sync_shared_config_if_present(db, target_app, adapter.as_ref()) {
             Ok(true) => synced.push(target_app),
             Ok(false) => {}
@@ -765,17 +775,21 @@ pub mod opencode;
 pub mod pi;
 pub mod zcode;
 
-/// 获取适配器
-pub fn get_adapter(target_app: TargetApp) -> Box<dyn ConfigAdapter> {
-    match target_app {
-        TargetApp::ClaudeCode => Box::new(claude_code::ClaudeCodeAdapter::new()),
-        TargetApp::Codex => Box::new(codex::CodexAdapter::new()),
-        TargetApp::Pi => Box::new(pi::PiAdapter::new()),
-        TargetApp::OpenCode => Box::new(opencode::OpenCodeAdapter::new()),
-        TargetApp::Hermes => Box::new(hermes::HermesAdapter::new()),
-        TargetApp::OpenClaw => Box::new(openclaw::OpenClawAdapter::new()),
-        TargetApp::ZCode => Box::new(zcode::ZCodeAdapter::new()),
-    }
+/// 获取适配器。
+///
+/// 返回 `Result` 而非直接构造：所有适配器的配置目录都在 `$HOME` 下，
+/// HOME 缺失（容器、服务账户）时以前会 `expect` panic——切换中途崩掉比
+/// 报一个清楚的错误糟得多。
+pub fn get_adapter(target_app: TargetApp) -> Result<Box<dyn ConfigAdapter>> {
+    Ok(match target_app {
+        TargetApp::ClaudeCode => Box::new(claude_code::ClaudeCodeAdapter::new()?),
+        TargetApp::Codex => Box::new(codex::CodexAdapter::new()?),
+        TargetApp::Pi => Box::new(pi::PiAdapter::new()?),
+        TargetApp::OpenCode => Box::new(opencode::OpenCodeAdapter::new()?),
+        TargetApp::Hermes => Box::new(hermes::HermesAdapter::new()?),
+        TargetApp::OpenClaw => Box::new(openclaw::OpenClawAdapter::new()?),
+        TargetApp::ZCode => Box::new(zcode::ZCodeAdapter::new()?),
+    })
 }
 
 #[cfg(test)]

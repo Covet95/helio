@@ -16,7 +16,7 @@ use tauri::State;
 #[tauri::command]
 pub async fn read_codex_config_raw() -> Result<String, AppError> {
     use switch_api::adapters::get_adapter;
-    let path = get_adapter(TargetApp::Codex).config_path();
+    let path = get_adapter(TargetApp::Codex)?.config_path();
     if !path.exists() {
         return Ok(String::new());
     }
@@ -181,7 +181,7 @@ fn with_rollback(err: AppError, rollback_errors: Vec<String>) -> AppError {
 fn persist_codex_raw_config(content: &str, state: &AppState) -> Result<(), AppError> {
     let parsed = toml::from_str::<toml::Value>(content)
         .map_err(|error| AppError::invalid_input(format!("TOML 语法错误，未保存：{error}")))?;
-    let adapter = switch_api::adapters::get_adapter(TargetApp::Codex);
+    let adapter = switch_api::adapters::get_adapter(TargetApp::Codex)?;
     let path = adapter.config_path();
     let shared = adapter.extract_shared_config(
         &serde_json::to_value(&parsed)
@@ -291,7 +291,7 @@ pub async fn update_codex_fields(
     state: State<'_, AppState>,
 ) -> Result<(), AppError> {
     use switch_api::adapters::get_adapter;
-    let adapter = get_adapter(TargetApp::Codex);
+    let adapter = get_adapter(TargetApp::Codex)?;
     let path = adapter.config_path();
 
     let live_text = if path.exists() {

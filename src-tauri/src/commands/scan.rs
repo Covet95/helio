@@ -78,7 +78,8 @@ fn configured_opencode_provider_id(config: &serde_json::Value) -> Option<String>
 pub async fn scan_local_api(target_app: String) -> Result<ScannedApi, AppError> {
     use switch_api::adapters::get_adapter;
     let target = TargetApp::parse(&target_app).ok_or_else(|| unknown_target_app(&target_app))?;
-    let adapter = get_adapter(target);
+    let adapter =
+        get_adapter(target).map_err(|e| AppError::from(e).with_context("定位配置目录失败"))?;
     let source = adapter.config_path().to_string_lossy().to_string();
     let cfg = adapter
         .read_config()

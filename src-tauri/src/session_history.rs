@@ -4,6 +4,17 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Seek};
 use std::path::{Component, Path, PathBuf};
 use switch_api::error::AppError;
+
+/// 定位主目录；失败时给出可行动的 `AppError`。
+///
+/// 不用 `expect`：会话列表/删除会走这里，主目录解析不出来时应当干净报错，
+/// 而不是把整个命令崩掉。
+fn home_dir() -> Result<PathBuf, AppError> {
+    dirs::home_dir().ok_or_else(|| {
+        AppError::internal("无法定位用户主目录")
+            .with_detail("dirs::home_dir() 返回 None（HOME 未设置且无法从 passwd 解析）")
+    })
+}
 use walkdir::WalkDir;
 
 /// 预览输入上限：最多读取 8 MiB，避免超大 jsonl 阻塞预览。
@@ -98,11 +109,10 @@ pub struct CodexSessionReader {
 }
 
 impl CodexSessionReader {
-    pub fn new() -> Self {
-        let home = dirs::home_dir().expect("home dir");
-        Self {
-            sessions_dir: home.join(".codex").join("sessions"),
-        }
+    pub fn new() -> Result<Self, AppError> {
+        Ok(Self {
+            sessions_dir: home_dir()?.join(".codex").join("sessions"),
+        })
     }
 }
 
@@ -270,11 +280,10 @@ pub struct ClaudeSessionReader {
 }
 
 impl ClaudeSessionReader {
-    pub fn new() -> Self {
-        let home = dirs::home_dir().expect("home dir");
-        Self {
-            projects_dir: home.join(".claude").join("projects"),
-        }
+    pub fn new() -> Result<Self, AppError> {
+        Ok(Self {
+            projects_dir: home_dir()?.join(".claude").join("projects"),
+        })
     }
 }
 
@@ -597,21 +606,21 @@ fn parse_iso8601(s: &str) -> Option<i64> {
 }
 
 /// 全部 reader
-fn all_readers() -> Vec<Box<dyn SessionReader>> {
-    vec![
-        Box::new(CodexSessionReader::new()),
-        Box::new(ClaudeSessionReader::new()),
-    ]
+fn all_readers() -> Result<Vec<Box<dyn SessionReader>>, AppError> {
+    Ok(vec![
+        Box::new(CodexSessionReader::new()?),
+        Box::new(ClaudeSessionReader::new()?),
+    ])
 }
 
 /// 按 tool 过滤 reader：选中工具时跳过无关目录扫描。
-fn selected_readers(tool: Option<&str>) -> Vec<Box<dyn SessionReader>> {
-    match tool {
-        Some("codex") => vec![Box::new(CodexSessionReader::new())],
-        Some("claude-code") => vec![Box::new(ClaudeSessionReader::new())],
+fn selected_readers(tool: Option<&str>) -> Result<Vec<Box<dyn SessionReader>>, AppError> {
+    Ok(match tool {
+        Some("codex") => vec![Box::new(CodexSessionReader::new()?)],
+        Some("claude-code") => vec![Box::new(ClaudeSessionReader::new()?)],
         Some(_) => Vec::new(),
-        None => all_readers(),
-    }
+        None => all_readers()?,
+    })
 }
 
 /// `spawn_blocking` 的 JoinError 只可能是任务 panic 或被取消，属于内部故障。
@@ -663,12 +672,12 @@ pub(crate) fn apply_filters(
         .collect()
 }
 
-fn reader_for(tool: &str) -> Option<Box<dyn SessionReader>> {
-    match tool {
-        "codex" => Some(Box::new(CodexSessionReader::new())),
-        "claude-code" => Some(Box::new(ClaudeSessionReader::new())),
+fn reader_for(tool: &str) -> Result<Option<Box<dyn SessionReader>>, AppError> {
+    Ok(match tool {
+        "codex" => Some(Box::new(CodexSessionReader::new()?)),
+        "claude-code" => Some(Box::new(ClaudeSessionReader::new()?)),
         _ => None,
-    }
+    })
 }
 
 #[tauri::command]
@@ -680,15 +689,15 @@ pub async fn list_sessions(
     // Reader 在阻塞线程内构造，只移动 tool/search 字符串进闭包。
     tauri::async_runtime::spawn_blocking(move || {
         let mut all = Vec::new();
-        for r in selected_readers(tool.as_deref()) {
+        for r in selected_readers(tool.as_deref())? {
             all.extend(r.list_sessions());
         }
         // 默认按修改时间倒序
         all.sort_by_key(|b| std::cmp::Reverse(b.modified_at));
-        apply_filters(all, tool.as_deref(), search.as_deref())
+        Ok(apply_filters(all, tool.as_deref(), search.as_deref()))
     })
     .await
-    .map_err(background_task_failed)
+    .map_err(background_task_failed)?
 }
 
 #[tauri::command]
@@ -697,7 +706,7 @@ pub async fn read_session_preview(
     id: String,
 ) -> Result<Vec<PreviewMessage>, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
-        let reader = reader_for(&tool)
+        let reader = reader_for(&tool)?
             .ok_or_else(|| AppError::invalid_input(format!("未知工具：{tool}")))?;
         reader
             .read_preview(&id, PREVIEW_MAX_CHARS)
@@ -709,15 +718,16 @@ pub async fn read_session_preview(
 
 #[tauri::command]
 pub async fn delete_session(tool: String, id: String) -> Result<DeleteResult, AppError> {
-    if reader_for(&tool).is_none() {
+    if reader_for(&tool)?.is_none() {
         return Err(AppError::invalid_input(format!("未知工具：{tool}")));
     }
     tauri::async_runtime::spawn_blocking(move || {
-        let reader = reader_for(&tool).expect("tool checked above");
-        delete_one(reader.as_ref(), &id)
+        let reader = reader_for(&tool)?
+            .ok_or_else(|| AppError::invalid_input(format!("未知工具：{tool}")))?;
+        Ok(delete_one(reader.as_ref(), &id))
     })
     .await
-    .map_err(background_task_failed)
+    .map_err(background_task_failed)?
 }
 
 #[derive(serde::Deserialize)]
@@ -731,7 +741,7 @@ pub async fn delete_sessions(items: Vec<DeleteItem>) -> Result<Vec<DeleteResult>
     tauri::async_runtime::spawn_blocking(move || {
         let mut out = Vec::new();
         for it in items {
-            match reader_for(&it.tool) {
+            match reader_for(&it.tool)? {
                 Some(r) => out.push(delete_one(r.as_ref(), &it.id)),
                 None => out.push(DeleteResult {
                     id: it.id,
@@ -741,10 +751,10 @@ pub async fn delete_sessions(items: Vec<DeleteItem>) -> Result<Vec<DeleteResult>
                 }),
             }
         }
-        out
+        Ok(out)
     })
     .await
-    .map_err(background_task_failed)
+    .map_err(background_task_failed)?
 }
 
 #[tauri::command]
@@ -756,17 +766,17 @@ pub async fn cleanup_sessions(
     let cutoff = cleanup_cutoff(now, older_than_days)?;
     tauri::async_runtime::spawn_blocking(move || {
         let mut out = Vec::new();
-        for r in selected_readers(tool.as_deref()) {
+        for r in selected_readers(tool.as_deref())? {
             for m in r.list_sessions() {
                 if m.modified_at < cutoff {
                     out.push(delete_one(r.as_ref(), &m.id));
                 }
             }
         }
-        out
+        Ok(out)
     })
     .await
-    .map_err(background_task_failed)
+    .map_err(background_task_failed)?
 }
 
 #[cfg(test)]
@@ -1131,10 +1141,10 @@ mod tests {
 
     #[test]
     fn test_selected_readers_skip_unrelated_tool() {
-        assert_eq!(selected_readers(Some("codex")).len(), 1);
-        assert_eq!(selected_readers(Some("codex"))[0].tool(), "codex");
-        assert_eq!(selected_readers(Some("claude-code")).len(), 1);
-        assert_eq!(selected_readers(Some("unknown-tool")).len(), 0);
-        assert_eq!(selected_readers(None).len(), 2);
+        assert_eq!(selected_readers(Some("codex")).unwrap().len(), 1);
+        assert_eq!(selected_readers(Some("codex")).unwrap()[0].tool(), "codex");
+        assert_eq!(selected_readers(Some("claude-code")).unwrap().len(), 1);
+        assert_eq!(selected_readers(Some("unknown-tool")).unwrap().len(), 0);
+        assert_eq!(selected_readers(None).unwrap().len(), 2);
     }
 }

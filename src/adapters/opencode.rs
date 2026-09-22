@@ -12,10 +12,18 @@ pub struct OpenCodeAdapter {
 }
 
 impl OpenCodeAdapter {
-    pub fn new() -> Self {
-        let home = dirs::home_dir().expect("Failed to get home directory");
+    pub fn new() -> Result<Self> {
+        // 不用 `expect`：主目录解析不出来时切换会直接 panic，而这是可恢复的
+        // 环境异常——返回 Err 让命令层报错即可。
+        //
+        // 触发条件比想象中窄：macOS/多数 Linux 上 `dirs::home_dir()` 在 `$HOME`
+        // 未设时会回退到 getpwuid（实测去掉 HOME 仍返回 /Users/<user>）。
+        // 但该回退同样可能失败——容器里没有 passwd 条目、或服务账户无 home。
+        // 那种环境下 panic 会让整个切换崩在半途，而不是干净地报错。
+        let home =
+            dirs::home_dir().ok_or_else(|| anyhow::anyhow!("无法定位用户主目录（HOME 未设置）"))?;
         let config_dir = home.join(".config").join("opencode");
-        Self { config_dir }
+        Ok(Self { config_dir })
     }
 
     fn config_file_path(&self) -> PathBuf {
@@ -130,7 +138,7 @@ impl OpenCodeAdapter {
             .unwrap_or(false);
 
         if !provider_still_used && provider_managed {
-            Self::new().remove_provider(&provider)?;
+            Self::new()?.remove_provider(&provider)?;
         }
 
         let deleted = db.delete_profile(name, crate::models::TargetApp::OpenCode)?;
@@ -288,12 +296,6 @@ impl OpenCodeAdapter {
                 }
             }
         }
-    }
-}
-
-impl Default for OpenCodeAdapter {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

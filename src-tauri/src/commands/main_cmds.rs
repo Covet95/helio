@@ -134,7 +134,7 @@ pub async fn get_local_config_info(target_app: String) -> Result<LocalConfigInfo
     let target = TargetApp::parse(&target_app).ok_or_else(|| unknown_target_app(&target_app))?;
 
     use switch_api::adapters::get_adapter;
-    let adapter = get_adapter(target);
+    let adapter = get_adapter(target)?;
 
     let mut info = LocalConfigInfo {
         mcp_servers: std::collections::HashMap::new(),
@@ -458,7 +458,7 @@ pub struct ConfigBackupInfo {
 pub async fn list_config_backups(target_app: String) -> Result<Vec<ConfigBackupInfo>, AppError> {
     use switch_api::adapters::{backup, get_adapter};
     let target = TargetApp::parse(&target_app).ok_or_else(|| unknown_target_app(&target_app))?;
-    let config_dir = get_adapter(target).config_path();
+    let config_dir = get_adapter(target)?.config_path();
     let config_dir = config_dir
         .parent()
         .map(std::path::Path::to_path_buf)
@@ -487,7 +487,7 @@ pub async fn restore_config_backup(
 ) -> Result<String, AppError> {
     use switch_api::adapters::{backup, get_adapter};
     let target = TargetApp::parse(&target_app).ok_or_else(|| unknown_target_app(&target_app))?;
-    let config_dir = get_adapter(target).config_path();
+    let config_dir = get_adapter(target)?.config_path();
     let config_dir = config_dir
         .parent()
         .map(std::path::Path::to_path_buf)
@@ -702,7 +702,7 @@ mod claude_extract_tests {
             ..Default::default()
         };
 
-        let adapter = ClaudeCodeAdapter::new();
+        let adapter = ClaudeCodeAdapter::new().expect("测试环境应能取到 HOME");
         let merged = adapter.merge_config(&profile, &json!({}));
         let env = merged.get("env").cloned().unwrap();
 

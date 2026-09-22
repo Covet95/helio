@@ -33,7 +33,7 @@ fn fidelity_switch_preserves_user_content_and_drops_stale_fields() {
     std::env::set_var("HOME", home.path());
 
     let result = (|| -> anyhow::Result<()> {
-        let adapter = get_adapter(TargetApp::Codex);
+        let adapter = get_adapter(TargetApp::Codex)?;
         let config_path = adapter.config_path();
         std::fs::create_dir_all(config_path.parent().expect("config dir"))?;
 

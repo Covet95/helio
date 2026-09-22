@@ -29,10 +29,18 @@ pub struct CodexAdapter {
 }
 
 impl CodexAdapter {
-    pub fn new() -> Self {
-        let home = dirs::home_dir().expect("Failed to get home directory");
+    pub fn new() -> Result<Self> {
+        // 不用 `expect`：主目录解析不出来时切换会直接 panic，而这是可恢复的
+        // 环境异常——返回 Err 让命令层报错即可。
+        //
+        // 触发条件比想象中窄：macOS/多数 Linux 上 `dirs::home_dir()` 在 `$HOME`
+        // 未设时会回退到 getpwuid（实测去掉 HOME 仍返回 /Users/<user>）。
+        // 但该回退同样可能失败——容器里没有 passwd 条目、或服务账户无 home。
+        // 那种环境下 panic 会让整个切换崩在半途，而不是干净地报错。
+        let home =
+            dirs::home_dir().ok_or_else(|| anyhow::anyhow!("无法定位用户主目录（HOME 未设置）"))?;
         let config_dir = home.join(".codex");
-        Self { config_dir }
+        Ok(Self { config_dir })
     }
 
     fn config_file_path(&self) -> PathBuf {
@@ -470,12 +478,6 @@ impl CodexAdapter {
                 toml::Value::Table(table)
             }
         })
-    }
-}
-
-impl Default for CodexAdapter {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -1186,6 +1188,11 @@ impl ConfigAdapter for CodexAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 测试用构造：测试环境必有 HOME，取不到就直接失败。
+    fn adapter() -> CodexAdapter {
+        CodexAdapter::new().expect("测试环境应能取到 HOME")
+    }
     use crate::models::CodexProfileFields;
 
     fn sample_profile() -> ApiProfile {
@@ -1201,7 +1208,7 @@ mod tests {
 
     #[test]
     fn test_merge_with_non_object_shared_starts_empty() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         // Guard: null shared config no longer panics; merge starts from empty object.
         let merged = adapter.merge_config(&sample_profile(), &serde_json::Value::Null);
         assert_eq!(merged["model_provider"], "openai-custom");
@@ -1213,7 +1220,7 @@ mod tests {
 
     #[test]
     fn test_verify_merged_config_accepts_valid_merge() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let shared = adapter.extract_shared_config(&serde_json::json!({
             "model_provider": "openai-custom",
             "sandbox_mode": "danger-full-access",
@@ -1232,7 +1239,7 @@ mod tests {
 
     #[test]
     fn test_verify_merged_config_rejects_stripped_config() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let profile = sample_profile();
         // Empty object.
         assert!(adapter
@@ -1435,7 +1442,7 @@ command = "npx"
 
     #[test]
     fn test_extract_shared_removes_api() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let config = serde_json::json!({
             "api_key": "sk-secret",
             "model_provider": "openai",
@@ -1468,7 +1475,7 @@ command = "npx"
 
     #[test]
     fn test_extract_shared_removes_provider_secrets_from_inactive_providers() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let config = serde_json::json!({
             "model_provider": "active",
             "model_providers": {
@@ -1505,7 +1512,7 @@ command = "npx"
 
     #[test]
     fn test_merge_inserts_api() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let shared = serde_json::json!({
             "mcp_servers": {
                 "fs": { "command": "npx" }
@@ -1542,7 +1549,7 @@ command = "npx"
 
     #[test]
     fn test_merge_uses_built_in_amazon_bedrock() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         // 非保留字 provider 原样使用
         let custom = ApiProfile {
             provider: "myproxy".to_string(),
@@ -1593,7 +1600,7 @@ command = "npx"
 
     #[test]
     fn test_merge_applies_codex_model_parameters() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let profile = ApiProfile {
             model: Some("gpt-5.5".to_string()),
             context_1m: Some(true),
@@ -1613,7 +1620,7 @@ command = "npx"
 
     #[test]
     fn test_merge_clears_disabled_codex_model_parameters() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let shared = serde_json::json!({
             "model": "old-model",
             "model_reasoning_effort": "high",
@@ -1634,7 +1641,7 @@ command = "npx"
 
     #[test]
     fn test_merge_normalizes_legacy_auth_fields() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         // 已有 provider 用 responses，profile 的 requires_openai_auth=false 被应用，
         // 历史遗留的 wire_api="chat" 自愈为 responses（chat 已被官方删除）。
         let shared = serde_json::json!({
@@ -1671,7 +1678,7 @@ command = "npx"
 
     #[test]
     fn test_merge_uses_provider_env_key_and_preserves_bearer() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let profile = ApiProfile {
             provider: "myproxy".to_string(),
             codex: CodexProfileFields {
@@ -1699,7 +1706,7 @@ command = "npx"
 
     #[test]
     fn test_merge_writes_standalone_web_search_only_when_enabled() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let enabled = ApiProfile {
             provider: "myproxy".into(),
             codex: CodexProfileFields {
@@ -1733,7 +1740,7 @@ command = "npx"
 
     #[test]
     fn test_validate_rejects_unsupported_reasoning_levels() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let profile = ApiProfile {
             codex: CodexProfileFields {
                 reasoning_effort: Some("ultra".into()),
@@ -1780,7 +1787,7 @@ command = "npx"
 
     #[test]
     fn test_switch_preserves_unrelated_provider_exactly() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let current = serde_json::json!({
             "model_provider": "provider-a",
             "model_providers": {
@@ -1805,7 +1812,7 @@ command = "npx"
 
     #[test]
     fn test_merge_applies_top_level_codex_params() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let profile = ApiProfile {
             codex: CodexProfileFields {
                 service_tier: Some("fast".to_string()),
@@ -1821,7 +1828,7 @@ command = "npx"
 
     #[test]
     fn test_merge_clears_disabled_top_level_codex_params() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let shared = serde_json::json!({
             "model_thinking_enabled": true,
             "service_tier": "fast",
@@ -1836,7 +1843,7 @@ command = "npx"
 
     #[test]
     fn test_merge_preserves_existing_provider_protocol() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         // 已有 custom provider，带 wire_api / requires_openai_auth
         let shared = serde_json::json!({
             "model_providers": {
@@ -1871,7 +1878,7 @@ command = "npx"
 
     #[test]
     fn test_merge_fills_missing_openai_auth_on_existing_provider() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let shared = serde_json::json!({
             "model_providers": {
                 "custom": {
@@ -2295,7 +2302,7 @@ command = "npx"
 
     #[test]
     fn test_validate_rejects_removed_chat_wire() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let profile = ApiProfile {
             codex: CodexProfileFields {
                 wire_api: Some("chat".to_string()),
@@ -2318,7 +2325,7 @@ command = "npx"
 
     #[test]
     fn test_validate_rejects_bad_tiers_and_summaries() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         for codex in [
             CodexProfileFields {
                 service_tier: Some("ultra".into()),
@@ -2353,7 +2360,7 @@ command = "npx"
 
     #[test]
     fn test_merge_bearer_only_defaults_openai_auth_false() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let profile = ApiProfile {
             provider: "myproxy".to_string(),
             codex: CodexProfileFields {
@@ -2377,7 +2384,7 @@ command = "npx"
 
     #[test]
     fn test_merge_command_auth_writes_auth_table() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let profile = ApiProfile {
             provider: "myproxy".to_string(),
             codex: CodexProfileFields {
@@ -2409,7 +2416,7 @@ command = "npx"
 
     #[test]
     fn test_validate_rejects_auth_command_conflicts() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         for codex in [
             CodexProfileFields {
                 auth_command: Some("cmd".into()),
@@ -2437,7 +2444,7 @@ command = "npx"
 
     #[test]
     fn test_merge_writes_summary_and_verbosity_without_clearing_unset() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let profile = ApiProfile {
             codex: CodexProfileFields {
                 reasoning_summary: Some("concise".to_string()),
@@ -2462,7 +2469,7 @@ command = "npx"
 
     #[test]
     fn test_merge_context_none_preserves_existing_window() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let shared = serde_json::json!({
             "model_context_window": 128000,
             "model_auto_compact_token_limit": 100000,
@@ -2482,7 +2489,7 @@ command = "npx"
 
     #[test]
     fn test_merge_clears_cli_auth_store_when_env_key() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let shared = serde_json::json!({ "cli_auth_credentials_store": "file" });
         let profile = ApiProfile {
             provider: "myproxy".to_string(),
