@@ -10,10 +10,10 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { TargetApp } from '@/types';
-import { buildImportPayload, friendlyImportError, type Scanned } from './importMapping';
+import { buildImportPayload, friendlyImportError, type ScannedApi } from './importMapping';
 
 /** 造一份「每个字段都有值」的扫描结果。 */
-function scanned(overrides: Partial<Scanned> = {}): Scanned {
+function scanned(overrides: Partial<ScannedApi> = {}): ScannedApi {
   return {
     found: true,
     api_url: 'https://x.example/v1',

@@ -8,11 +8,13 @@
  * 抽成纯函数后可以逐分支单测——它们同时是给用户看的文案，出错就是误导。
  */
 
-/** 页面底部的反馈条内容。 */
-export interface Feedback {
-  text: string;
-  kind: 'success' | 'error' | 'info';
-}
+/**
+ * 页面底部的反馈条内容。
+ *
+ * 形状定义在 `types/`（`ImportPage` 也用同一个）；这里 re-export 保持
+ * 现有 `from './exportMessages'` 的 import 不用改。
+ */
+export type { Feedback } from '@/types';
 
 /** 取消操作时的统一提示。 */
 export function cancelledMessage(action: '导出' | '导入'): string {

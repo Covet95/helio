@@ -288,3 +288,15 @@ export interface AppError {
   message: string;
   detail?: string;
 }
+
+/**
+ * 页面顶部/底部的结果反馈条。
+ *
+ * `kind` 是 `AlertTone` 的子集——反馈条只用这三种语气（`warning` 留给
+ * 静态提示，不作为操作结果）。此前 `ImportPage` 与 `exportMessages` 各写了
+ * 一遍同样的形状。
+ */
+export interface Feedback {
+  text: string;
+  kind: 'success' | 'error' | 'info';
+}

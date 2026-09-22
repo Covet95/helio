@@ -9,13 +9,11 @@ import {
   Search, FileDown, KeyRound, Boxes, FileWarning,
 } from 'lucide-react';
 import { SUPPORTED_TOOLS } from '../types';
-import type { TargetApp } from '../types';
+import type { Feedback, TargetApp } from '../types';
 import { tauriApi, type CcSwitchProvider } from '../lib/tauri';
 import { AppSelector } from './profiles/helpers';
 import { cn, humanizeError, maskApiKey } from '../lib/utils';
-import { buildImportPayload, friendlyImportError, type Scanned } from './importMapping';
-
-type Feedback = { text: string; kind: 'success' | 'error' | 'info' };
+import { buildImportPayload, friendlyImportError, type ScannedApi } from './importMapping';
 
 export default function ImportPage() {
   const tool = useStore((state) => state.selectedTool);
@@ -28,7 +26,7 @@ function ImportToolPage({ tool, onToolChange }: { tool: TargetApp; onToolChange:
   const [importing, setImporting] = useState(false);
   const importingRef = useRef(false);
   const [scanning, setScanning] = useState(false);
-  const [api, setApi] = useState<Scanned | null>(null);
+  const [api, setApi] = useState<ScannedApi | null>(null);
   const [name, setName] = useState('');
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [ccProviders, setCcProviders] = useState<CcSwitchProvider[] | null>(null);

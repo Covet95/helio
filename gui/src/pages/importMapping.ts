@@ -12,7 +12,7 @@
 import type { OpenCodeModelConfig, TargetApp } from '@/types';
 
 /** `scan_local_api` 的返回形状（与 Rust 侧 `ScannedApi` 对应）。 */
-export interface Scanned {
+export interface ScannedApi {
   found: boolean;
   api_url: string;
   api_key: string;
@@ -99,7 +99,7 @@ const PASSTHROUGH = [
  * - 其余 → 全工具透传
  */
 export function buildImportPayload(
-  scanned: Scanned,
+  scanned: ScannedApi,
   tool: TargetApp,
   name: string,
 ): ImportPayload {
