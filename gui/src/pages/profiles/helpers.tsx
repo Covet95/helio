@@ -66,6 +66,53 @@ export function IconBtn({ children, label, danger, onClick, disabled }: { childr
   );
 }
 
+/** 协议模式的三个取值，Hermes / OpenClaw / Codex 三处共用。 */
+export const API_MODE_OPTIONS = [
+  { value: 'chat_completions', label: 'Chat' },
+  { value: 'anthropic_messages', label: 'Anthropic' },
+  { value: 'codex_responses', label: 'Responses' },
+] as const;
+
+/**
+ * 协议模式选择器。
+ *
+ * 这段按钮组在 `ProfileFormModal` 里逐字重复了三遍（Hermes / OpenClaw / Codex
+ * 各自的模型参数区），只有周围的标题与说明文字不同——所以抽成组件、把差异
+ * 留给调用方。
+ *
+ * 空值与**未知取值**都回落到 `chat_completions`：与后端默认一致。
+ * 原先只兜了空值，遇到历史脏数据（例如旧的 `openai-responses` 拼法）会
+ * 三个按钮全不高亮，用户看不出当前是什么模式。
+ */
+export function ApiModeSelector({
+  value,
+  onChange,
+}: {
+  value?: string;
+  onChange: (value: string) => void;
+}) {
+  const known = API_MODE_OPTIONS.some((option) => option.value === value);
+  const selected = known ? value : 'chat_completions';
+  return (
+    <div className="flex gap-1.5">
+      {API_MODE_OPTIONS.map((option) => (
+        <button
+          key={option.value}
+          type="button"
+          onClick={() => onChange(option.value)}
+          className={`flex-1 rounded-md border px-2 py-1.5 text-[12px] font-medium transition-all ${
+            selected === option.value
+              ? 'border-accent bg-accent/8 text-accent'
+              : 'border-line text-ink-dim hover:border-line-strong'
+          }`}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export function providerTint(provider: string): string {
   const p = provider.toLowerCase();
   if (p.includes('anthropic')) return '#8A5A44';

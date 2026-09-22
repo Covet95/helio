@@ -20,7 +20,7 @@ import {
   contextPreviewLine,
   type ContextMode,
 } from '../../lib/contextWindow';
-import { emptyProfileForTool } from './helpers';
+import { ApiModeSelector, emptyProfileForTool } from './helpers';
 import {
   ensureKeyPool,
   newKeyId,
@@ -1255,26 +1255,10 @@ export function ProfileModal({
                   <div className="text-[12px] font-semibold text-ink-dim">Hermes 模型参数</div>
                   <div>
                     <span className="mb-1.5 block text-[12px] font-medium text-ink-dim">协议模式 (api_mode)</span>
-                    <div className="flex gap-1.5">
-                      {[
-                        { value: 'chat_completions', label: 'Chat' },
-                        { value: 'anthropic_messages', label: 'Anthropic' },
-                        { value: 'codex_responses', label: 'Responses' },
-                      ].map((w) => (
-                        <button
-                          key={w.value}
-                          type="button"
-                          onClick={() => setForm((f) => ({ ...f, api_mode: w.value }))}
-                          className={`flex-1 rounded-md border px-2 py-1.5 text-[12px] font-medium transition-all ${
-                            (form.api_mode || 'chat_completions') === w.value
-                              ? 'border-accent bg-accent/8 text-accent'
-                              : 'border-line text-ink-dim hover:border-line-strong'
-                          }`}
-                        >
-                          {w.label}
-                        </button>
-                      ))}
-                    </div>
+                    <ApiModeSelector
+                      value={form.api_mode}
+                      onChange={(api_mode) => setForm((f) => ({ ...f, api_mode }))}
+                    />
                     <div className="mt-1 text-[11px] text-ink-faint">
                       写入 <code className="font-mono">model.api_mode</code> 与{' '}
                       <code className="font-mono">custom_providers[].api_mode</code>
@@ -1322,26 +1306,10 @@ export function ProfileModal({
                   <div className="text-[12px] font-semibold text-ink-dim">OpenClaw 模型参数</div>
                   <div>
                     <span className="mb-1.5 block text-[12px] font-medium text-ink-dim">协议模式 (api)</span>
-                    <div className="flex gap-1.5">
-                      {[
-                        { value: 'chat_completions', label: 'Chat' },
-                        { value: 'anthropic_messages', label: 'Anthropic' },
-                        { value: 'codex_responses', label: 'Responses' },
-                      ].map((w) => (
-                        <button
-                          key={w.value}
-                          type="button"
-                          onClick={() => setForm((f) => ({ ...f, api_mode: w.value }))}
-                          className={`flex-1 rounded-md border px-2 py-1.5 text-[12px] font-medium transition-all ${
-                            (form.api_mode || 'chat_completions') === w.value
-                              ? 'border-accent bg-accent/8 text-accent'
-                              : 'border-line text-ink-dim hover:border-line-strong'
-                          }`}
-                        >
-                          {w.label}
-                        </button>
-                      ))}
-                    </div>
+                    <ApiModeSelector
+                      value={form.api_mode}
+                      onChange={(api_mode) => setForm((f) => ({ ...f, api_mode }))}
+                    />
                     <div className="mt-1 text-[11px] text-ink-faint">
                       写入 <code className="font-mono">models.providers.&lt;id&gt;.api</code>
                       。Provider 填 provider id（如 cpa）；primary ={' '}
