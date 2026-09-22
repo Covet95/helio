@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { Alert } from '@/components/common/Alert';
 import { Button } from '../components/common/Button';
 import { Spinner } from '../components/common/Spinner';
 import { PageHeader } from '../components/common/PageHeader';
@@ -90,10 +91,12 @@ function ToolConfigPage({ targetApp, onToolChange }: { targetApp: TargetApp; onT
         </div>
 
         {error && (
-          <div role="alert" className="mb-3 flex items-center gap-2 rounded-md border border-danger/30 bg-danger/8 px-3 py-2 text-[13px] text-danger">
-            <AlertCircle size={15} className="shrink-0" />
-            <span className="min-w-0 flex-1 break-words">{error}</span>
-          </div>
+          <Alert tone="error" className="mb-3">
+            <span className="flex items-center gap-2">
+              <AlertCircle size={15} className="shrink-0" />
+              <span className="min-w-0 flex-1 break-words">{error}</span>
+            </span>
+          </Alert>
         )}
 
         {loading && !info ? (
@@ -378,19 +381,24 @@ function CodexBehaviorSettings({
         </div>
 
         {dangerCombo && (
-          <div className="flex items-start gap-2 rounded-md border border-danger/30 bg-danger/8 px-3 py-2 text-[12px] text-danger">
-            <AlertCircle size={14} className="mt-0.5 shrink-0" />
-            <span className="flex-1">
-              approval_policy=never 与 sandbox_mode=danger-full-access 组合在官方 Codex 会触发回退，请确认这是你想要的设置。
+          <Alert tone="error">
+            <span className="flex items-start gap-2">
+              <AlertCircle size={14} className="mt-0.5 shrink-0" />
+              <span className="flex-1">
+                approval_policy=never 与 sandbox_mode=danger-full-access
+                组合在官方 Codex 会触发回退，请确认这是你想要的设置。
+              </span>
             </span>
-          </div>
+          </Alert>
         )}
 
         {err && (
-          <div className="flex items-start gap-2 rounded-md border border-danger/30 bg-danger/8 px-3 py-2 text-[12px] text-danger">
-            <AlertCircle size={14} className="mt-0.5 shrink-0" />
-            <span className="flex-1 whitespace-pre-wrap break-words">{err}</span>
-          </div>
+          <Alert tone="error">
+            <span className="flex items-start gap-2">
+              <AlertCircle size={14} className="mt-0.5 shrink-0" />
+              <span className="flex-1 whitespace-pre-wrap break-words">{err}</span>
+            </span>
+          </Alert>
         )}
 
         <div className="text-[11px] text-ink-faint">
@@ -466,16 +474,20 @@ function ConfigBackups({ targetApp, onRestored }: { targetApp: TargetApp; onRest
       </div>
       <div className="p-4">
         {msg && (
-          <div className="mb-3 flex items-center gap-2 rounded-md border border-ok/30 bg-ok/8 px-3 py-2 text-[12px] text-ok">
-            <CheckCircle2 size={14} className="shrink-0" />
-            <span className="flex-1">{msg}</span>
-          </div>
+          <Alert tone="success" className="mb-3">
+            <span className="flex items-center gap-2">
+              <CheckCircle2 size={14} className="shrink-0" />
+              <span className="flex-1">{msg}</span>
+            </span>
+          </Alert>
         )}
         {err && (
-          <div className="mb-3 flex items-center gap-2 rounded-md border border-danger/30 bg-danger/8 px-3 py-2 text-[12px] text-danger">
-            <AlertCircle size={14} className="shrink-0" />
-            <span className="flex-1 whitespace-pre-wrap break-words">{err}</span>
-          </div>
+          <Alert tone="error" className="mb-3">
+            <span className="flex items-center gap-2">
+              <AlertCircle size={14} className="shrink-0" />
+              <span className="flex-1 whitespace-pre-wrap break-words">{err}</span>
+            </span>
+          </Alert>
         )}
         {backups && backups.length === 0 ? (
           <Empty>暂无备份（每次切换/保存配置时自动生成，保留最近 10 个）</Empty>
@@ -608,10 +620,12 @@ function CodexConfigEditor({ onSaved }: { onSaved: () => void }) {
               className="h-96 w-full resize-y overflow-auto rounded-md border border-line bg-surface px-3 py-2 font-mono text-[12px] leading-relaxed text-ink focus:border-accent focus:outline-none"
             />
             {err && (
-              <div className="flex items-start gap-2 rounded-md border border-danger/30 bg-danger/8 px-3 py-2 text-[12px] text-danger">
-                <AlertCircle size={14} className="mt-0.5 shrink-0" />
-                <span className="flex-1 whitespace-pre-wrap break-words font-mono">{err}</span>
-              </div>
+              <Alert tone="error">
+                <span className="flex items-start gap-2">
+                  <AlertCircle size={14} className="mt-0.5 shrink-0" />
+                  <span className="flex-1 whitespace-pre-wrap break-words font-mono">{err}</span>
+                </span>
+              </Alert>
             )}
             <div className="flex flex-wrap items-center gap-2">
               <Button onClick={save} disabled={saving}>

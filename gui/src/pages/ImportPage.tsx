@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react';
+import { Alert } from '@/components/common/Alert';
 import { useStore } from '../store';
 import { Button } from '../components/common/Button';
 import { Spinner } from '../components/common/Spinner';
@@ -249,11 +250,10 @@ function ImportToolPage({ tool, onToolChange }: { tool: TargetApp; onToolChange:
         </section>}
 
         {feedback && (
-          <div role={feedback.kind === 'error' ? 'alert' : 'status'} className={`break-words rounded-md border px-3 py-2 text-[13px] animate-fade-up ${
-            feedback.kind === 'success' ? 'border-ok/30 bg-ok/10 text-ok'
-            : feedback.kind === 'error' ? 'border-danger/30 bg-danger/10 text-danger'
-            : 'border-line bg-surface text-ink-dim'
-          }`}>{feedback.text}</div>
+          <Alert
+            tone={feedback.kind === 'success' ? 'success' : feedback.kind === 'error' ? 'error' : 'info'}
+            className="animate-fade-up"
+          >{feedback.text}</Alert>
         )}
 
         {scanning && <div className="grid place-items-center py-16"><Spinner size="lg" /></div>}

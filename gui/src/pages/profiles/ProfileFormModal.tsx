@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react';
+import { Alert } from '@/components/common/Alert';
 import type {
   ApiKeyEntry,
   ApiProfile,
@@ -364,9 +365,7 @@ export function ProfileModal({
       >
         <fieldset disabled={saving} className="min-w-0 space-y-4">
           {formErr && (
-            <div role="alert" className="break-words rounded-md border border-danger/30 bg-danger/8 px-3 py-2 text-[12.5px] text-danger">
-              {formErr}
-            </div>
+            <Alert tone="error">{formErr}</Alert>
           )}
           {!initialProfile && (
             <div>

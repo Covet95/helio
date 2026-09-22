@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
+import { Alert } from '@/components/common/Alert';
 import { PageHeader } from '../components/common/PageHeader';
 import { Button } from '../components/common/Button';
 import { Spinner } from '../components/common/Spinner';
@@ -144,7 +145,7 @@ export default function HistoryPage() {
 
       <div className="max-w-5xl px-4 py-4 sm:px-7 sm:py-5">
         {error && (
-          <div className="mb-3 rounded-md border border-danger/30 bg-danger/8 px-3 py-2 text-[12.5px] text-danger">{error}</div>
+          <Alert tone="error" className="mb-3">{error}</Alert>
         )}
         <div className="mb-3 flex flex-wrap items-center gap-2">
           <div className="flex max-w-full shrink-0 flex-wrap rounded-md border border-line bg-surface p-0.5">

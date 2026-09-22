@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Alert } from '@/components/common/Alert';
 import { Button } from '../components/common/Button';
 import { PageHeader } from '../components/common/PageHeader';
 import { Download, Upload, FolderCog } from 'lucide-react';
@@ -177,13 +178,12 @@ export default function ExportPage() {
 
       <div className="max-w-3xl px-4 py-4 sm:px-7 sm:py-5">
         {feedback && (
-          <div className={`mb-4 rounded-md border px-3 py-2 text-[13px] ${
-            feedback.kind === 'success' ? 'border-ok/30 bg-ok/10 text-ok'
-            : feedback.kind === 'error' ? 'border-danger/30 bg-danger/10 text-danger'
-            : 'border-line bg-surface text-ink-dim'
-          }`}>
+          <Alert
+            tone={feedback.kind === 'success' ? 'success' : feedback.kind === 'error' ? 'error' : 'info'}
+            className="mb-4"
+          >
             {feedback.text}
-          </div>
+          </Alert>
         )}
 
         <div className="overflow-hidden rounded-lg border border-line bg-card">

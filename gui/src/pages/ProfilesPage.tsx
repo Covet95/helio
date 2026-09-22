@@ -1,4 +1,5 @@
 import { lazy, Suspense, useState, useEffect, useMemo, useRef } from 'react';
+import { Alert } from '@/components/common/Alert';
 import { useNavigate } from 'react-router-dom';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '../store';
@@ -322,17 +323,15 @@ export default function ProfilesPage() {
         )}
 
         {feedback && (
-          <div role={feedback.kind === 'error' ? 'alert' : 'status'} className={cn(
-            'mb-3 rounded-md border px-3 py-2 text-[13px]',
-            (feedback?.kind === 'success') ? 'border-ok/30 bg-ok/8 text-ok'
-              : (feedback?.kind === 'info') ? 'border-line bg-surface text-ink-dim'
-              : 'border-danger/30 bg-danger/8 text-danger',
-          )}>
-            <div className="flex items-start justify-between gap-2">
-              <span className="min-w-0 break-words">{feedback.text}</span>
+          <Alert
+            tone={feedback.kind === 'success' ? 'success' : feedback.kind === 'info' ? 'info' : 'error'}
+            className="mb-3"
+            action={
               <button type="button" className="icon-button" title="关闭提示" aria-label="关闭提示" onClick={() => setFeedback(null)}><X size={14} /></button>
-            </div>
-          </div>
+            }
+          >
+            {feedback.text}
+          </Alert>
         )}
 
         {loadingProfiles && profiles.length === 0 ? (

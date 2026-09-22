@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react';
+import { Alert } from '@/components/common/Alert';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '../store';
 import { Button } from '../components/common/Button';
@@ -90,9 +91,7 @@ export default function StatusPage() {
 
       <div className="max-w-5xl px-4 py-4 sm:px-7 sm:py-5">
         {probeErr && (
-          <div role="alert" className="mb-3 break-words rounded-md border border-danger/30 bg-danger/8 px-3 py-2 text-[12.5px] text-danger">
-            {probeErr}
-          </div>
+          <Alert tone="error" className="mb-3">{probeErr}</Alert>
         )}
         {loadingStatus && !status ? (
           <div className="grid place-items-center py-32"><Spinner size="lg" /></div>
