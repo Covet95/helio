@@ -943,32 +943,14 @@ fn validate_and_write_codex_config_raw(
     Ok(parsed)
 }
 
-/// 在完整 config（JSON）上对若干顶层字段做最小改动：
-/// - value 非 null → set 该顶层键（覆盖旧值）
-/// - value 为 null → remove 该顶层键
-///
-/// 其余字段一律不动。纯函数，便于单测。
-fn apply_field_updates(config: &mut serde_json::Value, fields: &serde_json::Value) {
-    let updates = match fields.as_object() {
-        Some(m) => m,
-        None => return,
-    };
-    let obj = match config.as_object_mut() {
-        Some(o) => o,
-        None => return,
-    };
-    for (key, value) in updates {
-        if value.is_null() {
-            obj.remove(key);
-        } else {
-            obj.insert(key.clone(), value.clone());
-        }
-    }
-}
-
 /// 编辑 Codex 全局行为字段（approval_policy / sandbox_mode 等顶层键）并写回
-/// ~/.codex/config.toml。复用磁盘写路径：读 live config → 在完整配置上做最小
-/// 改动 → 转回 TOML 文本 → 校验+备份+原子写 → 同步 DB。绝不因改一个字段丢失其他字段。
+/// ~/.codex/config.toml。
+///
+/// 走**保留格式**的编辑路径：直接在 live 文本上改这几个顶层键，其余内容
+/// （注释、键序、空行、子表）一律不动。早期实现是「TOML → JSON → 改字段 →
+/// 全量重新序列化」，会把用户手写的注释和键序全部洗掉。
+///
+/// 与原始文本编辑共用同一事务路径（校验 + 备份 + 原子写 + 同步 active Profile）。
 #[tauri::command]
 pub async fn update_codex_fields(
     fields: serde_json::Value,
@@ -976,20 +958,22 @@ pub async fn update_codex_fields(
 ) -> Result<(), AppError> {
     use switch_api::adapters::get_adapter;
     let adapter = get_adapter(TargetApp::Codex);
+    let path = adapter.config_path();
 
-    // 读 live config（不存在则为空对象），在完整配置上做最小改动。
-    let mut config = adapter
-        .read_config()
-        .map_err(|e| AppError::from(e).with_context("读取 config.toml 失败"))?;
-    apply_field_updates(&mut config, &fields);
+    let live_text = if path.exists() {
+        std::fs::read_to_string(&path)
+            .map_err(|e| AppError::from(e).with_context("读取 config.toml 失败"))?
+    } else {
+        String::new()
+    };
 
-    // JSON → TOML 文本。toml::Value::try_from 走 Serialize，自动处理表/值排序。
-    let toml_value = toml::Value::try_from(&config)
-        .map_err(|e| AppError::internal(format!("转换为 TOML 失败：{e}")))?;
-    let content = toml::to_string_pretty(&toml_value)
-        .map_err(|e| AppError::internal(format!("序列化 TOML 失败：{e}")))?;
+    let updates = fields
+        .as_object()
+        .ok_or_else(|| AppError::invalid_input("字段更新必须是一个对象"))?;
 
-    // 与原始文本编辑使用同一事务路径：字段编辑也必须同步 active Profile。
+    let content = switch_api::doc::toml::apply_top_level_updates(&live_text, updates)
+        .map_err(|e| AppError::invalid_input(format!("更新 config.toml 失败：{e}")))?;
+
     persist_codex_raw_config(&content, &state)
 }
 
@@ -2926,82 +2910,126 @@ mod codex_raw_config_tests {
     }
 }
 
+/// `update_codex_fields` 的字段编辑语义基线。
+///
+/// 这些断言原先针对 `apply_field_updates`（在 JSON 值上改字段，再由调用方全量
+/// 重新序列化）。改为保真路径后语义不变，但**额外**保证：注释、键序、空行与
+/// 未受管子表原样存活——旧实现会把它们全部洗掉。
 #[cfg(test)]
 mod codex_field_update_tests {
-    use super::apply_field_updates;
     use serde_json::json;
+    use switch_api::doc::toml::apply_top_level_updates;
+
+    /// 把 JSON 对象转成 `apply_top_level_updates` 需要的 Map。
+    fn updates(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        value.as_object().expect("updates 必须是对象").clone()
+    }
 
     #[test]
     fn test_set_new_field() {
-        let mut config = json!({ "model_provider": "openai" });
-        apply_field_updates(&mut config, &json!({ "approval_policy": "never" }));
-        assert_eq!(config["approval_policy"], "never");
+        let live = "model_provider = \"openai\"\n";
+        let result = apply_top_level_updates(live, &updates(json!({ "approval_policy": "never" })))
+            .unwrap();
+        assert!(result.contains("approval_policy = \"never\""), "{result}");
         // 原有字段不受影响
-        assert_eq!(config["model_provider"], "openai");
+        assert!(result.contains("model_provider = \"openai\""), "{result}");
     }
 
     #[test]
     fn test_override_existing_field() {
-        let mut config = json!({ "sandbox_mode": "read-only" });
-        apply_field_updates(&mut config, &json!({ "sandbox_mode": "workspace-write" }));
-        assert_eq!(config["sandbox_mode"], "workspace-write");
+        let live = "sandbox_mode = \"read-only\"\n";
+        let result =
+            apply_top_level_updates(live, &updates(json!({ "sandbox_mode": "workspace-write" })))
+                .unwrap();
+        assert!(result.contains("sandbox_mode = \"workspace-write\""), "{result}");
+        assert!(!result.contains("read-only"), "{result}");
     }
 
     #[test]
     fn test_null_removes_field() {
-        let mut config = json!({ "service_tier": "fast", "model_provider": "openai" });
-        apply_field_updates(&mut config, &json!({ "service_tier": null }));
-        assert!(config.get("service_tier").is_none());
+        let live = "service_tier = \"fast\"\nmodel_provider = \"openai\"\n";
+        let result = apply_top_level_updates(live, &updates(json!({ "service_tier": null }))).unwrap();
+        assert!(!result.contains("service_tier"), "null 应删除该键:\n{result}");
         // 其他字段保留
-        assert_eq!(config["model_provider"], "openai");
+        assert!(result.contains("model_provider = \"openai\""), "{result}");
     }
 
     #[test]
     fn test_does_not_touch_other_fields() {
-        let mut config = json!({
-            "model_provider": "openai",
-            "model_providers": { "openai": { "base_url": "https://api.com" } },
-            "mcp_servers": { "fs": { "command": "npx" } },
-            "approval_policy": "on-request",
-        });
-        apply_field_updates(
-            &mut config,
-            &json!({
+        let live = "\
+model_provider = \"openai\"
+approval_policy = \"on-request\"
+
+[model_providers.openai]
+base_url = \"https://api.com\"
+
+[mcp_servers.fs]
+command = \"npx\"
+";
+        let result = apply_top_level_updates(
+            live,
+            &updates(json!({
                 "approval_policy": "untrusted",
                 "model_auto_compact_token_limit": 200000,
                 "disable_response_storage": true,
-            }),
-        );
+            })),
+        )
+        .unwrap();
+
         // 改了/加了指定字段
-        assert_eq!(config["approval_policy"], "untrusted");
-        assert_eq!(config["model_auto_compact_token_limit"], 200000);
-        assert_eq!(config["disable_response_storage"], true);
+        assert!(result.contains("approval_policy = \"untrusted\""), "{result}");
+        assert!(result.contains("model_auto_compact_token_limit = 200000"), "{result}");
+        assert!(result.contains("disable_response_storage = true"), "{result}");
         // 完整保留嵌套结构
-        assert_eq!(
-            config["model_providers"]["openai"]["base_url"],
-            "https://api.com"
-        );
-        assert_eq!(config["mcp_servers"]["fs"]["command"], "npx");
-        assert_eq!(config["model_provider"], "openai");
+        assert!(result.contains("[model_providers.openai]"), "{result}");
+        assert!(result.contains("base_url = \"https://api.com\""), "{result}");
+        assert!(result.contains("[mcp_servers.fs]"), "{result}");
+        assert!(result.contains("command = \"npx\""), "{result}");
+        assert!(result.contains("model_provider = \"openai\""), "{result}");
     }
 
     #[test]
     fn test_mixed_set_and_remove() {
-        let mut config = json!({
-            "personality": "friendly",
-            "enable_workflows": true,
-        });
-        apply_field_updates(
-            &mut config,
-            &json!({
+        let live = "personality = \"friendly\"\nenable_workflows = true\n";
+        let result = apply_top_level_updates(
+            live,
+            &updates(json!({
                 "personality": null,
                 "model_reasoning_effort": "high",
                 "enable_workflows": false,
-            }),
-        );
-        assert!(config.get("personality").is_none());
-        assert_eq!(config["model_reasoning_effort"], "high");
-        assert_eq!(config["enable_workflows"], false);
+            })),
+        )
+        .unwrap();
+
+        assert!(!result.contains("personality"), "{result}");
+        assert!(result.contains("model_reasoning_effort = \"high\""), "{result}");
+        assert!(result.contains("enable_workflows = false"), "{result}");
+    }
+
+    /// 回归：旧实现（JSON 往返 + 全量序列化）会洗掉注释与键序，新实现必须保住。
+    #[test]
+    fn test_preserves_comments_and_key_order() {
+        let live = "\
+# 我的 Codex 配置
+model = \"gpt-5\"     # 行尾注释
+approval_policy = \"never\"
+
+# 下面是中转配置
+[model_providers.custom]
+base_url = \"https://x.example\"
+";
+        let result =
+            apply_top_level_updates(live, &updates(json!({ "approval_policy": "on-request" })))
+                .unwrap();
+
+        assert!(result.contains("# 我的 Codex 配置"), "顶层注释应保留:\n{result}");
+        assert!(result.contains("# 行尾注释"), "行尾注释应保留:\n{result}");
+        assert!(result.contains("# 下面是中转配置"), "子表前注释应保留:\n{result}");
+        assert!(result.contains("approval_policy = \"on-request\""), "{result}");
+
+        let model_pos = result.find("model =").expect("model 应存在");
+        let policy_pos = result.find("approval_policy").expect("approval_policy 应存在");
+        assert!(model_pos < policy_pos, "键序应保留:\n{result}");
     }
 }
 
