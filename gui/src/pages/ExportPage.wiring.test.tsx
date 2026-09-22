@@ -197,3 +197,36 @@ describe('ExportPage — 导入接线', () => {
     expect(api.importDatabase).not.toHaveBeenCalled();
   });
 });
+
+describe('ExportPage — 并发防护', () => {
+  it('一个传输进行中时，其余按钮全部禁用', async () => {
+    // 便携备份挂起：模拟正在写一个大归档。
+    api.exportPortableBackup.mockImplementation(() => new Promise(() => {}));
+    await renderPage();
+    fireEvent.click(rowButton('导出便携备份', '导出'));
+    await waitFor(() => expect(api.exportPortableBackup).toHaveBeenCalled());
+
+    for (const [title, label] of [
+      ['导出便携备份', '导出'],
+      ['恢复便携备份', '恢复'],
+      ['导出数据库', '导出'],
+      ['导入数据库', '导入'],
+      ['导出 Skills', '导出'],
+      ['导入 Skills', '导入'],
+    ] as const) {
+      expect(rowButton(title, label).disabled, title).toBe(true);
+    }
+  });
+
+  it('传输结束后按钮恢复可用', async () => {
+    api.exportPortableBackup.mockResolvedValue({
+      path: '/tmp/out.db',
+      skills: { apps: [], total: 0, path: '' },
+    });
+    await renderPage();
+    fireEvent.click(rowButton('导出便携备份', '导出'));
+    await screen.findByText(/Skills 0 个/);
+
+    expect(rowButton('导出数据库', '导出').disabled).toBe(false);
+  });
+});

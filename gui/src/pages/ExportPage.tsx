@@ -33,6 +33,16 @@ export default function ExportPage() {
   const [confirmPortableImport, setConfirmPortableImport] = useState(false);
   const [confirmImport, setConfirmImport] = useState(false);
   const [confirmSkillsImport, setConfirmSkillsImport] = useState(false);
+  /**
+   * 是否有任一传输在进行中。
+   *
+   * 各按钮的 `xxxing` 只禁用自己——便携备份写到一半时，数据库导出按钮仍可点，
+   * 于是两个导出并发跑。它们争的是同一把后端写锁，不会损坏数据，但用户看到
+   * 两个进度同时转、两条反馈互相覆盖，分不清哪个结果对应哪次操作。
+   * 用这个总开关把整组按钮一起锁上。
+   */
+  const busy =
+    portableExporting || portableImporting || exporting || importing || skillsExporting || skillsImporting;
 
   const refreshAppData = async () => {
     try {
@@ -173,13 +183,13 @@ export default function ExportPage() {
             icon={<Download size={20} className="text-accent" />}
             title="导出便携备份"
             meta="推荐 · 数据库 + Skills，换机迁移用这个"
-            button={<Button onClick={handlePortableExport} disabled={portableExporting}><Download size={16} />{portableExporting ? '导出中…' : '导出'}</Button>}
+            button={<Button onClick={handlePortableExport} disabled={busy}><Download size={16} />{portableExporting ? '导出中…' : '导出'}</Button>}
           />
           <ActionRow
             icon={<Upload size={20} className="text-opencode" />}
             title="恢复便携备份"
             meta="推荐 · 校验后恢复数据库、Skills 与激活配置"
-            button={<Button variant="secondary" onClick={() => setConfirmPortableImport(true)} disabled={portableImporting}><Upload size={16} />{portableImporting ? '恢复中…' : '恢复'}</Button>}
+            button={<Button variant="secondary" onClick={() => setConfirmPortableImport(true)} disabled={busy}><Upload size={16} />{portableImporting ? '恢复中…' : '恢复'}</Button>}
           />
         </div>
         <p className="mt-3 text-[12px] leading-relaxed text-ink-faint">
@@ -196,25 +206,25 @@ export default function ExportPage() {
               icon={<Download size={20} className="text-accent" />}
               title="导出数据库"
               meta=".db / .sqlite"
-              button={<Button onClick={handleExport} disabled={exporting}><Download size={16} />{exporting ? '导出中…' : '导出'}</Button>}
+              button={<Button onClick={handleExport} disabled={busy}><Download size={16} />{exporting ? '导出中…' : '导出'}</Button>}
             />
             <ActionRow
               icon={<Upload size={20} className="text-opencode" />}
               title="导入数据库"
               meta="仅接受 Helio 备份 · 覆盖前自动备份"
-              button={<Button variant="secondary" onClick={() => setConfirmImport(true)} disabled={importing}><Upload size={16} />{importing ? '导入中…' : '导入'}</Button>}
+              button={<Button variant="secondary" onClick={() => setConfirmImport(true)} disabled={busy}><Upload size={16} />{importing ? '导入中…' : '导入'}</Button>}
             />
             <ActionRow
               icon={<FolderCog size={20} className="text-accent" />}
               title="导出 Skills"
               meta="全部工具 Skills 目录"
-              button={<Button onClick={handleSkillsExport} disabled={skillsExporting}><Download size={16} />{skillsExporting ? '导出中…' : '导出'}</Button>}
+              button={<Button onClick={handleSkillsExport} disabled={busy}><Download size={16} />{skillsExporting ? '导出中…' : '导出'}</Button>}
             />
             <ActionRow
               icon={<FolderCog size={20} className="text-opencode" />}
               title="导入 Skills"
               meta="tar.gz · 整体校验 · 同名跳过"
-              button={<Button variant="secondary" onClick={() => setConfirmSkillsImport(true)} disabled={skillsImporting}><Upload size={16} />{skillsImporting ? '导入中…' : '导入'}</Button>}
+              button={<Button variant="secondary" onClick={() => setConfirmSkillsImport(true)} disabled={busy}><Upload size={16} />{skillsImporting ? '导入中…' : '导入'}</Button>}
             />
           </div>
         </details>
