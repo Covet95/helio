@@ -1,5 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { ApiProfile, FetchedModel, ModelTestResult, StatusInfo, TargetApp, SessionMeta, PreviewMessage, DeleteResult } from '@/types';
+import type {
+  ApiProfile, DeleteResult, FetchedModel, LocalConfigInfo, ModelTestResult, PreviewMessage,
+  SessionMeta, StatusInfo, TargetApp,
+} from '@/types';
 
 const canUseTauri = () => typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
@@ -126,16 +129,12 @@ export const tauriApi = {
     command<SkillsImportResult>('import_skills', { inputPath }),
 
   getLocalConfigInfo: (targetApp: TargetApp) =>
-    command<{
-      mcp_servers: Record<string, any>;
-      skills: string[];
-      hooks: any;
-      permissions: any;
-    }>('get_local_config_info', { targetApp }, {
+    command<LocalConfigInfo>('get_local_config_info', { targetApp }, {
       mcp_servers: {},
       skills: [],
       hooks: {},
       permissions: {},
+      other: {},
     }),
 
   // 配置备份列表 / 恢复

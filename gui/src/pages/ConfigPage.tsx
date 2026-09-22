@@ -7,24 +7,11 @@ import {
   RefreshCw, Boxes, Sparkles, Webhook, ShieldCheck, ChevronDown, Terminal, Globe, AlertCircle, Layers, FileCog, Save, X, CheckCircle2, SlidersHorizontal, History, RotateCcw,
 } from 'lucide-react';
 import type { TargetApp } from '../types';
+import type { LocalConfigInfo, McpServerConfig } from '../types';
 import { cn, humanizeError } from '../lib/utils';
 import { tauriApi, type ConfigBackupInfo } from '../lib/tauri';
 import { useStore } from '../store';
 import { AppSelector } from './profiles/helpers';
-
-interface McpServerCfg {
-  command?: string;
-  args?: string[];
-  url?: string | null;
-  env?: Record<string, string> | null;
-}
-interface LocalInfo {
-  mcp_servers: Record<string, McpServerCfg>;
-  skills: string[];
-  hooks: Record<string, unknown>;
-  permissions: Record<string, unknown>;
-  other: Record<string, unknown>;
-}
 
 export default function ConfigPage() {
   const targetApp = useStore((state) => state.selectedTool);
@@ -33,7 +20,7 @@ export default function ConfigPage() {
 }
 
 function ToolConfigPage({ targetApp, onToolChange }: { targetApp: TargetApp; onToolChange: (tool: TargetApp) => void }) {
-  const [info, setInfo] = useState<LocalInfo | null>(null);
+  const [info, setInfo] = useState<LocalConfigInfo | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [showRaw, setShowRaw] = useState(false);
@@ -47,7 +34,7 @@ function ToolConfigPage({ targetApp, onToolChange }: { targetApp: TargetApp; onT
     setLoading(true);
     setError('');
     try {
-      const result = (await tauriApi.getLocalConfigInfo(targetApp)) as LocalInfo;
+      const result = await tauriApi.getLocalConfigInfo(targetApp);
       if (seq === loadSeq.current) setInfo(result);
     } catch (err) {
       if (seq !== loadSeq.current) return;
@@ -670,7 +657,7 @@ function Section({
   );
 }
 
-function McpCard({ name, cfg }: { name: string; cfg: McpServerCfg }) {
+function McpCard({ name, cfg }: { name: string; cfg: McpServerConfig }) {
   const hasUrl = !!cfg.url;
   const cmdLine = [cfg.command, ...(cfg.args || [])].filter(Boolean).join(' ');
   const envCount = cfg.env ? Object.keys(cfg.env).length : 0;
