@@ -286,13 +286,20 @@ mod tests {
         for i in 0..3 {
             let name = format!("config.backup.20260101_000000_00000{i}.toml");
             fs::write(dir.join(&name), b"x").unwrap();
-            let f = fs::File::options()
-                .write(true)
-                .open(dir.join(&name))
+            {
+                let f = fs::File::options()
+                    .write(true)
+                    .open(dir.join(&name))
+                    .unwrap();
+                // mtime 倒序(名字最新的 mtime 最旧)，验证清理按文件名时间而非 mtime
+                f.set_modified(
+                    std::time::UNIX_EPOCH + base + std::time::Duration::from_secs(10 - i),
+                )
                 .unwrap();
-            // mtime 倒序(名字最新的 mtime 最旧)，验证清理按文件名时间而非 mtime
-            f.set_modified(std::time::UNIX_EPOCH + base + std::time::Duration::from_secs(10 - i))
-                .unwrap();
+                // 显式在块内关掉句柄：Windows 不允许删除仍被打开的文件，
+                // 而下面的 cleanup_prefix 要删它们。（POSIX 无此限制，所以
+                // 这个用例此前只在 Windows 上失败。）
+            }
         }
         fs::write(dir.join("auth.backup.20260101_000000_000000.json"), b"x").unwrap();
         cleanup_prefix(&dir, "config.backup.", 2).unwrap();

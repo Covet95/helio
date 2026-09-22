@@ -601,9 +601,16 @@ mod tests {
         })?;
         drop(imported);
 
+        // Windows 不允许替换仍被打开的库文件（os error 32），所以先放掉读者。
+        //
+        // 这**不影响本用例的意图**：它验证的是「陈旧的 -wal 文件不会把新库
+        // 恢复成旧内容」——只要 -wal 文件还在磁盘上、且非空，目的就达到了。
+        // 读者连接只是用来阻止 checkpoint 把 WAL 推进主文件（见 fixture），
+        // 在替换前关掉它，-wal 依然留在原地。
+        drop(reader);
+
         let backup_path = Database::replace_file_from_import(&import_path, &live_path)?
             .expect("替换已存在的库应产生备份");
-        drop(reader);
 
         // 旧实现把陈旧 -wal 留在原地，新库被它"恢复"成替换前的内容。
         let replaced = Database::open(&live_path)?;

@@ -207,9 +207,9 @@ pub fn copy_private(source: &Path, destination: &Path) -> Result<u64> {
 // 平台特有的断言各自加 `#[cfg(unix)]`，模块本身不再按平台排除。
 #[cfg(test)]
 mod tests {
-    use super::{ensure_private_dir, restrict_to_owner};
     #[cfg(unix)]
     use super::{atomic_write_private, copy_private, ensure_private_file, secure_export_file};
+    use super::{ensure_private_dir, restrict_to_owner};
     use anyhow::Result;
     use std::fs;
     #[cfg(unix)]
