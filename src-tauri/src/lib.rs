@@ -73,7 +73,7 @@ pub fn run() {
             commands::main_cmds::export_skills,
             commands::main_cmds::import_skills,
             commands::main_cmds::get_local_config_info,
-            commands::main_cmds::scan_local_api,
+            commands::scan::scan_local_api,
             commands::cc_switch::scan_cc_switch,
             commands::cc_switch::import_cc_switch,
             commands::main_cmds::read_codex_config_raw,

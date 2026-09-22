@@ -7,6 +7,7 @@ pub mod cc_switch;
 pub mod clipboard;
 pub(crate) mod helpers;
 pub mod main_cmds;
+pub mod scan;
 
 pub use main_cmds::AppState;
 /// 错误类型定义在核心 crate（`switch_api::error`），因为错误语义是在那一层
