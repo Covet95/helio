@@ -8,7 +8,6 @@ import { describe, expect, it } from 'vitest';
 import {
   cancelledMessage,
   databaseExportMessage,
-  databaseImportMessage,
   failureMessage,
   portableExportMessage,
   portableImportMessage,
@@ -22,16 +21,20 @@ describe('取消与简单结果', () => {
     expect(cancelledMessage('导入')).toBe('导入已取消');
   });
 
-  it('数据库导入提示包含刷新说明', () => {
-    expect(databaseImportMessage()).toContain('刷新');
-    expect(databaseExportMessage()).toBe('数据库导出成功');
+  it('数据库导出提示带上落盘路径（关掉保存框后唯一可查的地方）', () => {
+    expect(databaseExportMessage('/Users/x/backup.db')).toContain('/Users/x/backup.db');
+  });
+
+  it('数据库导入提示', () => {
+    expect(databaseExportMessage('/tmp/a.db')).toBe('数据库导出成功：/tmp/a.db');
   });
 });
 
 describe('便携备份', () => {
-  it('导出提示带上 Skills 总数', () => {
-    expect(portableExportMessage(0)).toBe('便携备份导出成功：Skills 0 个');
-    expect(portableExportMessage(7)).toContain('7 个');
+  it('导出提示带上 Skills 总数与路径', () => {
+    expect(portableExportMessage(0, '/tmp/b.tar.gz')).toContain('Skills 0 个');
+    expect(portableExportMessage(7, '/tmp/b.tar.gz')).toContain('7 个');
+    expect(portableExportMessage(7, '/tmp/b.tar.gz')).toContain('/tmp/b.tar.gz');
   });
 
   it('恢复提示在两段都为 0 时不留空尾巴', () => {
@@ -69,7 +72,7 @@ describe('便携备份', () => {
 
 describe('Skills 导出', () => {
   it('一个都没有时用 info 语气，不谎报成功', () => {
-    const result = skillsExportMessage({ total: 0, apps: [] });
+    const result = skillsExportMessage({ total: 0, apps: [], path: '/tmp/s.tar.gz' });
     expect(result.kind).toBe('info');
     expect(result.text).toBe('未发现任何 Skills');
   });
@@ -81,14 +84,15 @@ describe('Skills 导出', () => {
         { app: 'claude-code', count: 3 },
         { app: 'codex', count: 2 },
       ],
+      path: '/tmp/s.tar.gz',
     });
     expect(result.kind).toBe('success');
-    expect(result.text).toBe('Skills 导出成功：共 5 个（claude-code 3、codex 2）');
+    expect(result.text).toBe('Skills 导出成功：共 5 个（claude-code 3、codex 2）· /tmp/s.tar.gz');
   });
 
   it('单个应用时不出现多余分隔符', () => {
-    const result = skillsExportMessage({ total: 2, apps: [{ app: 'pi', count: 2 }] });
-    expect(result.text).toBe('Skills 导出成功：共 2 个（pi 2）');
+    const result = skillsExportMessage({ total: 2, apps: [{ app: 'pi', count: 2 }], path: '/tmp/s.tar.gz' });
+    expect(result.text).toBe('Skills 导出成功：共 2 个（pi 2）· /tmp/s.tar.gz');
   });
 });
 

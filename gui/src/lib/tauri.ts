@@ -121,6 +121,13 @@ export const tauriApi = {
   importPortableBackup: (inputPath: string) =>
     command<PortableBackupImportResult>('import_portable_backup', { inputPath }),
 
+  // 数据库自动备份的查看与回退
+  listDatabaseBackups: () =>
+    command<DatabaseBackupInfo[]>('list_database_backups', undefined, []),
+
+  restoreDatabaseBackup: (backupPath: string) =>
+    command<void>('restore_database_backup', { backupPath }),
+
   // Skills 备份/恢复
   exportSkills: (outputPath: string) =>
     command<SkillsExportResult>('export_skills', { outputPath }),
@@ -261,6 +268,14 @@ export interface CcSwitchProvider {
   experimental_bearer_token?: string;
   service_tier?: string;
   is_current: boolean;
+}
+
+/** 导入/迁移前自动生成的数据库备份。 */
+export interface DatabaseBackupInfo {
+  path: string;
+  /** 文件名里的时间戳（`YYYYmmdd_HHMMSS_ffffff`）。 */
+  time: string;
+  size_bytes: number;
 }
 
 export interface ConfigBackupInfo {

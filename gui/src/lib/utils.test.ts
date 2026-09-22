@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { errorDetail, humanizeError, isAppError } from './utils';
+import { errorDetail, formatBackupTime, humanizeError, isAppError } from './utils';
 
 describe('isAppError', () => {
   it('recognizes structured backend errors', () => {
@@ -100,5 +100,17 @@ describe('errorDetail', () => {
     expect(errorDetail({ kind: 'io', message: '数据库操作失败', detail: '   ' })).toBeNull();
     expect(errorDetail('普通字符串错误')).toBeNull();
     expect(errorDetail(new Error('boom'))).toBeNull();
+  });
+});
+
+describe('formatBackupTime', () => {
+  it('把后端时间戳转成可读时间', () => {
+    expect(formatBackupTime('20260101_120000_000000')).toBe('2026-01-01 12:00:00');
+    expect(formatBackupTime('20261231_235959_123456')).toBe('2026-12-31 23:59:59');
+  });
+
+  it('格式意外时原样返回（展示层不该因它整页报错）', () => {
+    expect(formatBackupTime('weird-name')).toBe('weird-name');
+    expect(formatBackupTime('')).toBe('');
   });
 });

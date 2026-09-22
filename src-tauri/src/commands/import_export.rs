@@ -76,6 +76,97 @@ pub async fn import_skills(
         .map_err(|e| AppError::from(e).with_context("导入 Skills 失败"))
 }
 
+/// 一次自动数据库备份（导入/迁移前生成）。
+#[derive(Debug, Serialize)]
+pub struct DatabaseBackupInfo {
+    pub path: String,
+    /// 文件名里的时间戳（`db.backup.<stamp>.sqlite`）。
+    pub time: String,
+    pub size_bytes: u64,
+}
+
+/// 列出数据库的自动备份，最新的在前。
+///
+/// 导入确认框承诺「导入前自动备份当前库，可回退」——但此前**没有任何入口
+/// 能看到、更别说恢复**这些备份，承诺是空的。这个命令补上「看得到」这一半。
+#[tauri::command]
+pub async fn list_database_backups() -> Result<Vec<DatabaseBackupInfo>, AppError> {
+    let db_path = default_db_path()?;
+    let dir = db_path
+        .parent()
+        .ok_or_else(|| AppError::internal("数据库路径没有父目录"))?;
+    list_database_backups_in(dir).map_err(|e| AppError::from(e).with_context("读取数据库备份失败"))
+}
+
+/// 枚举目录里的自动数据库备份，最新的在前。
+///
+/// 抽成收 `dir` 的纯函数，好脱离进程级 `$HOME` 测——命令层只负责定位目录。
+fn list_database_backups_in(dir: &std::path::Path) -> anyhow::Result<Vec<DatabaseBackupInfo>> {
+    let mut backups: Vec<DatabaseBackupInfo> = Vec::new();
+    if !dir.exists() {
+        return Ok(backups);
+    }
+    for entry in std::fs::read_dir(dir)? {
+        let Ok(entry) = entry else { continue };
+        let name = entry.file_name().to_string_lossy().to_string();
+        // 只认导入/迁移产生的自动备份；`*.premigrate.*` 是迁移专用的另一类，
+        // 由迁移逻辑自己管理，不在这里露出（避免用户手动回退到旧 schema）。
+        let Some(stamp) = name
+            .strip_prefix("db.backup.")
+            .and_then(|rest| rest.strip_suffix(".sqlite"))
+        else {
+            continue;
+        };
+        let size_bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        backups.push(DatabaseBackupInfo {
+            path: entry.path().to_string_lossy().to_string(),
+            time: stamp.to_string(),
+            size_bytes,
+        });
+    }
+    // 时间戳是 `YYYYmmdd_HHMMSS_ffffff`，字典序即时间序。
+    backups.sort_by(|a, b| b.time.cmp(&a.time));
+    Ok(backups)
+}
+
+/// 把数据库回退到某个自动备份。
+///
+/// 与导入同构：先校验候选库确实是 Helio 库，再走 `replace_database_locked`
+/// 的补偿事务（替换前备份当前库 → 替换 → 失败逐级回滚）。复用同一条路径
+/// 而不是另写一份，是为了让「换库」只有一处实现、一处测试。
+#[tauri::command]
+pub async fn restore_database_backup(
+    backup_path: String,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    let _write_guard = state.config_lock.lock()?;
+    let db_path = default_db_path()?;
+    let candidate = std::path::Path::new(&backup_path);
+
+    // 只允许恢复数据库目录下的 `db.backup.*.sqlite`——拒绝任意路径，
+    // 否则被攻破的 webview 可以拿任意文件来覆盖档案库。
+    let dir = db_path
+        .parent()
+        .ok_or_else(|| AppError::internal("数据库路径没有父目录"))?;
+    let name = candidate
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| AppError::invalid_input("备份路径缺少文件名"))?;
+    if !name.starts_with("db.backup.") || !name.ends_with(".sqlite") {
+        return Err(AppError::invalid_input("只能恢复 Helio 的自动数据库备份"));
+    }
+    if candidate.parent() != Some(dir) {
+        return Err(AppError::invalid_input("备份文件不在数据库目录内"));
+    }
+
+    Database::validate_import_candidate(candidate)
+        .map_err(|e| AppError::from(e).with_context("备份文件不是有效的 Helio 数据库"))?;
+
+    let mut db = state.db.lock()?;
+    replace_database_locked(candidate, &db_path, &mut db)?;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn import_database(
     input_path: String,
@@ -441,5 +532,63 @@ mod replace_database_tests {
             vec!["old".to_string()],
             "原库内容必须仍然可读"
         );
+    }
+}
+
+/// 数据库自动备份的枚举与恢复。
+///
+/// 恢复路径**不碰 `AppState`**：把「校验 + 允许哪些路径」抽成纯函数来测，
+/// 命令本身只负责取锁与调用。这样路径穿越这类关键约束不需要起 Tauri 就能覆盖。
+#[cfg(test)]
+mod database_backup_tests {
+    use super::list_database_backups_in;
+
+    #[test]
+    fn lists_only_auto_backups_newest_first() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let db_dir = dir.path();
+        // 三类文件：自动备份、迁移备份、无关文件
+        std::fs::write(db_dir.join("db.backup.20260101_120000_000000.sqlite"), b"a")?;
+        std::fs::write(
+            db_dir.join("db.backup.20260301_120000_000000.sqlite"),
+            b"bb",
+        )?;
+        std::fs::write(
+            db_dir.join("db.premigrate.20260101_120000_000000.sqlite"),
+            b"c",
+        )?;
+        std::fs::write(db_dir.join("db.sqlite"), b"live")?;
+        std::fs::write(db_dir.join("notes.txt"), b"x")?;
+
+        let backups = list_database_backups_in(db_dir)?;
+        let names: Vec<_> = backups
+            .iter()
+            .map(|b| {
+                std::path::Path::new(&b.path)
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        // 迁移备份与 live 库、无关文件都不该出现
+        assert_eq!(
+            names,
+            vec![
+                "db.backup.20260301_120000_000000.sqlite",
+                "db.backup.20260101_120000_000000.sqlite",
+            ],
+            "应只列自动备份且最新的在前"
+        );
+        assert_eq!(backups[0].size_bytes, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn empty_when_directory_missing() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let missing = dir.path().join("nope");
+        assert!(list_database_backups_in(&missing)?.is_empty());
+        Ok(())
     }
 }

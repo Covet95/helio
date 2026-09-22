@@ -2,10 +2,11 @@ import { useState } from 'react';
 import { Alert } from '@/components/common/Alert';
 import { Button } from '../components/common/Button';
 import { PageHeader } from '../components/common/PageHeader';
-import { Download, Upload, FolderCog } from 'lucide-react';
+import { Download, Upload, FolderCog, RotateCcw, ChevronDown } from 'lucide-react';
 import { ConfirmDialog } from '../components/common/Modal';
-import { tauriApi } from '../lib/tauri';
+import { tauriApi, type DatabaseBackupInfo } from '../lib/tauri';
 import { useStore } from '../store';
+import { cn, formatBackupTime, formatBytes, humanizeError } from '../lib/utils';
 import { tauriTransferDeps } from './exportDialog';
 import { runTransfer, type TransferSpec } from './exportFlow';
 import {
@@ -83,7 +84,7 @@ export default function ExportPage() {
         request: { ...DB_FILTER, defaultPath: `helio-backup-${Date.now()}.db` },
         execute: async (path) => {
           await tauriApi.exportDatabase(path);
-          return { text: databaseExportMessage(), kind: 'success' };
+          return { text: databaseExportMessage(path), kind: 'success' };
         },
       },
       setExporting,
@@ -97,7 +98,8 @@ export default function ExportPage() {
         request: { ...ARCHIVE_FILTER, defaultPath: `helio-portable-${Date.now()}.tar.gz` },
         execute: async (path) => {
           const result = await tauriApi.exportPortableBackup(path);
-          return { text: portableExportMessage(result.skills.total), kind: 'success' };
+          // 用后端回报的路径（而非用户选的路径）：跨设备/软链时二者可能不同。
+          return { text: portableExportMessage(result.skills.total, result.path), kind: 'success' };
         },
       },
       setPortableExporting,
@@ -226,6 +228,7 @@ export default function ExportPage() {
               meta="tar.gz · 整体校验 · 同名跳过"
               button={<Button variant="secondary" onClick={() => setConfirmSkillsImport(true)} disabled={busy}><Upload size={16} />{skillsImporting ? '导入中…' : '导入'}</Button>}
             />
+            <DbBackupList disabled={busy} onRestored={refreshAppData} />
           </div>
         </details>
         </div>
@@ -262,6 +265,129 @@ export default function ExportPage() {
         />
       )}
     </div>
+  );
+}
+
+/**
+ * 数据库自动备份的回退入口。
+ *
+ * 导入确认框一直承诺「导入前自动备份当前库，可回退」，但此前**没有任何地方
+ * 能看到这些备份**——承诺是空的。这里补上：列出备份、可一键回退。
+ */
+function DbBackupList({
+  disabled,
+  onRestored,
+}: {
+  disabled: boolean;
+  onRestored: () => Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [backups, setBackups] = useState<DatabaseBackupInfo[] | null>(null);
+  const [restoring, setRestoring] = useState<string | null>(null);
+  const [error, setError] = useState('');
+  const [pending, setPending] = useState<DatabaseBackupInfo | null>(null);
+
+  const load = async () => {
+    setError('');
+    try {
+      setBackups(await tauriApi.listDatabaseBackups());
+    } catch (e) {
+      setError(humanizeError(e));
+      setBackups([]);
+    }
+  };
+
+  const toggle = () => {
+    const next = !open;
+    setOpen(next);
+    if (next) void load();
+  };
+
+  const doRestore = async (backup: DatabaseBackupInfo) => {
+    setPending(null);
+    setRestoring(backup.path);
+    setError('');
+    try {
+      await tauriApi.restoreDatabaseBackup(backup.path);
+      await Promise.all([load(), onRestored()]);
+    } catch (e) {
+      setError(humanizeError(e));
+    } finally {
+      setRestoring(null);
+    }
+  };
+
+  return (
+    <>
+      <div className="border-b border-line last:border-b-0">
+        <button
+          type="button"
+          onClick={toggle}
+          aria-expanded={open}
+          disabled={disabled}
+          className="flex w-full items-center gap-3 px-4 py-3.5 text-left transition-colors hover:bg-elevated/45 disabled:opacity-40"
+        >
+          <div className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-line bg-surface">
+            <RotateCcw size={20} className="text-warn" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h3 className="text-[14px] font-semibold text-ink">回退数据库</h3>
+            <p className="truncate text-[12px] text-ink-faint">
+              导入与迁移前的自动备份，最多保留 10 份
+            </p>
+          </div>
+          <ChevronDown size={16} className={cn('shrink-0 text-ink-faint transition-transform', open && 'rotate-180')} />
+        </button>
+
+        {open && (
+          <div className="border-t border-line/60 bg-surface/40 px-4 py-3">
+            {error && <Alert tone="error" className="mb-2">{error}</Alert>}
+            {backups === null ? (
+              <div className="py-3 text-center text-[12px] text-ink-faint">读取中…</div>
+            ) : backups.length === 0 ? (
+              <div className="py-3 text-center text-[12px] text-ink-faint">
+                还没有自动备份（导入或迁移前会自动生成）
+              </div>
+            ) : (
+              <ul className="space-y-1.5">
+                {backups.map((b) => (
+                  <li key={b.path} className="flex flex-wrap items-center gap-2 rounded-md border border-line bg-card px-3 py-2">
+                    <span className="shrink-0 font-mono text-[11.5px] text-ink-dim">{formatBackupTime(b.time)}</span>
+                    <span className="shrink-0 text-[11px] text-ink-faint">{formatBytes(b.size_bytes)}</span>
+                    <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink-faint" title={b.path}>
+                      {b.path}
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={restoring !== null || disabled}
+                      onClick={() => setPending(b)}
+                    >
+                      <RotateCcw size={13} className={restoring === b.path ? 'animate-spin' : ''} />
+                      {restoring === b.path ? '回退中…' : '回退'}
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+      </div>
+
+      {pending && (
+        <ConfirmDialog
+          title="回退数据库"
+          message={
+            `将用这份备份覆盖当前数据库：\n${formatBackupTime(pending.time)}\n\n` +
+            `回退前会再自动备份一次当前库，仍可再退回。`
+          }
+          confirmText="回退"
+          danger
+          onCancel={() => setPending(null)}
+          onConfirm={() => doRestore(pending)}
+        />
+      )}
+    </>
   );
 }
 

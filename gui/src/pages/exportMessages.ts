@@ -19,19 +19,24 @@ export function cancelledMessage(action: '导出' | '导入'): string {
   return `${action}已取消`;
 }
 
-/** 数据库导出。 */
-export function databaseExportMessage(): string {
-  return '数据库导出成功';
+/**
+ * 数据库导出。
+ *
+ * 带上落盘路径：用户在原生保存框里选的路径，关掉对话框就看不到了，
+ * 事后想确认「文件到底存哪了」没有别的地方可查。
+ */
+export function databaseExportMessage(path: string): string {
+  return `数据库导出成功：${path}`;
 }
 
 /** 数据库导入（成功后会自动刷新应用数据）。 */
 export function databaseImportMessage(): string {
-  return '数据库导入成功，正在刷新…';
+  return '数据库导入成功';
 }
 
-/** 便携备份导出：附带 Skills 总数。 */
-export function portableExportMessage(skillsTotal: number): string {
-  return `便携备份导出成功：Skills ${skillsTotal} 个`;
+/** 便携备份导出：附带 Skills 总数与落盘路径。 */
+export function portableExportMessage(skillsTotal: number, path: string): string {
+  return `便携备份导出成功：Skills ${skillsTotal} 个 · ${path}`;
 }
 
 /**
@@ -59,12 +64,13 @@ export function portableImportMessage(result: {
 export function skillsExportMessage(result: {
   total: number;
   apps: Array<{ app: string; count: number }>;
+  path: string;
 }): { text: string; kind: 'success' | 'info' } {
   if (result.total === 0) {
     return { text: '未发现任何 Skills', kind: 'info' };
   }
   const breakdown = result.apps.map((a) => `${a.app} ${a.count}`).join('、');
-  return { text: `Skills 导出成功：共 ${result.total} 个（${breakdown}）`, kind: 'success' };
+  return { text: `Skills 导出成功：共 ${result.total} 个（${breakdown}）· ${result.path}`, kind: 'success' };
 }
 
 /**

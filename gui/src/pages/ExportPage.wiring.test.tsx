@@ -22,6 +22,8 @@ const api = vi.hoisted(() => ({
   importPortableBackup: vi.fn(),
   exportSkills: vi.fn(),
   importSkills: vi.fn(),
+  listDatabaseBackups: vi.fn(),
+  restoreDatabaseBackup: vi.fn(),
 }));
 vi.mock('../lib/tauri', () => ({ tauriApi: api }));
 
@@ -48,6 +50,8 @@ beforeEach(() => {
   dialog.open.mockResolvedValue('/tmp/in.db');
   store.fetchProfiles.mockResolvedValue(undefined);
   store.fetchStatus.mockResolvedValue(undefined);
+  api.listDatabaseBackups.mockResolvedValue([]);
+  api.restoreDatabaseBackup.mockResolvedValue(undefined);
 });
 
 // 仓库未启用 setupFiles/globals，testing-library 的自动清理不会生效——
@@ -169,7 +173,7 @@ describe('ExportPage — 导入接线', () => {
     fireEvent.click(await confirmDialogButton('导入'));
 
     await waitFor(() => expect(api.importDatabase).toHaveBeenCalledWith('/tmp/in.db'));
-    expect(await screen.findByText(/正在刷新/)).toBeTruthy();
+    expect(await screen.findByText(/数据库导入成功/)).toBeTruthy();
     await waitFor(() => expect(store.fetchStatus).toHaveBeenCalled());
   });
 
@@ -228,5 +232,91 @@ describe('ExportPage — 并发防护', () => {
     await screen.findByText(/Skills 0 个/);
 
     expect(rowButton('导出数据库', '导出').disabled).toBe(false);
+  });
+});
+
+describe('ExportPage — 数据库回退（兑现导入确认框的承诺）', () => {
+  const backup = {
+    path: '/Users/x/.switch-api/db.backup.20260101_120000_000000.sqlite',
+    time: '20260101_120000_000000',
+    size_bytes: 65536,
+  };
+
+  /** 展开「回退数据库」折叠区。 */
+  async function openRollback() {
+    fireEvent.click(screen.getByRole('button', { name: /回退数据库/ }));
+  }
+
+  it('展开时列出自动备份，时间戳转成可读格式', async () => {
+    api.listDatabaseBackups.mockResolvedValue([backup]);
+    await renderPage();
+    await openRollback();
+
+    expect(await screen.findByText('2026-01-01 12:00:00')).toBeTruthy();
+    expect(screen.getByText('64.0 KB')).toBeTruthy();
+  });
+
+  it('没有备份时说明为什么（而不是空白）', async () => {
+    api.listDatabaseBackups.mockResolvedValue([]);
+    await renderPage();
+    await openRollback();
+
+    expect(await screen.findByText(/还没有自动备份/)).toBeTruthy();
+  });
+
+  it('读取失败时显示原因', async () => {
+    api.listDatabaseBackups.mockRejectedValue(new Error('permission denied'));
+    await renderPage();
+    await openRollback();
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('permission denied');
+  });
+
+  it('回退需确认，确认后才调命令', async () => {
+    api.listDatabaseBackups.mockResolvedValue([backup]);
+    await renderPage();
+    await openRollback();
+
+    fireEvent.click(await screen.findByRole('button', { name: /^回退$/ }));
+    const dialog = await screen.findByRole('alertdialog');
+    expect(dialog.textContent).toContain('覆盖当前数据库');
+    expect(api.restoreDatabaseBackup).not.toHaveBeenCalled();
+
+    const confirm = Array.from(dialog.querySelectorAll('button')).find((b) =>
+      b.textContent?.includes('回退'),
+    )!;
+    fireEvent.click(confirm);
+    await waitFor(() => expect(api.restoreDatabaseBackup).toHaveBeenCalledWith(backup.path));
+  });
+
+  it('回退成功后刷新应用数据', async () => {
+    api.listDatabaseBackups.mockResolvedValue([backup]);
+    await renderPage();
+    await openRollback();
+    fireEvent.click(await screen.findByRole('button', { name: /^回退$/ }));
+    const dialog = await screen.findByRole('alertdialog');
+    fireEvent.click(
+      Array.from(dialog.querySelectorAll('button')).find((b) => b.textContent?.includes('回退'))!,
+    );
+
+    await waitFor(() => expect(store.fetchProfiles).toHaveBeenCalled());
+  });
+
+  it('回退失败时显示原因，不静默', async () => {
+    api.listDatabaseBackups.mockResolvedValue([backup]);
+    api.restoreDatabaseBackup.mockRejectedValue(new Error('备份文件损坏'));
+    await renderPage();
+    await openRollback();
+    fireEvent.click(await screen.findByRole('button', { name: /^回退$/ }));
+    const dialog = await screen.findByRole('alertdialog');
+    fireEvent.click(
+      Array.from(dialog.querySelectorAll('button')).find((b) => b.textContent?.includes('回退'))!,
+    );
+
+    await waitFor(async () => {
+      const alerts = await screen.findAllByRole('alert');
+      expect(alerts.some((a) => a.textContent?.includes('备份文件损坏'))).toBe(true);
+    });
   });
 });

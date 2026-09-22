@@ -112,6 +112,8 @@ pub fn run() {
             commands::import_export::import_portable_backup,
             commands::import_export::export_skills,
             commands::import_export::import_skills,
+            commands::import_export::list_database_backups,
+            commands::import_export::restore_database_backup,
             commands::main_cmds::get_local_config_info,
             commands::scan::scan_local_api,
             commands::cc_switch::scan_cc_switch,

@@ -13,6 +13,21 @@ export function formatBytes(bytes: number): string {
   return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
 }
 
+/**
+ * 把备份文件名里的时间戳（`YYYYmmdd_HHMMSS_ffffff`）转成可读时间。
+ *
+ * 后端用这种格式命名，因为它字典序即时间序、便于排序；但直接展示给用户
+ * 就是 `20260101_120000_000000` 这样一串数字，读不出「什么时候」。
+ *
+ * 解析失败时原样返回——这是展示层的便利函数，不该因为格式意外而让整页报错。
+ */
+export function formatBackupTime(stamp: string): string {
+  const match = /^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/.exec(stamp);
+  if (!match) return stamp;
+  const [, y, mo, d, h, mi, s] = match;
+  return `${y}-${mo}-${d} ${h}:${mi}:${s}`;
+}
+
 export function maskApiKey(key: string): string {
   if (key.length <= 15) return '***';
   return `${key.slice(0, 10)}...${key.slice(-5)}`;
