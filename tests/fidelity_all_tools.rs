@@ -3,15 +3,65 @@
 //! 默认 trait 实现让每个适配器都走三路合并。这里逐工具验证：
 //! 切换后用户手写的、与 API 无关的配置必须存活，且受管字段被正确更新。
 //!
-//! 沿用仓库既有做法（见 `credentials_switch_e2e.rs`）：`#![cfg(unix)]`
-//! （`dirs` 在 Windows 不读 `$HOME`），且**整个文件只放一个测试**——
-//! `$HOME` 是进程级全局量，多个测试并行会互相覆盖。
+//! `#![cfg(unix)]`：`dirs` 在 Windows 不读 `$HOME`，测试会读写 runner 的
+//! 真实用户目录。
+//!
+//! 并发：`$HOME` 是**进程级全局量**，多个测试并行会互相覆盖。仓库既有做法
+//! 是「一个文件只放一个测试」（见 `credentials_switch_e2e.rs`），代价是
+//! 场景全挤进一个巨型测试、失败难以定位。这里改用 [`HomeGuard`] 串行化——
+//! 每个测试独占 `$HOME`，互不干扰，同时保持场景独立可单独重跑。
 
 #![cfg(unix)]
 
 use anyhow::{ensure, Context};
 use switch_api::adapters::get_adapter;
 use switch_api::models::{ApiProfile, TargetApp};
+use std::sync::{Mutex, MutexGuard, OnceLock};
+
+/// 串行化 `$HOME` 改写。`Mutex` 中毒不影响后续测试——我们只关心互斥，
+/// 不关心前一个测试的断言结果。
+static HOME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+/// 测试期间独占 `$HOME`，析构时恢复原值。
+///
+/// 持有锁的生命周期覆盖整个测试体，因此同一时刻只有一个测试在改 `$HOME`。
+struct HomeGuard {
+    _lock: MutexGuard<'static, ()>,
+    dir: tempfile::TempDir,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl HomeGuard {
+    fn new() -> Self {
+        let lock = HOME_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let dir = tempfile::tempdir().expect("create temp home");
+        let previous = std::env::var_os("HOME");
+        std::env::set_var("HOME", dir.path());
+
+        Self {
+            _lock: lock,
+            dir,
+            previous,
+        }
+    }
+
+    fn path(&self) -> &std::path::Path {
+        self.dir.path()
+    }
+}
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+}
 
 fn profile(tool: TargetApp, provider: &str, url: &str, model: &str) -> ApiProfile {
     ApiProfile {
@@ -25,9 +75,11 @@ fn profile(tool: TargetApp, provider: &str, url: &str, model: &str) -> ApiProfil
     }
 }
 
-/// 对单个工具跑一次「写入 → 断言用户内容存活」。
+/// 对单个工具跑一次**完整切换事务**（含凭据与辅助文件写入），
+/// 断言主配置里的用户内容存活。
 ///
-/// `live` 是切换前用户手写的配置文本，`must_survive` 是必须原样保留的片段。
+/// 走 `apply_profile_transaction_with_previous` 而非只调 `write_config_merged`：
+/// 真实切换会依次写主配置、凭据、辅助文件，只在事务层面验证才能覆盖全链路。
 fn check_tool(
     tool: TargetApp,
     live: &str,
@@ -44,11 +96,14 @@ fn check_tool(
         .read_config()
         .with_context(|| format!("{tool:?} 读取 live 配置失败"))?;
     let shared = adapter.extract_shared_config(&live_value);
-    let merged = adapter.merge_config(api_profile, &shared);
 
-    adapter
-        .write_config_merged(&merged, None)
-        .with_context(|| format!("{tool:?} 保真写入失败"))?;
+    switch_api::adapters::apply_profile_transaction_with_previous(
+        adapter.as_ref(),
+        api_profile,
+        &shared,
+        None,
+    )
+    .with_context(|| format!("{tool:?} 切换事务失败"))?;
 
     let after = std::fs::read_to_string(&path)
         .with_context(|| format!("{tool:?} 读回失败"))?;
@@ -63,13 +118,56 @@ fn check_tool(
     Ok(())
 }
 
+/// 辅助文件（凭据 / MCP 等）在切换后必须保留其原有的非受管内容。
+fn check_aux_file(
+    tool: TargetApp,
+    path: std::path::PathBuf,
+    live: &str,
+    must_survive: &[&str],
+) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, live)?;
+
+    let adapter = get_adapter(tool);
+    let main_path = adapter.config_path();
+    std::fs::create_dir_all(main_path.parent().context("config dir")?)?;
+    if !main_path.exists() {
+        std::fs::write(&main_path, "{}")?;
+    }
+
+    let live_value = adapter.read_config()?;
+    let shared = adapter.extract_shared_config(&live_value);
+    let api_profile = profile(tool, "custom", "https://new.example/v1", "m");
+
+    switch_api::adapters::apply_profile_transaction_with_previous(
+        adapter.as_ref(),
+        &api_profile,
+        &shared,
+        None,
+    )
+    .with_context(|| format!("{tool:?} 切换事务失败"))?;
+
+    let after = std::fs::read_to_string(&path)
+        .with_context(|| format!("{tool:?} 辅助文件读回失败"))?;
+
+    for fragment in must_survive {
+        ensure!(
+            after.contains(fragment),
+            "{tool:?} 辅助文件 {} 丢失了 {fragment:?}:\n{after}",
+            path.display()
+        );
+    }
+
+    Ok(())
+}
+
 #[test]
 fn every_tool_keeps_user_content_on_switch() {
-    let home = tempfile::tempdir().expect("create temp home");
-    let previous_home = std::env::var("HOME").ok();
-    std::env::set_var("HOME", home.path());
+    let home = HomeGuard::new();
 
-    let result = (|| -> anyhow::Result<()> {
+    (|| -> anyhow::Result<()> {
         // ---------------- Claude Code：JSON，含 MCP 与权限 ----------------
         check_tool(
             TargetApp::ClaudeCode,
@@ -148,12 +246,90 @@ fn every_tool_keeps_user_content_on_switch() {
             &profile(TargetApp::Codex, "custom", "https://new.example/v1", "m"),
         )?;
 
-        Ok(())
-    })();
+        // ---------------- 辅助文件：切换不得抹掉其中的非受管内容 ----------------
+        // Codex 的 auth.json：运行时 OAuth 字段必须存活（只该改 Helio 管的键）。
+        check_aux_file(
+            TargetApp::Codex,
+            home.path().join(".codex/auth.json"),
+            r#"{"tokens":{"access_token":"runtime-oauth"},"user_setting":"keep-me"}"#,
+            &["runtime-oauth", "user_setting", "keep-me"],
+        )?;
 
-    match previous_home {
-        Some(value) => std::env::set_var("HOME", value),
-        None => std::env::remove_var("HOME"),
-    }
-    result.expect("跨工具保真契约失败");
+        // Pi 的 auth.json：其他 provider 的凭据必须存活。
+        check_aux_file(
+            TargetApp::Pi,
+            home.path().join(".pi/agent/auth.json"),
+            r#"{"other_provider":{"type":"api_key","key":"other-secret"},"user_note":"keep-me"}"#,
+            &["other-secret", "user_note", "keep-me"],
+        )?;
+
+        Ok(())
+    })()
+    .expect("跨工具保真契约失败");
+}
+
+/// 场景：用户切到 A → 手动编辑 config → 切到 B。
+///
+/// 验证「用户手改的**非受管**内容」在第二次切换后仍然存活。这是
+/// 「Helio 之外手改配置」这一真实用法的核心契约。
+#[test]
+fn user_edits_between_switches_survive() {
+    let _home = HomeGuard::new();
+
+    (|| -> anyhow::Result<()> {
+        let adapter = get_adapter(TargetApp::Codex);
+        let path = adapter.config_path();
+        std::fs::create_dir_all(path.parent().context("config dir")?)?;
+        std::fs::write(&path, "# 初始\nmodel_provider = \"custom\"\n")?;
+
+        // 第一次切换：A。
+        let a = profile(TargetApp::Codex, "custom", "https://a.example/v1", "ma");
+        let live = adapter.read_config()?;
+        let shared = adapter.extract_shared_config(&live);
+        let merged_a = adapter.merge_config(&a, &shared);
+        switch_api::adapters::apply_profile_transaction_with_previous(
+            adapter.as_ref(),
+            &a,
+            &shared,
+            None,
+        )?;
+
+        // 用户在 Helio 之外手改：加了自己的键与注释。
+        let text = std::fs::read_to_string(&path)?;
+        let edited = format!("{text}\n# 用户手写的段落\nuser_custom_key = \"keep-me\"\n");
+        std::fs::write(&path, &edited)?;
+
+        // 第二次切换：B。previous_managed 来自 A。
+        let b = profile(TargetApp::Codex, "custom", "https://b.example/v1", "mb");
+        let live2 = adapter.read_config()?;
+        let shared2 = adapter.extract_shared_config(&live2);
+        switch_api::adapters::apply_profile_transaction_with_previous(
+            adapter.as_ref(),
+            &b,
+            &shared2,
+            Some(&merged_a),
+        )?;
+
+        let after = std::fs::read_to_string(&path)?;
+
+        ensure!(
+            after.contains("user_custom_key = \"keep-me\""),
+            "用户手改的键丢失:\n{after}"
+        );
+        ensure!(
+            after.contains("# 用户手写的段落"),
+            "用户手写的注释丢失:\n{after}"
+        );
+        ensure!(
+            after.contains("https://b.example/v1"),
+            "新受管值未写入:\n{after}"
+        );
+        ensure!(
+            !after.contains("https://a.example/v1"),
+            "旧受管值残留:\n{after}"
+        );
+
+        Ok(())
+    })()
+    .expect("用户手改内容存活契约失败");
 }
