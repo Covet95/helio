@@ -446,7 +446,7 @@ impl CodexAdapter {
         Ok(match value {
             serde_json::Value::Null => {
                 // TOML 不支持 null，跳过（用空字符串占位会污染配置，调用方应过滤）
-                anyhow::bail!("TOML does not support null values")
+                anyhow::bail!("TOML 不支持 null 值")
             }
             serde_json::Value::Bool(b) => toml::Value::Boolean(*b),
             serde_json::Value::Number(n) => {
@@ -455,7 +455,7 @@ impl CodexAdapter {
                 } else if let Some(f) = n.as_f64() {
                     toml::Value::Float(f)
                 } else {
-                    anyhow::bail!("Unsupported number type")
+                    anyhow::bail!("不支持的数字类型")
                 }
             }
             serde_json::Value::String(s) => toml::Value::String(s.clone()),
@@ -549,7 +549,7 @@ impl ConfigAdapter for CodexAdapter {
     fn validate_profile(&self, api_profile: &ApiProfile) -> Result<()> {
         if !Self::is_amazon_bedrock_profile(api_profile) {
             if api_profile.api_url.trim().is_empty() {
-                anyhow::bail!("Codex custom provider requires an API URL");
+                anyhow::bail!("Codex 自定义 provider 需要填写 API URL");
             }
             if Self::env_key(api_profile).is_none()
                 && api_profile.api_key.trim().is_empty()
@@ -569,7 +569,7 @@ impl ConfigAdapter for CodexAdapter {
             // auth 命令式 token 与其它静态凭据互斥（官方要求）。
             if api_profile.codex.has_command_auth() {
                 if Self::env_key(api_profile).is_some() {
-                    anyhow::bail!("Codex auth command cannot be combined with env_key");
+                    anyhow::bail!("Codex 的 auth 命令不能与 env_key 同时使用");
                 }
                 if api_profile
                     .codex
@@ -621,7 +621,7 @@ impl ConfigAdapter for CodexAdapter {
                 );
             }
             if !is_supported_wire_api(wire) {
-                anyhow::bail!("Unsupported Codex wire_api: {wire}");
+                anyhow::bail!("不支持的 Codex wire_api：{wire}");
             }
         }
 
@@ -633,7 +633,7 @@ impl ConfigAdapter for CodexAdapter {
             .filter(|value| !value.is_empty())
         {
             if !CODEX_REASONING_LEVELS.contains(&effort) {
-                anyhow::bail!("Unsupported Codex reasoning effort: {effort}");
+                anyhow::bail!("不支持的 Codex reasoning effort：{effort}");
             }
         }
 
@@ -656,7 +656,7 @@ impl ConfigAdapter for CodexAdapter {
         ] {
             if let Some(v) = value.map(str::trim).filter(|v| !v.is_empty()) {
                 if !allowed.contains(&v) {
-                    anyhow::bail!("Unsupported Codex {label}: {v}");
+                    anyhow::bail!("不支持的 Codex {label}：{v}");
                 }
             }
         }
@@ -1021,7 +1021,7 @@ impl ConfigAdapter for CodexAdapter {
             anyhow::anyhow!("Codex merge result is not an object; refusing to write")
         })?;
         if merged_obj.is_empty() {
-            anyhow::bail!("Codex merge result is empty; refusing to write");
+            anyhow::bail!("Codex 合并结果为空，拒绝写入");
         }
         let (provider_id, is_bedrock) = Self::active_provider_id(api_profile);
         let active = merged_obj
@@ -1029,7 +1029,7 @@ impl ConfigAdapter for CodexAdapter {
             .and_then(|value| value.as_str())
             .unwrap_or("");
         if active != provider_id {
-            anyhow::bail!("Codex merge result provider mismatch; refusing to write");
+            anyhow::bail!("Codex 合并结果的 provider 不匹配，拒绝写入");
         }
         // Bedrock without aws settings is intentionally omitted by merge; otherwise
         // the target section must exist and offer a working endpoint/credential route.
@@ -1096,7 +1096,7 @@ impl ConfigAdapter for CodexAdapter {
         let path = self.config_path();
 
         if !path.exists() {
-            anyhow::bail!("Config file does not exist");
+            anyhow::bail!("配置文件不存在");
         }
 
         let backup_path = backup::backup_required(&self.config_dir, &path, "config")?;

@@ -26,7 +26,7 @@ impl Database {
     fn checkpoint_truncate(&self) -> Result<()> {
         self.conn
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-            .context("Failed to checkpoint write-ahead log")?;
+            .context("写入 WAL 检查点失败")?;
         Ok(())
     }
 
@@ -66,7 +66,7 @@ impl Database {
     /// （旧实现先 `remove_file(dest)` 再 VACUUM，磁盘满/中断会把唯一备份抹掉）。
     pub fn snapshot_to(source: &Path, dest: &Path) -> Result<()> {
         if !source.exists() {
-            anyhow::bail!("Database does not exist: {}", source.display());
+            anyhow::bail!("数据库不存在：{}", source.display());
         }
 
         let parent = parent_dir(dest);
@@ -148,14 +148,14 @@ impl Database {
     /// 当备份导入并清空全部档案。`PRAGMA quick_check` 也不够——书签库同样返回 ok。
     pub fn validate_import_candidate(path: &Path) -> Result<()> {
         if !path.exists() {
-            anyhow::bail!("Input database does not exist: {}", path.display());
+            anyhow::bail!("要导入的数据库不存在：{}", path.display());
         }
         // 0 字节文件会被 SQLite 当作合法空库接受。
         let size = fs::metadata(path)
             .with_context(|| format!("Failed to inspect {}", path.display()))?
             .len();
         if size == 0 {
-            anyhow::bail!("File is empty, not a Helio database: {}", path.display());
+            anyhow::bail!("文件是空的，不是 Helio 数据库：{}", path.display());
         }
 
         let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -164,9 +164,9 @@ impl Database {
         // 非 SQLite / 损坏文件在这里才报错（open 是惰性的）。
         let check: String = conn
             .query_row("PRAGMA quick_check;", [], |row| row.get(0))
-            .with_context(|| format!("File is not a valid database: {}", path.display()))?;
+            .with_context(|| format!("文件不是有效的数据库：{}", path.display()))?;
         if check != "ok" {
-            anyhow::bail!("Database is corrupted: {check}");
+            anyhow::bail!("数据库已损坏：{check}");
         }
 
         // 认 Helio 自己的 schema 特征。只查 api_profiles 及关键列，不要求最新 schema——
@@ -181,7 +181,7 @@ impl Database {
             .unwrap_or(false);
         if !has_profiles {
             anyhow::bail!(
-                "Not a Helio database (no api_profiles table): {}",
+                "不是 Helio 数据库（缺少 api_profiles 表）：{}",
                 path.display()
             );
         }
@@ -195,7 +195,7 @@ impl Database {
         for required in ["name", "provider", "api_url", "api_key"] {
             if !columns.iter().any(|c| c == required) {
                 anyhow::bail!(
-                    "Not a Helio database (api_profiles missing `{required}` column): {}",
+                    "不是 Helio 数据库（api_profiles 缺少 `{required}` 列）：{}",
                     path.display()
                 );
             }
@@ -230,10 +230,9 @@ impl Database {
             Ok(migrated) => migrated,
             Err(error) => {
                 Self::discard_staging(&staging_dir);
-                return Err(error.context(format!(
-                    "Cannot upgrade {} to the current schema",
-                    input_path.display()
-                )));
+                return Err(
+                    error.context(format!("无法将 {} 升级到当前 schema", input_path.display()))
+                );
             }
         };
         // 迁移写入停留在 staging 的 -wal 里，而后续 rename 只搬主文件。

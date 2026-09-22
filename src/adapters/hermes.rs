@@ -376,7 +376,7 @@ impl ConfigAdapter for HermesAdapter {
     fn backup_config(&self) -> Result<PathBuf> {
         let path = self.config_file_path();
         if !path.exists() {
-            anyhow::bail!("Config file does not exist");
+            anyhow::bail!("配置文件不存在");
         }
         let backup_path = backup::backup_required(&self.config_dir, &path, "config")?;
 

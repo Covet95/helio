@@ -337,10 +337,10 @@ impl ConfigAdapter for OpenCodeAdapter {
     fn validate_profile(&self, api_profile: &ApiProfile) -> Result<()> {
         Self::normalize_api_mode(api_profile.opencode.opencode_api_mode.as_deref())?;
         if api_profile.api_url.trim().is_empty() {
-            anyhow::bail!("OpenCode custom provider requires an API URL");
+            anyhow::bail!("OpenCode 自定义 provider 需要填写 API URL");
         }
         if api_profile.api_key.trim().is_empty() {
-            anyhow::bail!("OpenCode custom provider requires an API key");
+            anyhow::bail!("OpenCode 自定义 provider 需要填写 API Key");
         }
         Ok(())
     }
@@ -541,7 +541,7 @@ impl ConfigAdapter for OpenCodeAdapter {
     fn backup_config(&self) -> Result<PathBuf> {
         let path = self.config_path();
         if !path.exists() {
-            anyhow::bail!("Config file does not exist");
+            anyhow::bail!("配置文件不存在");
         }
 
         let backup_path = backup::backup_required(&self.config_dir, &path, "opencode")?;

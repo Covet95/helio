@@ -99,19 +99,19 @@ mod windows_acl {
             // 1) 取当前进程 token 的用户 SID。
             let mut token = std::mem::zeroed();
             if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
-                bail!("OpenProcessToken failed");
+                bail!("打开进程令牌失败");
             }
 
             // 先问长度，再按长度分配——TOKEN_USER 大小随 SID 长度变化。
             let mut size = 0u32;
             GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut size);
             if size == 0 {
-                bail!("GetTokenInformation failed to report buffer size");
+                bail!("查询令牌信息时未能取得缓冲区大小");
             }
             let mut buf = vec![0u8; size as usize];
             if GetTokenInformation(token, TokenUser, buf.as_mut_ptr().cast(), size, &mut size) == 0
             {
-                bail!("GetTokenInformation failed");
+                bail!("查询令牌信息失败");
             }
             let user: &TOKEN_USER = &*buf.as_ptr().cast();
 
@@ -135,7 +135,7 @@ mod windows_acl {
             // 3) 生成只含该 ACE 的 ACL（不合并继承项，父目录的宽松 ACE 就此消失）。
             let mut acl: *mut ACL = std::ptr::null_mut();
             if SetEntriesInAclW(1, &access, std::ptr::null_mut(), &mut acl) != 0 {
-                bail!("SetEntriesInAclW failed");
+                bail!("构造 ACL 失败");
             }
 
             // 4) 写回并置 PROTECTED，阻止继承覆盖。
@@ -149,7 +149,7 @@ mod windows_acl {
                 std::ptr::null_mut(),
             );
             if rc != 0 {
-                bail!("SetNamedSecurityInfoW failed with code {rc}");
+                bail!("设置文件 ACL 失败（错误码 {rc}）");
             }
         }
 
