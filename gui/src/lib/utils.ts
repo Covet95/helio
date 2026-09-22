@@ -13,9 +13,32 @@ export function formatBytes(bytes: number): string {
   return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
 }
 
+/**
+ * 把备份文件名里的时间戳（`YYYYmmdd_HHMMSS_ffffff`）转成可读时间。
+ *
+ * 后端用这种格式命名，因为它字典序即时间序、便于排序；但直接展示给用户
+ * 就是 `20260101_120000_000000` 这样一串数字，读不出「什么时候」。
+ *
+ * 解析失败时原样返回——这是展示层的便利函数，不该因为格式意外而让整页报错。
+ */
+export function formatBackupTime(stamp: string): string {
+  const match = /^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/.exec(stamp);
+  if (!match) return stamp;
+  const [, y, mo, d, h, mi, s] = match;
+  return `${y}-${mo}-${d} ${h}:${mi}:${s}`;
+}
+
+/**
+ * 掩码 API key：保留前 10 / 后 5 个**字符**，中间省略。
+ *
+ * 按码点切而不是 `slice`：`slice` 以 UTF-16 码元为单位，key 里若有 emoji
+ * 之类的星平面字符（占两个码元），会从中间切开留下孤立代理项——
+ * 显示成 `�`，严重时后续处理会抛错。用 `Array.from` 按码点分。
+ */
 export function maskApiKey(key: string): string {
-  if (key.length <= 15) return '***';
-  return `${key.slice(0, 10)}...${key.slice(-5)}`;
+  const chars = Array.from(key);
+  if (chars.length <= 15) return '***';
+  return `${chars.slice(0, 10).join('')}...${chars.slice(-5).join('')}`;
 }
 
 /**

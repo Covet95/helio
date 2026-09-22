@@ -1,18 +1,13 @@
-use crate::error::AppError;
-use crate::models::{
-    ActiveProfile, ApiProfile, ClaudeProfileFields, CodexProfileFields, HermesProfileFields,
-    OpenClawProfileFields, OpenCodeManagedModelState, OpenCodeProfileFields, SharedConfig,
-    TargetApp,
-};
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
-use std::fs;
+use rusqlite::Connection;
 use std::path::{Path, PathBuf};
-use uuid::Uuid;
 
-use crate::utils::secure_fs::{
-    copy_private, ensure_private_dir, ensure_private_file, secure_export_file,
-};
+mod profiles;
+mod schema;
+mod snapshot;
+mod state;
+
+use crate::utils::secure_fs::{copy_private, ensure_private_dir, ensure_private_file};
 
 /// 自动数据库备份的保留个数（`db.backup.*` 与 `*.premigrate.*` 各自独立计数）。
 const DB_BACKUP_KEEP: usize = 10;
@@ -24,6 +19,42 @@ fn parent_dir(path: &Path) -> PathBuf {
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
         _ => PathBuf::from("."),
     }
+}
+
+/// 重建 `api_profiles` 整表前**必须**先做的备份。
+///
+/// 这张表装着全部明文 API key。`DROP TABLE` + `RENAME` 的重建流程虽有事务
+/// 保护，但「DROP 成功、COMMIT 前崩溃」会留下无兜底的半状态——所以备份不是
+/// 可选项：**备份失败必须中止迁移**，宁可迁移不做，也不能让旧数据失去退路。
+///
+/// `:memory:` 库没有路径，跳过（本就无持久化数据可丢）。
+///
+/// 备份文件名形如 `db.sqlite.premigrate.<时间戳>.sqlite`，含明文 key，
+/// 因此与常规备份一样按 [`DB_BACKUP_KEEP`] 轮转，避免无限累积。
+fn backup_before_table_rebuild(conn: &rusqlite::Connection) -> Result<()> {
+    let Some(db_path) = conn.path() else {
+        return Ok(());
+    };
+    if db_path == ":memory:" || db_path.is_empty() {
+        return Ok(());
+    }
+
+    let ts = chrono::Local::now().format("%Y%m%d_%H%M%S_%f");
+    let backup = format!("{db_path}.premigrate.{ts}.sqlite");
+    copy_private(Path::new(db_path), Path::new(&backup))
+        .with_context(|| format!("Failed to back up database before migration: {backup}"))?;
+
+    let path = Path::new(db_path);
+    if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+        crate::adapters::backup::cleanup_prefix(
+            &parent_dir(path),
+            &format!("{file_name}.premigrate."),
+            DB_BACKUP_KEEP,
+        )
+        .with_context(|| "Failed to rotate pre-migration backups")?;
+    }
+
+    Ok(())
 }
 
 /// 「导入替换失败，且补偿回滚也失败」的统一构造。
@@ -99,1489 +130,18 @@ impl Database {
     pub fn db_path(&self) -> Option<PathBuf> {
         self.conn.path().map(PathBuf::from)
     }
-
-    /// 初始化数据库表结构
-    fn init_schema(&self) -> Result<()> {
-        self.conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS api_profiles (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                provider TEXT NOT NULL,
-                api_url TEXT NOT NULL,
-                api_key TEXT NOT NULL,
-                model_mapping TEXT,
-                model TEXT,
-                reasoning_effort TEXT,
-                context_1m INTEGER,
-                target_app TEXT,
-                models TEXT,
-                wire_api TEXT,
-                env_key TEXT,
-                requires_openai_auth INTEGER,
-                service_tier TEXT,
-                experimental_bearer_token TEXT,
-                supports_standalone_web_search INTEGER,
-                aws_profile TEXT,
-                aws_region TEXT,
-                reasoning_summary TEXT,
-                verbosity TEXT,
-                auth_command TEXT,
-                auth_args TEXT,
-                auth_timeout_ms INTEGER,
-                auth_refresh_interval_ms INTEGER,
-                auth_cwd TEXT,
-                api_mode TEXT,
-                max_tokens INTEGER,
-                api_keys_json TEXT,
-                catalog_models TEXT,
-                opencode_api_mode TEXT,
-                opencode_model_configs TEXT,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL,
-                UNIQUE(name, target_app)
-            );
-
-            CREATE TABLE IF NOT EXISTS shared_configs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                target_app TEXT NOT NULL UNIQUE,
-                config_json TEXT NOT NULL,
-                updated_at INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS opencode_model_state (
-                provider_id TEXT PRIMARY KEY,
-                model_ids_json TEXT NOT NULL,
-                updated_at INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS provider_ownership (
-                target_app TEXT NOT NULL,
-                provider_id TEXT NOT NULL,
-                managed_by_helio INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL,
-                PRIMARY KEY (target_app, provider_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS active_profiles (
-                target_app TEXT PRIMARY KEY,
-                profile_id INTEGER NOT NULL,
-                FOREIGN KEY (profile_id) REFERENCES api_profiles(id) ON DELETE CASCADE
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_profiles_name ON api_profiles(name);
-            CREATE INDEX IF NOT EXISTS idx_shared_configs_app ON shared_configs(target_app);
-
-            CREATE TABLE IF NOT EXISTS schema_migrations (
-                id TEXT PRIMARY KEY,
-                applied_at INTEGER NOT NULL
-            );
-            "#,
-        )?;
-
-        self.ensure_current_profile_columns()?;
-        self.migrate_composite_unique()?;
-        self.migrate_drop_model_effort_level()?;
-        self.migrate_drop_model_thinking_enabled()?;
-        self.migrate_normalize_codex_wire_api()?;
-        self.record_migration("2026-07-19-profile-schema-ledger")?;
-        self.migrate_drop_gemini_target()?;
-
-        Ok(())
-    }
-
-    /// Drop historical Gemini target rows (tool removed in favor of Pi).
-    fn migrate_drop_gemini_target(&self) -> Result<()> {
-        let id = "2026-07-28-drop-gemini-target";
-        let already: bool = self
-            .conn
-            .query_row(
-                "SELECT 1 FROM schema_migrations WHERE id = ?1",
-                params![id],
-                |_| Ok(true),
-            )
-            .optional()?
-            .unwrap_or(false);
-        if already {
-            return Ok(());
-        }
-        self.conn.execute(
-            "DELETE FROM active_profiles WHERE target_app = 'gemini'",
-            [],
-        )?;
-        self.conn
-            .execute("DELETE FROM shared_configs WHERE target_app = 'gemini'", [])?;
-        self.conn
-            .execute("DELETE FROM api_profiles WHERE target_app = 'gemini'", [])?;
-        self.record_migration(id)?;
-        Ok(())
-    }
-
-    fn ensure_current_profile_columns(&self) -> Result<()> {
-        for ddl in [
-            "ALTER TABLE api_profiles ADD COLUMN model TEXT",
-            "ALTER TABLE api_profiles ADD COLUMN reasoning_effort TEXT",
-            "ALTER TABLE api_profiles ADD COLUMN context_1m INTEGER",
-            "ALTER TABLE api_profiles ADD COLUMN target_app TEXT",
-            "ALTER TABLE api_profiles ADD COLUMN models TEXT",
-            "ALTER TABLE api_profiles ADD COLUMN wire_api TEXT",
-            "ALTER TABLE api_profiles ADD COLUMN env_key TEXT",
-            "ALTER TABLE api_profiles ADD COLUMN requires_openai_auth INTEGER",
-            "ALTER TABLE api_profiles ADD COLUMN service_tier TEXT",
-            "ALTER TABLE api_profiles ADD COLUMN experimental_bearer_token TEXT",
-            "ALTER TABLE api_profiles ADD COLUMN supports_standalone_web_search INTEGER",
-            "ALTER TABLE api_profiles ADD COLUMN aws_profile TEXT",
-            "ALTER TABLE api_profiles ADD COLUMN aws_region TEXT",
-            "ALTER TABLE api_profiles ADD COLUMN reasoning_summary TEXT",
-            "ALTER TABLE api_profiles ADD COLUMN verbosity TEXT",
-            "ALTER TABLE api_profiles ADD COLUMN auth_command TEXT",
-            "ALTER TABLE api_profiles ADD COLUMN auth_args TEXT",
-            "ALTER TABLE api_profiles ADD COLUMN auth_timeout_ms INTEGER",
-            "ALTER TABLE api_profiles ADD COLUMN auth_refresh_interval_ms INTEGER",
-            "ALTER TABLE api_profiles ADD COLUMN auth_cwd TEXT",
-            "ALTER TABLE api_profiles ADD COLUMN api_mode TEXT",
-            "ALTER TABLE api_profiles ADD COLUMN max_tokens INTEGER",
-            "ALTER TABLE api_profiles ADD COLUMN api_keys_json TEXT",
-            "ALTER TABLE api_profiles ADD COLUMN catalog_models TEXT",
-            "ALTER TABLE api_profiles ADD COLUMN opencode_api_mode TEXT",
-            "ALTER TABLE api_profiles ADD COLUMN opencode_model_configs TEXT",
-        ] {
-            self.try_add_column(ddl)?;
-        }
-        Ok(())
-    }
-
-    fn record_migration(&self, id: &str) -> Result<()> {
-        self.conn.execute(
-            "INSERT OR IGNORE INTO schema_migrations (id, applied_at) VALUES (?1, ?2)",
-            params![id, chrono::Utc::now().timestamp()],
-        )?;
-        Ok(())
-    }
-
-    fn try_add_column(&self, ddl: &str) -> Result<()> {
-        match self.conn.execute(ddl, []) {
-            Ok(_) => Ok(()),
-            Err(e) if e.to_string().contains("duplicate column name") => Ok(()),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    fn migrate_drop_model_effort_level(&self) -> Result<()> {
-        let mut stmt = self.conn.prepare("PRAGMA table_info(api_profiles)")?;
-        let cols: Vec<String> = stmt
-            .query_map([], |row| row.get::<_, String>(1))?
-            .collect::<Result<Vec<_>, _>>()?;
-        if !cols.iter().any(|c| c == "model_effort_level") {
-            return Ok(());
-        }
-        // guard 负责失败时回滚残留事务并恢复 foreign_keys=ON。
-        let _guard = ForeignKeysGuard::off(&self.conn)?;
-        self.conn.execute_batch(r#"
-            BEGIN;
-            CREATE TABLE api_profiles_no_effort (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL, provider TEXT NOT NULL, api_url TEXT NOT NULL, api_key TEXT NOT NULL,
-                model_mapping TEXT, model TEXT, reasoning_effort TEXT, context_1m INTEGER,
-                target_app TEXT, models TEXT, wire_api TEXT, env_key TEXT, requires_openai_auth INTEGER,
-                service_tier TEXT, experimental_bearer_token TEXT,
-                supports_standalone_web_search INTEGER, aws_profile TEXT, aws_region TEXT,
-                reasoning_summary TEXT, verbosity TEXT,
-                auth_command TEXT, auth_args TEXT, auth_timeout_ms INTEGER,
-                auth_refresh_interval_ms INTEGER, auth_cwd TEXT,
-                api_mode TEXT, max_tokens INTEGER, api_keys_json TEXT, catalog_models TEXT,
-                opencode_api_mode TEXT, opencode_model_configs TEXT,
-                created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
-                UNIQUE(name, target_app)
-            );
-            INSERT INTO api_profiles_no_effort (
-                id, name, provider, api_url, api_key, model_mapping, model, reasoning_effort,
-                context_1m, target_app, models, wire_api, env_key, requires_openai_auth,
-                service_tier, experimental_bearer_token, api_mode, max_tokens,
-                supports_standalone_web_search, aws_profile, aws_region, api_keys_json,
-                catalog_models, opencode_api_mode, opencode_model_configs, created_at, updated_at,
-                reasoning_summary, verbosity, auth_command, auth_args, auth_timeout_ms,
-                auth_refresh_interval_ms, auth_cwd
-            )
-            SELECT id, name, provider, api_url, api_key, model_mapping, model, reasoning_effort,
-                context_1m, target_app, models, wire_api, env_key, requires_openai_auth,
-                service_tier, experimental_bearer_token,
-                api_mode, max_tokens, supports_standalone_web_search, aws_profile, aws_region,
-                api_keys_json, catalog_models, opencode_api_mode, opencode_model_configs,
-                created_at, updated_at,
-                reasoning_summary, verbosity, auth_command, auth_args, auth_timeout_ms,
-                auth_refresh_interval_ms, auth_cwd
-            FROM api_profiles;
-            DROP TABLE api_profiles;
-            ALTER TABLE api_profiles_no_effort RENAME TO api_profiles;
-            CREATE INDEX IF NOT EXISTS idx_profiles_name ON api_profiles(name);
-            COMMIT;
-        "#)?;
-        Ok(())
-    }
-
-    fn migrate_drop_model_thinking_enabled(&self) -> Result<()> {
-        let id = "2026-08-03-drop-codex-model-thinking-enabled";
-        let already: bool = self
-            .conn
-            .query_row(
-                "SELECT 1 FROM schema_migrations WHERE id = ?1",
-                params![id],
-                |_| Ok(true),
-            )
-            .optional()?
-            .unwrap_or(false);
-        if already {
-            return Ok(());
-        }
-
-        let mut stmt = self.conn.prepare("PRAGMA table_info(api_profiles)")?;
-        let cols: Vec<String> = stmt
-            .query_map([], |row| row.get::<_, String>(1))?
-            .collect::<Result<Vec<_>, _>>()?;
-        if !cols.iter().any(|column| column == "model_thinking_enabled") {
-            self.record_migration(id)?;
-            return Ok(());
-        }
-
-        let _guard = ForeignKeysGuard::off(&self.conn)?;
-        self.conn.execute_batch(
-            r#"
-            BEGIN;
-            CREATE TABLE api_profiles_no_thinking (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL, provider TEXT NOT NULL, api_url TEXT NOT NULL, api_key TEXT NOT NULL,
-                model_mapping TEXT, model TEXT, reasoning_effort TEXT, context_1m INTEGER,
-                target_app TEXT, models TEXT, wire_api TEXT, env_key TEXT, requires_openai_auth INTEGER,
-                service_tier TEXT, experimental_bearer_token TEXT,
-                supports_standalone_web_search INTEGER, aws_profile TEXT, aws_region TEXT,
-                reasoning_summary TEXT, verbosity TEXT,
-                auth_command TEXT, auth_args TEXT, auth_timeout_ms INTEGER,
-                auth_refresh_interval_ms INTEGER, auth_cwd TEXT,
-                api_mode TEXT, max_tokens INTEGER, api_keys_json TEXT, catalog_models TEXT,
-                opencode_api_mode TEXT, opencode_model_configs TEXT,
-                created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
-                UNIQUE(name, target_app)
-            );
-            INSERT INTO api_profiles_no_thinking (
-                id, name, provider, api_url, api_key, model_mapping, model, reasoning_effort,
-                context_1m, target_app, models, wire_api, env_key, requires_openai_auth,
-                service_tier, experimental_bearer_token, supports_standalone_web_search,
-                aws_profile, aws_region, api_mode, max_tokens, api_keys_json, catalog_models,
-                opencode_api_mode, opencode_model_configs, created_at, updated_at,
-                reasoning_summary, verbosity, auth_command, auth_args, auth_timeout_ms,
-                auth_refresh_interval_ms, auth_cwd
-            )
-            SELECT id, name, provider, api_url, api_key, model_mapping, model, reasoning_effort,
-                context_1m, target_app, models, wire_api, env_key, requires_openai_auth,
-                service_tier, experimental_bearer_token, supports_standalone_web_search,
-                aws_profile, aws_region, api_mode, max_tokens, api_keys_json, catalog_models,
-                opencode_api_mode, opencode_model_configs, created_at, updated_at,
-                reasoning_summary, verbosity, auth_command, auth_args, auth_timeout_ms,
-                auth_refresh_interval_ms, auth_cwd
-            FROM api_profiles;
-            DROP TABLE api_profiles;
-            ALTER TABLE api_profiles_no_thinking RENAME TO api_profiles;
-            CREATE INDEX IF NOT EXISTS idx_profiles_name ON api_profiles(name);
-            COMMIT;
-            "#,
-        )?;
-        self.record_migration(id)
-    }
-
-    /// wire_api="chat" 系取值已被官方删除（2026-02，discussion #7782），
-    /// 存量数据归一为 responses；写入路径本身已固定 responses，这里只修历史行。
-    fn migrate_normalize_codex_wire_api(&self) -> Result<()> {
-        let id = "2026-09-07-normalize-codex-wire-api";
-        let already: bool = self
-            .conn
-            .query_row(
-                "SELECT 1 FROM schema_migrations WHERE id = ?1",
-                params![id],
-                |_| Ok(true),
-            )
-            .optional()?
-            .unwrap_or(false);
-        if already {
-            return Ok(());
-        }
-        self.conn.execute(
-            "UPDATE api_profiles SET wire_api = 'responses' WHERE wire_api IS NOT NULL AND lower(trim(wire_api)) IN ('chat', 'chat_completions', 'openai-chat')",
-            [],
-        )?;
-        self.record_migration(id)
-    }
-
-    /// 幂等迁移:name 全局 UNIQUE → UNIQUE(name, target_app)，并去掉历史 `-cc` 后缀。
-    /// 仅当旧约束仍存在时执行;执行前备份库文件。
-    fn migrate_composite_unique(&self) -> Result<()> {
-        let create_sql: String = self.conn.query_row(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='api_profiles'",
-            [],
-            |r| r.get(0),
-        )?;
-        // 已是复合唯一 → 跳过
-        if create_sql.contains("UNIQUE(name, target_app)")
-            || create_sql.contains("UNIQUE (name, target_app)")
-        {
-            return Ok(());
-        }
-        // 不含旧的全局 name UNIQUE 也跳过(防御)
-        if !create_sql.contains("name TEXT NOT NULL UNIQUE") {
-            return Ok(());
-        }
-
-        // 备份库文件(若是文件库)。:memory: 没有路径，跳过备份。
-        if let Some(db_path) = self.conn.path() {
-            if db_path != ":memory:" && !db_path.is_empty() {
-                let ts = chrono::Local::now().format("%Y%m%d_%H%M%S_%f");
-                let backup = format!("{db_path}.premigrate.{ts}.sqlite");
-                // 迁移会重建整表,备份失败必须中止迁移,否则旧数据无兜底。
-                copy_private(Path::new(db_path), Path::new(&backup)).with_context(|| {
-                    format!("Failed to back up database before migration: {}", backup)
-                })?;
-                // 备份含明文 key，必须轮转；文件名形如 `db.sqlite.premigrate.*`。
-                let path = Path::new(db_path);
-                if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-                    crate::adapters::backup::cleanup_prefix(
-                        &parent_dir(path),
-                        &format!("{file_name}.premigrate."),
-                        DB_BACKUP_KEEP,
-                    )
-                    .with_context(|| "Failed to rotate pre-migration backups")?;
-                }
-            }
-        }
-
-        // 重建表:新表用复合唯一。注意去 -cc 后缀(仅 target_app 非空、去后缀后同工具不冲突)。
-        // 整个重建流程包在单个事务中以保证原子性(防止 DROP 与 RENAME 之间进程被杀留下孤表)。
-        //
-        // 关键:active_profiles 有 FOREIGN KEY ... REFERENCES api_profiles(id)。开启外键检查时
-        // `DROP TABLE api_profiles` 会触发 FOREIGN KEY constraint failed 导致整个事务回滚。
-        // 按 SQLite 官方安全重建表流程,重建期间必须关闭外键检查;
-        // 而 `PRAGMA foreign_keys` 在事务内是 no-op,必须在 BEGIN 之前设置、COMMIT 之后恢复。
-        // guard 负责失败时回滚残留事务并恢复 foreign_keys=ON。
-        let _guard = ForeignKeysGuard::off(&self.conn)?;
-        self.conn.execute_batch(
-            r#"
-            BEGIN;
-            CREATE TABLE api_profiles_new (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                provider TEXT NOT NULL,
-                api_url TEXT NOT NULL,
-                api_key TEXT NOT NULL,
-                model_mapping TEXT,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL,
-                model TEXT,
-                reasoning_effort TEXT,
-                context_1m INTEGER,
-                target_app TEXT,
-                models TEXT,
-                wire_api TEXT,
-                env_key TEXT,
-                requires_openai_auth INTEGER,
-                service_tier TEXT,
-                experimental_bearer_token TEXT,
-                supports_standalone_web_search INTEGER,
-                aws_profile TEXT,
-                aws_region TEXT,
-                reasoning_summary TEXT,
-                verbosity TEXT,
-                auth_command TEXT,
-                auth_args TEXT,
-                auth_timeout_ms INTEGER,
-                auth_refresh_interval_ms INTEGER,
-                auth_cwd TEXT,
-                api_mode TEXT,
-                max_tokens INTEGER,
-                api_keys_json TEXT,
-                catalog_models TEXT,
-                opencode_api_mode TEXT,
-                opencode_model_configs TEXT,
-                UNIQUE(name, target_app)
-            );
-
-            INSERT INTO api_profiles_new
-                (id,name,provider,api_url,api_key,model_mapping,created_at,updated_at,model,reasoning_effort,context_1m,target_app,models,
-                 wire_api,env_key,requires_openai_auth,service_tier,experimental_bearer_token,
-                 supports_standalone_web_search,aws_profile,aws_region,reasoning_summary,verbosity,
-                 auth_command,auth_args,auth_timeout_ms,auth_refresh_interval_ms,auth_cwd,
-                 api_mode,max_tokens,api_keys_json,
-                 catalog_models,opencode_api_mode,opencode_model_configs)
-            SELECT id,name,provider,api_url,api_key,model_mapping,created_at,updated_at,model,reasoning_effort,context_1m,target_app,models,
-                 wire_api,env_key,requires_openai_auth,service_tier,experimental_bearer_token,
-                 supports_standalone_web_search,aws_profile,aws_region,reasoning_summary,verbosity,
-                 auth_command,auth_args,auth_timeout_ms,auth_refresh_interval_ms,auth_cwd,
-                 api_mode,max_tokens,api_keys_json,
-                 catalog_models,opencode_api_mode,opencode_model_configs
-            FROM api_profiles;
-
-            UPDATE api_profiles_new
-            SET name = substr(name, 1, length(name) - 3)
-            WHERE name LIKE '%-cc'
-              AND target_app IS NOT NULL
-              AND NOT EXISTS (
-                  SELECT 1 FROM api_profiles_new b
-                  WHERE b.target_app = api_profiles_new.target_app
-                    AND b.name = substr(api_profiles_new.name, 1, length(api_profiles_new.name) - 3)
-                    AND b.id != api_profiles_new.id
-              );
-
-            DROP TABLE api_profiles;
-            ALTER TABLE api_profiles_new RENAME TO api_profiles;
-            CREATE INDEX IF NOT EXISTS idx_profiles_name ON api_profiles(name);
-            COMMIT;
-            "#,
-        )?;
-
-        Ok(())
-    }
-
-    /// 把 WAL 内容合并进主文件并截断 `-wal`。
-    /// 用于 rename 主文件之前——rename 不会搬走边车文件，未合并的写入会丢失。
-    fn checkpoint_truncate(&self) -> Result<()> {
-        self.conn
-            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-            .context("Failed to checkpoint write-ahead log")?;
-        Ok(())
-    }
-
-    /// 删除数据库的 `-wal` / `-shm` 边车文件。
-    ///
-    /// 库以 WAL 模式打开，主文件可能落后于 `-wal`。替换或恢复主文件时若把旧 `-wal` 留在原地，
-    /// SQLite 会用它去"恢复"新主文件，导致读回被替换掉的旧数据（实测可复现）。
-    fn remove_sidecar_files(db_path: &Path) -> Result<()> {
-        for suffix in ["-wal", "-shm"] {
-            let mut name = db_path.as_os_str().to_os_string();
-            name.push(suffix);
-            let sidecar = PathBuf::from(name);
-            if sidecar.exists() {
-                fs::remove_file(&sidecar)
-                    .with_context(|| format!("Failed to remove {}", sidecar.display()))?;
-            }
-        }
-        Ok(())
-    }
-
-    /// 尽力清掉整个 staging 目录。
-    ///
-    /// staging 放在独立目录而不是直接放数据库目录：在它上面跑迁移会派生出边车文件和
-    /// `*.premigrate.*` 备份（同样含明文密钥），逐个按名字删容易漏。整目录删除既覆盖
-    /// 失败中止，也覆盖成功替换后的收尾。
-    fn discard_staging(staging_dir: &Path) {
-        let _ = fs::remove_dir_all(staging_dir);
-    }
-
-    /// 生成 `source` 的一致快照到 `dest`（单文件，含尚未 checkpoint 的 WAL 数据）。
-    ///
-    /// 用 `VACUUM INTO` 而非文件拷贝：拷主文件会丢 WAL 里已提交的数据，
-    /// 连带 `-wal`/`-shm` 一起拷则得到三文件、不可移植且拷贝期间无快照隔离的备份。
-    /// 只读连接即可执行 `VACUUM INTO`，不会写入源库。
-    ///
-    /// 覆盖既有 `dest` 时先写同目录临时文件，完整后再替换：失败保留旧备份
-    /// （旧实现先 `remove_file(dest)` 再 VACUUM，磁盘满/中断会把唯一备份抹掉）。
-    pub fn snapshot_to(source: &Path, dest: &Path) -> Result<()> {
-        if !source.exists() {
-            anyhow::bail!("Database does not exist: {}", source.display());
-        }
-
-        let parent = parent_dir(dest);
-        // 用户导出路径可能尚未存在父目录；只创建 dest 的父目录，
-        // 且不改权限（导出目录属于用户选择，不能 ensure_private_dir）。
-        if parent != Path::new(".") {
-            fs::create_dir_all(&parent).with_context(|| {
-                format!("Failed to create export directory {}", parent.display())
-            })?;
-        }
-
-        // VACUUM INTO 要求目标不存在；写到唯一临时名，成功后再替换 dest。
-        let tmp = parent.join(format!(
-            ".{}.tmp-{}",
-            dest.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("export.db"),
-            Uuid::new_v4()
-        ));
-
-        let snapshot_result: Result<()> = (|| {
-            let conn = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .with_context(|| format!("Failed to read database {}", source.display()))?;
-            let tmp_sql = tmp.to_string_lossy().replace('\'', "''");
-            conn.execute_batch(&format!("VACUUM INTO '{tmp_sql}';"))
-                .with_context(|| {
-                    format!(
-                        "Failed to write database snapshot to {}. \
-                         请确认目标路径可写且磁盘空间充足。",
-                        dest.display()
-                    )
-                })?;
-
-            // VACUUM INTO 产出的文件是 0644（随 umask），凭据库必须收紧到 owner-only。
-            secure_export_file(&tmp)?;
-
-            // 优先直接 rename。目标已存在时（尤其 Windows 不能覆盖 rename）先把旧文件
-            // 挪到旁路再替换；新文件此时已完整，失败则尽力把旧文件移回。
-            match fs::rename(&tmp, dest) {
-                Ok(()) => Ok(()),
-                Err(first) if dest.exists() => {
-                    let bak = parent.join(format!(
-                        ".{}.replace-{}",
-                        dest.file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("export.db"),
-                        Uuid::new_v4()
-                    ));
-                    fs::rename(dest, &bak).with_context(|| {
-                        format!(
-                            "Failed to move old export aside {} (also: {first})",
-                            dest.display()
-                        )
-                    })?;
-                    if let Err(error) = fs::rename(&tmp, dest) {
-                        let _ = fs::rename(&bak, dest);
-                        return Err(error).with_context(|| {
-                            format!("Failed to replace export {}", dest.display())
-                        });
-                    }
-                    let _ = fs::remove_file(&bak);
-                    Ok(())
-                }
-                Err(error) => Err(error)
-                    .with_context(|| format!("Failed to move snapshot to {}", dest.display())),
-            }
-        })();
-
-        if snapshot_result.is_err() || tmp.exists() {
-            let _ = fs::remove_file(&tmp);
-        }
-        snapshot_result
-    }
-
-    /// 导入前校验候选文件是否为 Helio 档案库。**全程只读**，不写入也不迁移候选文件。
-    ///
-    /// 不能用 `Database::open` 当校验：`init_schema` 的 `CREATE TABLE IF NOT EXISTS`
-    /// 会把任意 SQLite 文件（甚至 0 字节文件）补全成"合法"库，实测可把浏览器书签库
-    /// 当备份导入并清空全部档案。`PRAGMA quick_check` 也不够——书签库同样返回 ok。
-    pub fn validate_import_candidate(path: &Path) -> Result<()> {
-        if !path.exists() {
-            anyhow::bail!("Input database does not exist: {}", path.display());
-        }
-        // 0 字节文件会被 SQLite 当作合法空库接受。
-        let size = fs::metadata(path)
-            .with_context(|| format!("Failed to inspect {}", path.display()))?
-            .len();
-        if size == 0 {
-            anyhow::bail!("File is empty, not a Helio database: {}", path.display());
-        }
-
-        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .with_context(|| format!("Failed to open {}", path.display()))?;
-
-        // 非 SQLite / 损坏文件在这里才报错（open 是惰性的）。
-        let check: String = conn
-            .query_row("PRAGMA quick_check;", [], |row| row.get(0))
-            .with_context(|| format!("File is not a valid database: {}", path.display()))?;
-        if check != "ok" {
-            anyhow::bail!("Database is corrupted: {check}");
-        }
-
-        // 认 Helio 自己的 schema 特征。只查 api_profiles 及关键列，不要求最新 schema——
-        // 旧版本导出的备份必须仍可导入，替换后由 Database::open 跑迁移补齐。
-        let has_profiles: bool = conn
-            .query_row(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='api_profiles'",
-                [],
-                |_| Ok(true),
-            )
-            .optional()?
-            .unwrap_or(false);
-        if !has_profiles {
-            anyhow::bail!(
-                "Not a Helio database (no api_profiles table): {}",
-                path.display()
-            );
-        }
-
-        let mut stmt = conn.prepare("PRAGMA table_info(api_profiles)")?;
-        let columns: Vec<String> = stmt
-            .query_map([], |row| row.get::<_, String>(1))?
-            .collect::<rusqlite::Result<_>>()?;
-        // 只认初版就存在的列。`target_app` 等是后续 ALTER TABLE 加的，
-        // 要求它们会把用户的旧备份挡在门外——那是回归而非加固。
-        for required in ["name", "provider", "api_url", "api_key"] {
-            if !columns.iter().any(|c| c == required) {
-                anyhow::bail!(
-                    "Not a Helio database (api_profiles missing `{required}` column): {}",
-                    path.display()
-                );
-            }
-        }
-        Ok(())
-    }
-
-    /// Validates an imported database in a private staging path, then atomically replaces a
-    /// closed live database. Callers must drop the old `Database` connection before this method.
-    pub fn replace_file_from_import(
-        input_path: &Path,
-        live_path: &Path,
-    ) -> Result<Option<PathBuf>> {
-        Self::validate_import_candidate(input_path)?;
-        let parent = parent_dir(live_path);
-        ensure_private_dir(&parent)?;
-
-        // staging 单独建目录：迁移会派生边车与 `*.premigrate.*` 备份，围在一处才好整体清理。
-        // 内容用一致快照而非裸拷贝：候选库自己可能带 -wal（例如另一个 Helio 实例的库副本）。
-        let staging_dir = parent.join(format!(".db.import.{}", Uuid::new_v4()));
-        ensure_private_dir(&staging_dir)?;
-        let staging_path = staging_dir.join("db.sqlite");
-        if let Err(error) = Self::snapshot_to(input_path, &staging_path) {
-            Self::discard_staging(&staging_dir);
-            return Err(error);
-        }
-
-        // 在**私有 staging 副本**上跑迁移：既验证该库确实能升到当前 schema
-        // （迁移失败就在替换前中止，live 库不受影响），又让替换后的库无需再迁移。
-        // 候选文件本身始终保持只读，迁移只作用于我们自己的副本。
-        let staged = match Self::open(&staging_path) {
-            Ok(migrated) => migrated,
-            Err(error) => {
-                Self::discard_staging(&staging_dir);
-                return Err(error.context(format!(
-                    "Cannot upgrade {} to the current schema",
-                    input_path.display()
-                )));
-            }
-        };
-        // 迁移写入停留在 staging 的 -wal 里，而后续 rename 只搬主文件。
-        // 必须先 checkpoint 把 WAL 合并进主文件，再删除边车文件——直接删 -wal 会丢迁移结果。
-        let checkpoint = staged.checkpoint_truncate();
-        drop(staged);
-        if let Err(error) = checkpoint.and_then(|_| Self::remove_sidecar_files(&staging_path)) {
-            Self::discard_staging(&staging_dir);
-            return Err(error);
-        }
-
-        // 备份用快照（含 live 库 WAL 中的数据），成功后才移除 live 文件；
-        // 旧实现直接 rename 主文件，会丢 WAL 数据且多一个中间失败态。
-        let backup_path = if live_path.exists() {
-            let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S_%f");
-            let backup = live_path.with_file_name(format!("db.backup.{timestamp}.sqlite"));
-            if let Err(error) = Self::snapshot_to(live_path, &backup) {
-                Self::discard_staging(&staging_dir);
-                return Err(error);
-            }
-            Some(backup)
-        } else {
-            None
-        };
-
-        let restore_from_backup = |error: anyhow::Error| -> anyhow::Error {
-            if let Some(backup) = backup_path.as_ref() {
-                // restore_replaced_file 内部会先清掉 live 及其边车文件再回滚。
-                if let Err(restore) = Self::restore_replaced_file(live_path, backup) {
-                    return rollback_failed(error, restore);
-                }
-            }
-            error
-        };
-
-        if live_path.exists() {
-            if let Err(error) = fs::remove_file(live_path) {
-                Self::discard_staging(&staging_dir);
-                return Err(restore_from_backup(error.into()));
-            }
-        }
-        // 关键：旧 -wal/-shm 必须清掉，否则新库会被旧 WAL"恢复"成替换前的内容。
-        if let Err(error) = Self::remove_sidecar_files(live_path) {
-            Self::discard_staging(&staging_dir);
-            return Err(restore_from_backup(error));
-        }
-
-        if let Err(error) = fs::rename(&staging_path, live_path) {
-            Self::discard_staging(&staging_dir);
-            return Err(restore_from_backup(error.into()));
-        }
-        ensure_private_file(live_path)?;
-        // 主文件已 rename 走，剩下的迁移副产物（含明文密钥）随目录一并清掉。
-        Self::discard_staging(&staging_dir);
-
-        // 轮转失败不应让「已成功替换」的导入变成 Err：否则 GUI 会回滚刚导入的库，
-        // 用户看到「导入失败」但其实主库已是新内容（或被二次回滚搞乱）。
-        if backup_path.is_some() {
-            if let Err(error) =
-                crate::adapters::backup::cleanup_prefix(&parent, "db.backup.", DB_BACKUP_KEEP)
-            {
-                tracing::warn!("导入成功，但旧备份轮转失败（可稍后手动清理）: {error:#}");
-            }
-        }
-        Ok(backup_path)
-    }
-
-    pub fn restore_replaced_file(live_path: &Path, backup_path: &Path) -> Result<()> {
-        if live_path.exists() {
-            fs::remove_file(live_path)?;
-        }
-        // 恢复的库同样不能套着失败导入留下的 -wal/-shm。
-        Self::remove_sidecar_files(live_path)?;
-        fs::rename(backup_path, live_path)?;
-        ensure_private_file(live_path)?;
-        Ok(())
-    }
-
-    // ========== API Profile 操作 ==========
-
-    /// 添加 API Profile
-    ///
-    /// 返回 `AppError` 而非 `anyhow::Error`：调用方需要知道「参数不合法」这个
-    /// 类别，而 `anyhow` 会把类别信息抹掉。未分类的内部失败仍可经
-    /// `From<anyhow::Error>` 自动转换。
-    pub fn add_profile(&self, profile: &ApiProfile) -> Result<i64, AppError> {
-        let mut profile = profile.clone();
-        if profile.target_app.is_none() {
-            return Err(AppError::invalid_input(
-                "API Profile 必须指定目标工具；暂不支持通用 Profile",
-            ));
-        }
-        // 同名预检：直接 INSERT 撞 UNIQUE 会退化成 Io 的“数据库操作失败”。
-        // 按类型给出 Conflict 需要先查一次；并发写由命令层 config_lock 串行化。
-        if let Some(target) = profile.target_app {
-            if self.profile_name_exists(&profile.name, target, None)? {
-                return Err(AppError::conflict(format!(
-                    "目标工具 {} 已存在同名 Profile：{}",
-                    target.as_str(),
-                    profile.name
-                )));
-            }
-        }
-        profile.normalize_keys();
-        let now = chrono::Utc::now().timestamp();
-        let model_mapping_json = profile
-            .claude
-            .model_mapping
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
-        let models_json = profile
-            .opencode
-            .models
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
-        let catalog_models_json = profile
-            .codex
-            .catalog_models
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
-        let opencode_model_configs_json = profile
-            .opencode
-            .model_configs
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
-        let api_keys_json = Self::serialize_api_keys_json(&profile)?;
-        let auth_args_json = profile
-            .codex
-            .auth_args
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
-        let (api_mode, max_tokens, opencode_api_mode) = match profile.target_app {
-            Some(TargetApp::OpenClaw) => (
-                profile.openclaw.api_mode.as_ref(),
-                profile.openclaw.max_tokens,
-                None,
-            ),
-            Some(TargetApp::Hermes) => (profile.hermes.api_mode.as_ref(), None, None),
-            Some(TargetApp::OpenCode) => (None, None, profile.opencode.opencode_api_mode.as_ref()),
-            _ => (
-                profile
-                    .hermes
-                    .api_mode
-                    .as_ref()
-                    .or(profile.openclaw.api_mode.as_ref()),
-                profile.openclaw.max_tokens,
-                None,
-            ),
-        };
-
-        self.conn.execute(
-            "INSERT INTO api_profiles (name, provider, api_url, api_key, model_mapping, model, reasoning_effort, context_1m, target_app, models, wire_api, env_key, requires_openai_auth, service_tier, experimental_bearer_token, supports_standalone_web_search, aws_profile, aws_region, reasoning_summary, verbosity, auth_command, auth_args, auth_timeout_ms, auth_refresh_interval_ms, auth_cwd, api_mode, max_tokens, api_keys_json, catalog_models, opencode_api_mode, opencode_model_configs, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33)",
-            params![
-                &profile.name,
-                &profile.provider,
-                &profile.api_url,
-                &profile.api_key,
-                model_mapping_json,
-                &profile.model,
-                &profile.codex.reasoning_effort,
-                profile.context_1m.map(|b| b as i64),
-                profile.target_app.as_ref().map(|t| t.as_str()),
-                models_json,
-                &profile.codex.wire_api,
-                &profile.codex.env_key,
-                profile.codex.requires_openai_auth.map(|b| b as i64),
-                &profile.codex.service_tier,
-                &profile.codex.experimental_bearer_token,
-                profile.codex.supports_standalone_web_search.map(|b| b as i64),
-                &profile.codex.aws_profile,
-                &profile.codex.aws_region,
-                &profile.codex.reasoning_summary,
-                &profile.codex.verbosity,
-                &profile.codex.auth_command,
-                auth_args_json,
-                profile.codex.auth_timeout_ms,
-                profile.codex.auth_refresh_interval_ms,
-                &profile.codex.auth_cwd,
-                api_mode,
-                max_tokens,
-                api_keys_json,
-                catalog_models_json,
-                opencode_api_mode,
-                opencode_model_configs_json,
-                now,
-                now
-            ],
-        )?;
-
-        Ok(self.conn.last_insert_rowid())
-    }
-
-    /// 把一行 (13 列固定顺序) 映射为 ApiProfile，供各 SELECT 复用。
-    const PROFILE_SELECT: &'static str = concat!(
-        "id, name, provider, api_url, api_key, model_mapping, model, ",
-        "reasoning_effort, context_1m, created_at, updated_at, target_app, models, ",
-        "wire_api, env_key, requires_openai_auth, service_tier, experimental_bearer_token, ",
-        "supports_standalone_web_search, aws_profile, aws_region, reasoning_summary, verbosity, ",
-        "auth_command, auth_args, auth_timeout_ms, auth_refresh_interval_ms, auth_cwd, ",
-        "api_mode, max_tokens, ",
-        "api_keys_json, catalog_models, opencode_api_mode, opencode_model_configs"
-    );
-
-    fn row_to_profile(row: &rusqlite::Row) -> rusqlite::Result<ApiProfile> {
-        let model_mapping_str: Option<String> = row.get("model_mapping")?;
-        let model_mapping = model_mapping_str
-            .as_deref()
-            .map(serde_json::from_str)
-            .transpose()
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-        let context_1m: Option<i64> = row.get("context_1m")?;
-        let target_app_str: Option<String> = row.get("target_app")?;
-        let target_app = target_app_str.as_deref().and_then(TargetApp::parse);
-        let models_str: Option<String> = row.get("models")?;
-        let models = models_str
-            .as_deref()
-            .map(serde_json::from_str)
-            .transpose()
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-        let wire_api: Option<String> = row.get("wire_api")?;
-        let requires_openai_auth: Option<i64> = row.get("requires_openai_auth")?;
-        let supports_standalone_web_search: Option<i64> =
-            row.get("supports_standalone_web_search")?;
-        let api_mode: Option<String> = row.get("api_mode")?;
-        let max_tokens: Option<i64> = row.get("max_tokens")?;
-        let api_keys_str: Option<String> = row.get("api_keys_json")?;
-        let api_keys = api_keys_str
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-            .map(serde_json::from_str)
-            .transpose()
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-        let catalog_models_str: Option<String> = row.get("catalog_models")?;
-        let catalog_models = catalog_models_str
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-            .map(serde_json::from_str)
-            .transpose()
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-        let opencode_model_configs_str: Option<String> = row.get("opencode_model_configs")?;
-        let opencode_model_configs = opencode_model_configs_str
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-            .map(serde_json::from_str)
-            .transpose()
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-        let opencode_api_mode: Option<String> = row.get("opencode_api_mode")?;
-        let auth_args_str: Option<String> = row.get("auth_args")?;
-        let auth_args = auth_args_str
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-            .map(serde_json::from_str)
-            .transpose()
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-
-        // 工具字段按 target_app 归属，避免 Hermes/OpenClaw 互相污染
-        let (hermes_api_mode, openclaw_api_mode, openclaw_max_tokens) = match target_app {
-            Some(TargetApp::Hermes) => (api_mode, None, None),
-            Some(TargetApp::OpenClaw) => (None, api_mode, max_tokens),
-            _ => (api_mode.clone(), api_mode, max_tokens),
-        };
-
-        let mut profile = ApiProfile {
-            id: Some(row.get("id")?),
-            name: row.get("name")?,
-            provider: row.get("provider")?,
-            api_url: row.get("api_url")?,
-            api_key: row.get("api_key")?,
-            api_keys,
-            model: row.get("model")?,
-            context_1m: context_1m.map(|v| v != 0),
-            created_at: Some(row.get("created_at")?),
-            updated_at: Some(row.get("updated_at")?),
-            target_app,
-            claude: ClaudeProfileFields { model_mapping },
-            codex: CodexProfileFields {
-                reasoning_effort: row.get("reasoning_effort")?,
-                reasoning_summary: row.get("reasoning_summary")?,
-                verbosity: row.get("verbosity")?,
-                wire_api,
-                env_key: row.get("env_key")?,
-                requires_openai_auth: requires_openai_auth.map(|v| v != 0),
-                service_tier: row.get("service_tier")?,
-                experimental_bearer_token: row.get("experimental_bearer_token")?,
-                supports_standalone_web_search: supports_standalone_web_search.map(|v| v != 0),
-                aws_profile: row.get("aws_profile")?,
-                aws_region: row.get("aws_region")?,
-                auth_command: row.get("auth_command")?,
-                auth_args,
-                auth_timeout_ms: row.get("auth_timeout_ms")?,
-                auth_refresh_interval_ms: row.get("auth_refresh_interval_ms")?,
-                auth_cwd: row.get("auth_cwd")?,
-                catalog_models,
-            },
-            opencode: OpenCodeProfileFields {
-                models,
-                opencode_api_mode,
-                model_configs: opencode_model_configs,
-            },
-            hermes: HermesProfileFields {
-                api_mode: hermes_api_mode,
-            },
-            openclaw: OpenClawProfileFields {
-                api_mode: openclaw_api_mode,
-                max_tokens: openclaw_max_tokens,
-            },
-        };
-        // 老数据：仅有 api_key → 运行时归一为单条 default active
-        profile.normalize_keys();
-        Ok(profile)
-    }
-
-    fn serialize_api_keys_json(profile: &ApiProfile) -> Result<Option<String>> {
-        match &profile.api_keys {
-            Some(keys) if !keys.is_empty() => Ok(Some(serde_json::to_string(keys)?)),
-            _ => Ok(None),
-        }
-    }
-
-    /// 按 (name, target_app) 精确获取 profile。
-    pub fn get_profile_by_name_and_target(
-        &self,
-        name: &str,
-        target: TargetApp,
-    ) -> Result<ApiProfile> {
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT {} FROM api_profiles WHERE name = ?1 AND target_app = ?2",
-            Self::PROFILE_SELECT
-        ))?;
-        let profile = stmt.query_row(params![name, target.as_str()], Self::row_to_profile)?;
-        Ok(profile)
-    }
-
-    /// 某工具下是否已存在同名 profile(可排除某 id,用于改名校验)。
-    ///
-    /// GUI 导入流程使用的同名校验。
-    pub fn profile_name_exists(
-        &self,
-        name: &str,
-        target: TargetApp,
-        exclude_id: Option<i64>,
-    ) -> Result<bool> {
-        let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM api_profiles WHERE name = ?1 AND target_app = ?2 AND (?3 IS NULL OR id != ?3)",
-            params![name, target.as_str(), exclude_id],
-            |r| r.get(0),
-        )?;
-        Ok(count > 0)
-    }
-
-    /// 列出所有 API Profiles
-    pub fn list_profiles(&self) -> Result<Vec<ApiProfile>> {
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT {} FROM api_profiles ORDER BY name",
-            Self::PROFILE_SELECT
-        ))?;
-
-        let profiles = stmt
-            .query_map([], Self::row_to_profile)?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(profiles)
-    }
-
-    /// Assign one legacy profile whose target_app is NULL to an explicit tool.
-    /// The caller must make the ownership decision; the database never guesses.
-    /// 把「无归属」的遗留 Profile 指派给某个工具。
-    ///
-    /// 三种失败在语义上完全不同，因此必须给出不同的 `ErrorKind`——这正是
-    /// 本方法不能返回 `anyhow::Error` 的原因：上层要能区分「被删了」和
-    /// 「状态冲突」，两者的处置方式不一样。
-    pub fn assign_legacy_profile(
-        &self,
-        profile_id: i64,
-        target: TargetApp,
-    ) -> Result<(), AppError> {
-        let (name, current_target): (String, Option<String>) = self
-            .conn
-            .query_row(
-                "SELECT name, target_app FROM api_profiles WHERE id = ?1",
-                params![profile_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?
-            .ok_or_else(|| AppError::not_found(format!("Profile id={profile_id} 不存在")))?;
-        if current_target.is_some() {
-            return Err(AppError::conflict(format!(
-                "Profile id={profile_id} 已经归属明确工具"
-            )));
-        }
-        if self.profile_name_exists(&name, target, None)? {
-            return Err(AppError::conflict(format!(
-                "目标工具 {} 已存在同名 Profile：{}",
-                target.as_str(),
-                name
-            )));
-        }
-        self.conn.execute(
-            "UPDATE api_profiles SET target_app = ?1, updated_at = ?2 WHERE id = ?3 AND target_app IS NULL",
-            params![target.as_str(), chrono::Utc::now().timestamp(), profile_id],
-        )?;
-        Ok(())
-    }
-
-    /// Delete a legacy unassigned profile by id. Active rows are protected by
-    /// the foreign key cascade, but a NULL-target row cannot be a normal active
-    /// profile in the first place.
-    pub fn delete_legacy_profile(&self, profile_id: i64) -> Result<bool, AppError> {
-        let rows = self.conn.execute(
-            "DELETE FROM api_profiles WHERE id = ?1 AND target_app IS NULL",
-            params![profile_id],
-        )?;
-        Ok(rows > 0)
-    }
-
-    /// 更新 API Profile
-    ///
-    /// 按 `id` 定位记录（而非 name），因此**支持改名**。
-    /// id 为空时回退到按旧 name 定位（理论上现有 profile 都带 id）。
-    ///
-    /// 与 `add_profile` 一致：返回 `AppError`，让调用方能区分「参数不合法」
-    /// 与「数据库/磁盘故障」，而不是只拿到一段文本。
-    pub fn update_profile(&self, profile: &ApiProfile) -> Result<(), AppError> {
-        let mut profile = profile.clone();
-        if profile.target_app.is_none() {
-            return Err(AppError::invalid_input(
-                "API Profile 必须指定目标工具；暂不支持通用 Profile",
-            ));
-        }
-        profile.normalize_keys();
-        // 改名撞车与 add 同理：UPDATE 撞 UNIQUE 会退化成 Io，这里先给 Conflict。
-        // 无 id 时按 name 定位（不改名），不可能撞到别的行，跳过。
-        if let (Some(target), Some(id)) = (profile.target_app, profile.id) {
-            if self.profile_name_exists(&profile.name, target, Some(id))? {
-                return Err(AppError::conflict(format!(
-                    "目标工具 {} 已存在同名 Profile：{}",
-                    target.as_str(),
-                    profile.name
-                )));
-            }
-        }
-        let now = chrono::Utc::now().timestamp();
-        let model_mapping_json = profile
-            .claude
-            .model_mapping
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
-        let models_json = profile
-            .opencode
-            .models
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
-        let catalog_models_json = profile
-            .codex
-            .catalog_models
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
-        let opencode_model_configs_json = profile
-            .opencode
-            .model_configs
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
-        let api_keys_json = Self::serialize_api_keys_json(&profile)?;
-        let auth_args_json = profile
-            .codex
-            .auth_args
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
-        let (api_mode, max_tokens, opencode_api_mode) = match profile.target_app {
-            Some(TargetApp::OpenClaw) => (
-                profile.openclaw.api_mode.as_ref(),
-                profile.openclaw.max_tokens,
-                None,
-            ),
-            Some(TargetApp::Hermes) => (profile.hermes.api_mode.as_ref(), None, None),
-            Some(TargetApp::OpenCode) => (None, None, profile.opencode.opencode_api_mode.as_ref()),
-            _ => (
-                profile
-                    .hermes
-                    .api_mode
-                    .as_ref()
-                    .or(profile.openclaw.api_mode.as_ref()),
-                profile.openclaw.max_tokens,
-                None,
-            ),
-        };
-
-        match profile.id {
-            Some(id) => {
-                self.conn.execute(
-                    "UPDATE api_profiles SET name = ?1, provider = ?2, api_url = ?3, api_key = ?4,
-                     model_mapping = ?5, model = ?6, reasoning_effort = ?7, context_1m = ?8, target_app = ?9, models = ?10, wire_api = ?11, env_key = ?12, requires_openai_auth = ?13, service_tier = ?14, experimental_bearer_token = ?15, supports_standalone_web_search = ?16, aws_profile = ?17, aws_region = ?18, reasoning_summary = ?19, verbosity = ?20, auth_command = ?21, auth_args = ?22, auth_timeout_ms = ?23, auth_refresh_interval_ms = ?24, auth_cwd = ?25, api_mode = ?26, max_tokens = ?27, api_keys_json = ?28, catalog_models = ?29, opencode_api_mode = ?30, opencode_model_configs = ?31, updated_at = ?32 WHERE id = ?33",
-                    params![
-                        &profile.name,
-                        &profile.provider,
-                        &profile.api_url,
-                        &profile.api_key,
-                        model_mapping_json,
-                        &profile.model,
-                        &profile.codex.reasoning_effort,
-                        profile.context_1m.map(|b| b as i64),
-                        profile.target_app.as_ref().map(|t| t.as_str()),
-                        models_json,
-                        &profile.codex.wire_api,
-                        &profile.codex.env_key,
-                        profile.codex.requires_openai_auth.map(|b| b as i64),
-                        &profile.codex.service_tier,
-                        &profile.codex.experimental_bearer_token,
-                        profile.codex.supports_standalone_web_search.map(|b| b as i64),
-                        &profile.codex.aws_profile,
-                        &profile.codex.aws_region,
-                        &profile.codex.reasoning_summary,
-                        &profile.codex.verbosity,
-                        &profile.codex.auth_command,
-                        auth_args_json,
-                        profile.codex.auth_timeout_ms,
-                        profile.codex.auth_refresh_interval_ms,
-                        &profile.codex.auth_cwd,
-                        api_mode,
-                        max_tokens,
-                        api_keys_json,
-                        catalog_models_json,
-                        opencode_api_mode,
-                        opencode_model_configs_json,
-                        now,
-                        id
-                    ],
-                )?;
-            }
-            None => {
-                // 无 id：按 name 定位，不改名
-                self.conn.execute(
-                    "UPDATE api_profiles SET provider = ?1, api_url = ?2, api_key = ?3,
-                     model_mapping = ?4, model = ?5, reasoning_effort = ?6, context_1m = ?7, target_app = ?8, models = ?9, wire_api = ?10, env_key = ?11, requires_openai_auth = ?12, service_tier = ?13, experimental_bearer_token = ?14, supports_standalone_web_search = ?15, aws_profile = ?16, aws_region = ?17, reasoning_summary = ?18, verbosity = ?19, auth_command = ?20, auth_args = ?21, auth_timeout_ms = ?22, auth_refresh_interval_ms = ?23, auth_cwd = ?24, api_mode = ?25, max_tokens = ?26, api_keys_json = ?27, catalog_models = ?28, opencode_api_mode = ?29, opencode_model_configs = ?30, updated_at = ?31 WHERE name = ?32",
-                    params![
-                        &profile.provider,
-                        &profile.api_url,
-                        &profile.api_key,
-                        model_mapping_json,
-                        &profile.model,
-                        &profile.codex.reasoning_effort,
-                        profile.context_1m.map(|b| b as i64),
-                        profile.target_app.as_ref().map(|t| t.as_str()),
-                        models_json,
-                        &profile.codex.wire_api,
-                        &profile.codex.env_key,
-                        profile.codex.requires_openai_auth.map(|b| b as i64),
-                        &profile.codex.service_tier,
-                        &profile.codex.experimental_bearer_token,
-                        profile.codex.supports_standalone_web_search.map(|b| b as i64),
-                        &profile.codex.aws_profile,
-                        &profile.codex.aws_region,
-                        &profile.codex.reasoning_summary,
-                        &profile.codex.verbosity,
-                        &profile.codex.auth_command,
-                        auth_args_json,
-                        profile.codex.auth_timeout_ms,
-                        profile.codex.auth_refresh_interval_ms,
-                        &profile.codex.auth_cwd,
-                        api_mode,
-                        max_tokens,
-                        api_keys_json,
-                        catalog_models_json,
-                        opencode_api_mode,
-                        opencode_model_configs_json,
-                        now,
-                        &profile.name
-                    ],
-                )?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// 删除某工具下指定名称的 Profile。
-    pub fn delete_profile(&self, name: &str, target: TargetApp) -> Result<bool> {
-        // 先查 id 清理 active 引用，再删
-        let id: Option<i64> = self
-            .conn
-            .query_row(
-                "SELECT id FROM api_profiles WHERE name = ?1 AND target_app = ?2",
-                params![name, target.as_str()],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if let Some(pid) = id {
-            self.conn.execute(
-                "DELETE FROM active_profiles WHERE profile_id = ?1",
-                params![pid],
-            )?;
-        }
-        let rows = self.conn.execute(
-            "DELETE FROM api_profiles WHERE name = ?1 AND target_app = ?2",
-            params![name, target.as_str()],
-        )?;
-        Ok(rows > 0)
-    }
-
-    // ========== 共享配置操作 ==========
-
-    /// 保存共享配置
-    pub fn save_shared_config(
-        &self,
-        target_app: TargetApp,
-        config: serde_json::Value,
-    ) -> Result<(), AppError> {
-        let now = chrono::Utc::now().timestamp();
-        let config_json = serde_json::to_string(&config)?;
-
-        self.conn.execute(
-            "INSERT OR REPLACE INTO shared_configs (target_app, config_json, updated_at)
-             VALUES (?1, ?2, ?3)",
-            params![target_app.as_str(), config_json, now],
-        )?;
-
-        Ok(())
-    }
-
-    /// 删除共享配置（切换事务回滚到「从未保存过」状态时使用）。
-    pub fn delete_shared_config(&self, target_app: TargetApp) -> Result<(), AppError> {
-        self.conn.execute(
-            "DELETE FROM shared_configs WHERE target_app = ?1",
-            params![target_app.as_str()],
-        )?;
-        Ok(())
-    }
-
-    /// 获取共享配置
-    pub fn get_shared_config(&self, target_app: TargetApp) -> Result<Option<SharedConfig>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT target_app, config_json, updated_at FROM shared_configs WHERE target_app = ?1",
-        )?;
-
-        let result = stmt
-            .query_row(params![target_app.as_str()], |row| {
-                let config_json: String = row.get(1)?;
-                let config = serde_json::from_str(&config_json)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-
-                Ok(SharedConfig {
-                    target_app,
-                    config,
-                    updated_at: Some(row.get(2)?),
-                })
-            })
-            .optional()?;
-
-        Ok(result)
-    }
-
-    /// Return the model IDs last written by Helio for each OpenCode provider.
-    pub fn get_opencode_managed_models(&self) -> Result<OpenCodeManagedModelState> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT provider_id, model_ids_json FROM opencode_model_state")?;
-        let mut state = OpenCodeManagedModelState::new();
-        let rows = stmt.query_map([], |row| {
-            let provider_id: String = row.get(0)?;
-            let model_ids_json: String = row.get(1)?;
-            let model_ids = serde_json::from_str(&model_ids_json)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-            Ok((provider_id, model_ids))
-        })?;
-        for row in rows {
-            let (provider_id, model_ids) = row?;
-            state.insert(provider_id, model_ids);
-        }
-        Ok(state)
-    }
-
-    /// Replace the complete OpenCode model ownership snapshot atomically.
-    pub fn replace_opencode_managed_models(&self, state: &OpenCodeManagedModelState) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
-        tx.execute("DELETE FROM opencode_model_state", [])?;
-        let now = chrono::Utc::now().timestamp();
-        for (provider_id, model_ids) in state {
-            tx.execute(
-                "INSERT INTO opencode_model_state (provider_id, model_ids_json, updated_at)
-                 VALUES (?1, ?2, ?3)",
-                params![provider_id, serde_json::to_string(model_ids)?, now],
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
-    }
-
-    /// Remove ownership metadata for a provider that is no longer used.
-    pub fn clear_opencode_managed_provider(&self, provider_id: &str) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM opencode_model_state WHERE provider_id = ?1",
-            params![provider_id.to_lowercase()],
-        )?;
-        Ok(())
-    }
-
-    /// Record provider ownership only once. Existing records are intentionally
-    /// preserved because a later switch cannot reliably distinguish a provider
-    /// created manually from one created by an older Helio version.
-    pub fn record_provider_ownership_if_missing(
-        &self,
-        target_app: TargetApp,
-        provider_id: &str,
-        managed_by_helio: bool,
-    ) -> Result<()> {
-        self.conn.execute(
-            "INSERT OR IGNORE INTO provider_ownership
-             (target_app, provider_id, managed_by_helio, updated_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![
-                target_app.as_str(),
-                provider_id.trim().to_lowercase(),
-                managed_by_helio as i64,
-                chrono::Utc::now().timestamp()
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn provider_managed_by_helio(
-        &self,
-        target_app: TargetApp,
-        provider_id: &str,
-    ) -> Result<Option<bool>> {
-        self.conn
-            .query_row(
-                "SELECT managed_by_helio FROM provider_ownership
-                 WHERE target_app = ?1 AND provider_id = ?2",
-                params![target_app.as_str(), provider_id.trim().to_lowercase()],
-                |row| row.get::<_, i64>(0).map(|value| value != 0),
-            )
-            .optional()
-            .map_err(Into::into)
-    }
-
-    pub fn clear_provider_ownership(&self, target_app: TargetApp, provider_id: &str) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM provider_ownership WHERE target_app = ?1 AND provider_id = ?2",
-            params![target_app.as_str(), provider_id.trim().to_lowercase()],
-        )?;
-        Ok(())
-    }
-
-    // ========== 活动 Profile 操作 ==========
-
-    /// 设置活动 Profile
-    pub fn set_active_profile(&self, target_app: TargetApp, profile_id: i64) -> Result<()> {
-        self.conn.execute(
-            "INSERT OR REPLACE INTO active_profiles (target_app, profile_id) VALUES (?1, ?2)",
-            params![target_app.as_str(), profile_id],
-        )?;
-        Ok(())
-    }
-
-    /// 清除某工具的活动 Profile（切换事务在「重复切换同一 profile」时用来制造
-    /// `active != target` 窗口，使崩溃恢复能区分「已完成」与「半完成」）。
-    pub fn clear_active_profile(&self, target_app: TargetApp) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM active_profiles WHERE target_app = ?1",
-            params![target_app.as_str()],
-        )?;
-        Ok(())
-    }
-
-    /// 获取活动 Profile
-    pub fn get_active_profile(&self, target_app: TargetApp) -> Result<Option<ActiveProfile>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT profile_id FROM active_profiles WHERE target_app = ?1")?;
-
-        let result = stmt
-            .query_row(params![target_app.as_str()], |row| {
-                Ok(ActiveProfile {
-                    profile_id: row.get(0)?,
-                })
-            })
-            .optional()?;
-
-        Ok(result)
-    }
-
-    pub fn get_profile_by_id(&self, id: i64) -> Result<Option<ApiProfile>> {
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT {} FROM api_profiles WHERE id = ?1",
-            Self::PROFILE_SELECT
-        ))?;
-        Ok(stmt
-            .query_row(params![id], Self::row_to_profile)
-            .optional()?)
-    }
-
-    pub fn get_active_profile_full(&self, target_app: TargetApp) -> Result<Option<ApiProfile>> {
-        match self.get_active_profile(target_app)? {
-            Some(active) => self.get_profile_by_id(active.profile_id),
-            None => Ok(None),
-        }
-    }
-
-    /// 获取某个 Profile 当前被哪些工具启用。
-    #[cfg(feature = "tauri-gui")]
-    pub fn get_active_targets_for_profile(&self, profile_id: i64) -> Result<Vec<TargetApp>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT target_app FROM active_profiles WHERE profile_id = ?1 ORDER BY target_app",
-        )?;
-
-        let targets = stmt
-            .query_map(params![profile_id], |row| row.get::<_, String>(0))?
-            .filter_map(|row| row.ok())
-            .filter_map(|target| TargetApp::parse(&target))
-            .collect();
-
-        Ok(targets)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{
+        ApiProfile, ClaudeProfileFields, CodexProfileFields, OpenClawProfileFields,
+        OpenCodeManagedModelState, OpenCodeProfileFields, TargetApp,
+    };
+    use rusqlite::params;
     use std::collections::HashMap;
+    use std::fs;
 
     #[test]
     fn a_failed_rollback_carries_the_marker_type_not_just_text() {
@@ -2139,6 +699,78 @@ mod tests {
         Ok(())
     }
 
+    /// 回归：**每一个**重建整表的迁移都必须先备份。
+    ///
+    /// `migrate_drop_model_effort_level` / `migrate_drop_model_thinking_enabled`
+    /// 与 `migrate_composite_unique` 一样会 `DROP TABLE api_profiles`（这张表
+    /// 装着全部明文 API key），早期只有后者做了备份。同文件另一处迁移的注释
+    /// 写着「迁移会重建整表，备份失败必须中止迁移，否则旧数据无兜底」——
+    /// 这条理由对三者同等适用。
+    ///
+    /// 两个迁移是**依次执行**的，所以「总数 ≥1」会被其中一个掩盖。这里逐个
+    /// 单独触发，断言各自都产出备份。
+    #[test]
+    fn every_table_rebuild_migration_creates_a_backup() -> Result<()> {
+        for (label, extra_column) in [
+            ("model_effort_level", "model_effort_level TEXT"),
+            ("model_thinking_enabled", "model_thinking_enabled INTEGER"),
+        ] {
+            let dir = tempfile::tempdir()?;
+            let db_path = dir.path().join("live.sqlite");
+
+            {
+                let conn = Connection::open(&db_path)?;
+                conn.execute_batch(&format!(
+                    r#"
+                    CREATE TABLE api_profiles (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT NOT NULL, provider TEXT NOT NULL,
+                        api_url TEXT NOT NULL, api_key TEXT NOT NULL,
+                        model_mapping TEXT, model TEXT, reasoning_effort TEXT,
+                        context_1m INTEGER, target_app TEXT, models TEXT,
+                        wire_api TEXT, env_key TEXT, requires_openai_auth INTEGER,
+                        {extra_column},
+                        service_tier TEXT, experimental_bearer_token TEXT,
+                        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+                        UNIQUE(name, target_app)
+                    );
+                    INSERT INTO api_profiles
+                        (name, provider, api_url, api_key, created_at, updated_at)
+                    VALUES ('legacy','openai','https://legacy.example','legacy-key',1,1);
+                    "#
+                ))?;
+            }
+
+            // 打开即触发该迁移。
+            drop(Database::open(&db_path)?);
+
+            let backups = fs::read_dir(dir.path())?
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.file_name()
+                        .to_string_lossy()
+                        .starts_with("live.sqlite.premigrate.")
+                })
+                .count();
+
+            assert!(
+                backups > 0,
+                "含 {label} 列的库触发重建整表迁移时，必须先产出 premigrate 备份"
+            );
+
+            // 数据本身也要还在。
+            let db = Database::open(&db_path)?;
+            let profile = db
+                .list_profiles()?
+                .into_iter()
+                .find(|p| p.name == "legacy")
+                .expect("迁移后旧数据应保留");
+            assert_eq!(profile.api_key, "legacy-key", "迁移不应丢数据（{label}）");
+        }
+
+        Ok(())
+    }
+
     #[test]
     fn test_premigrate_backups_are_rotated() -> Result<()> {
         let dir = tempfile::tempdir()?;
@@ -2543,6 +1175,67 @@ mod tests {
         let active = db.get_active_profile(TargetApp::ClaudeCode)?;
         assert!(active.is_some());
         assert_eq!(active.unwrap().profile_id, id);
+
+        Ok(())
+    }
+
+    /// 回归：无 id 时按 name 定位，**必须同时匹配 target_app**。
+    ///
+    /// 表的唯一约束是 `UNIQUE(name, target_app)`——不同工具下同名是被允许的。
+    /// 早期实现只写 `WHERE name = ?`，会把所有同名档案一起改掉（跨工具误写）。
+    #[test]
+    fn update_profile_without_id_does_not_cross_tools() -> Result<()> {
+        let db = Database::open(":memory:")?;
+
+        // 两个工具下各有一个同名档案，但 key 不同。
+        let make = |tool: TargetApp, key: &str| ApiProfile {
+            name: "shared-name".to_string(),
+            provider: "anthropic".to_string(),
+            api_url: "https://api.example.com/v1".to_string(),
+            api_key: key.to_string(),
+            target_app: Some(tool),
+            ..Default::default()
+        };
+        db.add_profile(&make(TargetApp::ClaudeCode, "sk-claude"))?;
+        db.add_profile(&make(TargetApp::Codex, "sk-codex"))?;
+
+        // 无 id 更新 Codex 那条：只有它该变。
+        db.update_profile(&ApiProfile {
+            id: None,
+            api_key: "sk-codex-updated".to_string(),
+            ..make(TargetApp::Codex, "sk-codex")
+        })?;
+
+        let claude = db.get_profile_by_name_and_target("shared-name", TargetApp::ClaudeCode)?;
+        let codex = db.get_profile_by_name_and_target("shared-name", TargetApp::Codex)?;
+
+        assert_eq!(
+            claude.api_key, "sk-claude",
+            "同名但不同工具的档案不应被改动（跨工具误写）"
+        );
+        assert_eq!(codex.api_key, "sk-codex-updated", "目标档案应已更新");
+
+        Ok(())
+    }
+
+    /// 回归：无 id 且无 target_app 时无法唯一定位，必须报错而不是猜。
+    #[test]
+    fn update_profile_without_id_or_target_app_is_rejected() -> Result<()> {
+        let db = Database::open(":memory:")?;
+
+        let err = db
+            .update_profile(&ApiProfile {
+                id: None,
+                name: "who-knows".to_string(),
+                provider: "anthropic".to_string(),
+                api_url: "https://api.example.com/v1".to_string(),
+                api_key: "sk-x".to_string(),
+                target_app: None,
+                ..Default::default()
+            })
+            .expect_err("缺少定位信息应报错");
+
+        assert_eq!(err.kind, crate::error::ErrorKind::InvalidInput);
 
         Ok(())
     }

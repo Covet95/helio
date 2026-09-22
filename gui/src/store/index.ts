@@ -41,6 +41,23 @@ let statusSeq = 0;
 let profilesRequest: Promise<void> | null = null;
 let statusRequest: Promise<void> | null = null;
 
+/**
+ * 写操作 → 刷新，失败时记日志并**原样抛出**。
+ *
+ * 四个 mutation 原先各写一遍同样的 try/catch/refresh（只差日志文案）。
+ * 关键是必须把错误继续抛给调用方——页面据此显示「启用失败：<原因>」，
+ * 在这里吞掉会让失败静默。
+ */
+async function runProfileMutation(label: string, op: () => Promise<unknown>): Promise<void> {
+  try {
+    await op();
+    await useStore.getState().refresh();
+  } catch (error) {
+    console.error(`Failed to ${label}:`, error);
+    throw error;
+  }
+}
+
 export const useStore = create<AppStore>((set, get) => ({
   profiles: [],
   loadingProfiles: false,
@@ -81,45 +98,12 @@ export const useStore = create<AppStore>((set, get) => ({
     await Promise.all([get().fetchProfiles(true), get().fetchStatus(true)]);
   },
 
-  addProfile: async (profile) => {
-    try {
-      await tauriApi.addProfile(profile);
-      await get().refresh();
-    } catch (error) {
-      console.error('Failed to add profile:', error);
-      throw error;
-    }
-  },
-
-  updateProfile: async (profile) => {
-    try {
-      await tauriApi.updateProfile(profile);
-      await get().refresh();
-    } catch (error) {
-      console.error('Failed to update profile:', error);
-      throw error;
-    }
-  },
-
-  deleteProfile: async (targetApp, name) => {
-    try {
-      await tauriApi.deleteProfile(targetApp, name);
-      await get().refresh();
-    } catch (error) {
-      console.error('Failed to delete profile:', error);
-      throw error;
-    }
-  },
-
-  switchProfile: async (app, name, probe) => {
-    try {
-      await tauriApi.switchProfile(app, name, probe);
-      await get().refresh();
-    } catch (error) {
-      console.error('Failed to switch profile:', error);
-      throw error;
-    }
-  },
+  addProfile: (profile) => runProfileMutation('add profile', () => tauriApi.addProfile(profile)),
+  updateProfile: (profile) => runProfileMutation('update profile', () => tauriApi.updateProfile(profile)),
+  deleteProfile: (targetApp, name) =>
+    runProfileMutation('delete profile', () => tauriApi.deleteProfile(targetApp, name)),
+  switchProfile: (app, name, probe) =>
+    runProfileMutation('switch profile', () => tauriApi.switchProfile(app, name, probe)),
 
   fetchStatus: (force = false) => {
     if (statusRequest && !force) return statusRequest;

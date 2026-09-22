@@ -1,4 +1,5 @@
-import { useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
+import { Alert } from '@/components/common/Alert';
 import type {
   ApiKeyEntry,
   ApiProfile,
@@ -9,7 +10,7 @@ import type {
 } from '../../types';
 import { SUPPORTED_TOOLS } from '../../types';
 import { Button } from '../../components/common/Button';
-import { Modal, Field } from '../../components/common/Modal';
+import { Modal, Field, ConfirmDialog } from '../../components/common/Modal';
 import { PROVIDER_PRESETS, REASONING_LEVELS, SERVICE_TIERS, REASONING_SUMMARIES, VERBOSITY_LEVELS, CODEX_CATALOG_LEVELS } from '../../lib/presets';
 import { cn, maskApiKey, humanizeError } from '../../lib/utils';
 import { tauriApi } from '../../lib/tauri';
@@ -19,51 +20,17 @@ import {
   contextPreviewLine,
   type ContextMode,
 } from '../../lib/contextWindow';
+import { ApiModeSelector, emptyProfileForTool } from './helpers';
 import {
-  emptyProfileForTool,
-  normalizeCodexCatalogModels,
-  normalizeOpenCodeModelConfigs,
-} from './helpers';
+  ensureKeyPool,
+  newKeyId,
+  normalizeSubmit,
+  withActiveKey,
+} from './submitNormalize';
 
 // OpenCode 推理强度档位：variant 快捷添加与 reasoningEffort 下拉共用同一组官方档位。
 const OPENCODE_EFFORT_LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
-function newKeyId(): string {
-  return `k${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
-}
-
-function ensureKeyPool(p: ApiProfile): ApiKeyEntry[] {
-  if (p.api_keys && p.api_keys.length > 0) {
-    return p.api_keys.map((e) => ({ ...e }));
-  }
-  if (p.api_key?.trim()) {
-    return [
-      {
-        id: newKeyId(),
-        label: 'default',
-        key: p.api_key,
-        is_active: true,
-      },
-    ];
-  }
-  return [
-    {
-      id: newKeyId(),
-      label: 'default',
-      key: '',
-      is_active: true,
-    },
-  ];
-}
-
-function withActiveKey(p: ApiProfile, keys: ApiKeyEntry[]): ApiProfile {
-  const active = keys.find((k) => k.is_active) || keys[0];
-  return {
-    ...p,
-    api_keys: keys,
-    api_key: active?.key ?? p.api_key,
-  };
-}
 
 export function ProfileModal({
   profile, initialTool, seedFrom, onClose, onSave,
@@ -77,10 +44,14 @@ export function ProfileModal({
   const initialProfile = profile;
   const initialModalTool = initialProfile?.target_app ?? initialTool;
   const [tool, setTool] = useState<TargetApp>(initialModalTool);
-  const [form, setForm] = useState<ApiProfile>(() => {
+  // 初始值只算一次，同时留作「未保存修改」的比对基准。不能每次渲染重算：
+  // `ensureKeyPool` 里的 `newKeyId()` 用 `Math.random()`，重算必然不同，
+  // 于是表单会永远被判定为「有改动」——守卫就成了每次都弹的噪音。
+  const [initialForm] = useState<ApiProfile>(() => {
     const base = initialProfile || emptyProfileForTool(initialModalTool, seedFrom);
     return withActiveKey(base, ensureKeyPool(base));
   });
+  const [form, setForm] = useState<ApiProfile>(initialForm);
   const [models, setModels] = useState<FetchedModel[]>([]);
   const [loadingModels, setLoadingModels] = useState(false);
   const [checkingApi, setCheckingApi] = useState(false);
@@ -96,6 +67,9 @@ export function ProfileModal({
   const [variantNameDrafts, setVariantNameDrafts] = useState<Record<string, string>>({});
   const [optionsDrafts, setOptionsDrafts] = useState<Record<string, string>>({});
   const [optionsErrors, setOptionsErrors] = useState<Record<string, string>>({});
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
+  /** 待切换的目标工具（有未保存内容时需先确认）。 */
+  const [pendingTool, setPendingTool] = useState<TargetApp | null>(null);
 
   const keys = form.api_keys && form.api_keys.length > 0 ? form.api_keys : ensureKeyPool(form);
   const activeKey =
@@ -355,75 +329,69 @@ export function ProfileModal({
     }));
   };
 
-  const submit = async () => {
-    if (savingRef.current) return;
-    const normalized = withActiveKey(form, ensureKeyPool(form));
-    const usesCodexEnv = tool === 'codex' && Boolean(normalized.env_key?.trim());
-    const usesAuthCmd = tool === 'codex' && Boolean(normalized.auth_command?.trim());
-    const usesBearer = tool === 'codex' && Boolean(normalized.experimental_bearer_token?.trim());
-    const usesBedrock = tool === 'codex' && normalized.provider.trim().toLowerCase() === 'amazon-bedrock';
-    if (!normalized.name.trim() || !normalized.provider.trim() || (!usesBedrock && (!normalized.api_url.trim() || (!usesCodexEnv && !usesAuthCmd && !usesBearer && !normalized.api_key.trim())))) {
-      setFormErr('请填写名称、Provider、API URL，并提供 API Key、环境变量名、Bearer Token 或 Auth 命令');
+  /**
+   * 表单是否偏离了初始值。
+   *
+   * 用 `JSON.stringify` 逐字段比对而不是逐个 `!==`：`ApiProfile` 有 30+ 字段，
+   * 漏掉一个就会让「改了那个字段却没提示」——而这种遗漏不会有任何报错。
+   * 表单值都是 JSON 可序列化的普通数据，顺序由对象字面量决定、稳定可比。
+   */
+  const isDirty = useMemo(
+    () => JSON.stringify(form) !== JSON.stringify(initialForm),
+    [form, initialForm],
+  );
+
+  /** 关闭前的守卫：有未保存修改时先问一句。 */
+  const requestClose = () => {
+    if (saving) return;
+    if (!isDirty) {
+      onClose();
       return;
     }
-    if (usesCodexEnv && usesBearer) {
-      setFormErr('Codex 环境变量与 Bearer Token 请只保留一个（与 Auth 命令也互斥）');
+    setConfirmDiscard(true);
+  };
+
+  /** 切到另一个目标工具（仅新建时可选）。 */
+  const applyToolChange = (next: TargetApp) => {
+    setTool(next);
+    const base = emptyProfileForTool(next, seedFrom);
+    setForm(withActiveKey(base, ensureKeyPool(base)));
+    setModels([]);
+    setModelErr('');
+    setApiHealth(null);
+    setMultiKeyMode(false);
+  };
+
+  /**
+   * 切换目标工具会**整体重置表单**（各工具字段集不同，没法保留）。
+   * 已经填过东西时先问一句——否则用户填完 URL/Key/模型后点错工具，
+   * 输入无声消失。
+   */
+  const requestToolChange = (next: TargetApp) => {
+    if (next === tool) return;
+    if (!isDirty) {
+      applyToolChange(next);
+      return;
+    }
+    setPendingTool(next);
+  };
+
+  const submit = async () => {
+    if (savingRef.current) return;
+
+    // 字段归一与互斥清洗已抽到 `submitNormalize`（纯函数、有表驱动单测）——
+    // 这段逻辑此前埋在这里，是全应用最难测也最容易出错的部分。
+    const result = normalizeSubmit(form, tool);
+    if (!result.ok) {
+      setFormErr(result.error);
       return;
     }
     setFormErr('');
-    let catalog_models = normalized.catalog_models;
-    if (tool === 'codex' && catalog_models) {
-      catalog_models = normalizeCodexCatalogModels(catalog_models);
-    } else if (tool !== 'codex') {
-      catalog_models = undefined;
-    }
-    const model_configs = tool === 'opencode'
-      ? normalizeOpenCodeModelConfigs(normalized.model_configs)
-      : undefined;
-    // Codex wire 归一：responses 别名与 chat 系历史值 → responses，未知值 → 不保存（后端默认 responses）。
-    let wire_api = normalized.wire_api;
-    if (tool === 'codex' && wire_api?.trim()) {
-      const w = wire_api.trim().toLowerCase();
-      wire_api = [
-        'responses', 'openai-responses', 'openai_responses', 'codex_responses',
-        'chat', 'chat_completions', 'openai-chat',
-      ].includes(w) ? 'responses' : undefined;
-    } else if (tool !== 'codex') {
-      wire_api = undefined;
-    }
-    // auth 命令与静态凭据互斥：以 auth 命令为准，清掉冲突字段。
-    const auth_args = usesAuthCmd
-      ? (normalized.auth_args || []).map((a) => a.trim()).filter(Boolean)
-      : undefined;
-    const positiveOrUndefined = (n: unknown) =>
-      typeof n === 'number' && Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
+
     savingRef.current = true;
     setSaving(true);
     try {
-      await onSave({
-      ...normalized,
-      api_url: usesBedrock ? '' : normalized.api_url,
-      api_key: usesBedrock ? '' : normalized.api_key,
-      api_keys: usesBedrock ? undefined : normalized.api_keys,
-      wire_api,
-      env_key: (usesBedrock || usesAuthCmd) ? undefined : normalized.env_key,
-      experimental_bearer_token: usesAuthCmd ? undefined : normalized.experimental_bearer_token,
-      requires_openai_auth: usesAuthCmd ? undefined : normalized.requires_openai_auth,
-      auth_command: usesAuthCmd ? normalized.auth_command?.trim() || undefined : undefined,
-      auth_args: auth_args?.length ? auth_args : undefined,
-      auth_timeout_ms: usesAuthCmd ? positiveOrUndefined(normalized.auth_timeout_ms) : undefined,
-      auth_refresh_interval_ms: usesAuthCmd ? positiveOrUndefined(normalized.auth_refresh_interval_ms) : undefined,
-      auth_cwd: usesAuthCmd ? normalized.auth_cwd?.trim() || undefined : undefined,
-      supports_standalone_web_search: usesBedrock
-        ? undefined
-        : normalized.supports_standalone_web_search || undefined,
-      target_app: tool,
-      catalog_models,
-      model_configs,
-      opencode_api_mode: tool === "opencode"
-        ? normalized.opencode_api_mode?.trim() || undefined
-        : undefined,
-      });
+      await onSave(result.value);
     } catch (error) {
       setFormErr(humanizeError(error));
     } finally {
@@ -435,12 +403,12 @@ export function ProfileModal({
   return (
     <Modal
       title={profile ? '编辑配置档案' : '新建配置档案'}
-      onClose={onClose}
+      onClose={requestClose}
       busy={saving}
       size="xl"
       footer={
         <>
-          <Button type="button" variant="ghost" disabled={saving} onClick={onClose}>取消</Button>
+          <Button type="button" variant="ghost" disabled={saving} onClick={requestClose}>取消</Button>
           <Button type="button" disabled={saving} className="min-w-20" onClick={submit}>{saving ? '保存中…' : profile ? '保存' : '创建'}</Button>
         </>
       }
@@ -451,9 +419,7 @@ export function ProfileModal({
       >
         <fieldset disabled={saving} className="min-w-0 space-y-4">
           {formErr && (
-            <div role="alert" className="break-words rounded-md border border-danger/30 bg-danger/8 px-3 py-2 text-[12.5px] text-danger">
-              {formErr}
-            </div>
+            <Alert tone="error">{formErr}</Alert>
           )}
           {!initialProfile && (
             <div>
@@ -464,17 +430,7 @@ export function ProfileModal({
                     key={t.id}
                     type="button"
                     disabled={loadingModels || checkingApi}
-                    onClick={() => {
-                      setTool(t.id);
-                      if (!initialProfile) {
-                        const base = emptyProfileForTool(t.id, seedFrom);
-                        setForm(withActiveKey(base, ensureKeyPool(base)));
-                        setModels([]);
-                        setModelErr('');
-                        setApiHealth(null);
-                        setMultiKeyMode(false);
-                      }
-                    }}
+                    onClick={() => requestToolChange(t.id)}
                     className={`whitespace-nowrap rounded-md px-3 py-1.5 text-[12.5px] font-medium border transition-all ${
                       tool === t.id ? 'border-accent text-accent bg-accent/8' : 'border-line text-ink-dim hover:border-line-strong'
                     }`}
@@ -1343,26 +1299,10 @@ export function ProfileModal({
                   <div className="text-[12px] font-semibold text-ink-dim">Hermes 模型参数</div>
                   <div>
                     <span className="mb-1.5 block text-[12px] font-medium text-ink-dim">协议模式 (api_mode)</span>
-                    <div className="flex gap-1.5">
-                      {[
-                        { value: 'chat_completions', label: 'Chat' },
-                        { value: 'anthropic_messages', label: 'Anthropic' },
-                        { value: 'codex_responses', label: 'Responses' },
-                      ].map((w) => (
-                        <button
-                          key={w.value}
-                          type="button"
-                          onClick={() => setForm((f) => ({ ...f, api_mode: w.value }))}
-                          className={`flex-1 rounded-md border px-2 py-1.5 text-[12px] font-medium transition-all ${
-                            (form.api_mode || 'chat_completions') === w.value
-                              ? 'border-accent bg-accent/8 text-accent'
-                              : 'border-line text-ink-dim hover:border-line-strong'
-                          }`}
-                        >
-                          {w.label}
-                        </button>
-                      ))}
-                    </div>
+                    <ApiModeSelector
+                      value={form.api_mode}
+                      onChange={(api_mode) => setForm((f) => ({ ...f, api_mode }))}
+                    />
                     <div className="mt-1 text-[11px] text-ink-faint">
                       写入 <code className="font-mono">model.api_mode</code> 与{' '}
                       <code className="font-mono">custom_providers[].api_mode</code>
@@ -1410,26 +1350,10 @@ export function ProfileModal({
                   <div className="text-[12px] font-semibold text-ink-dim">OpenClaw 模型参数</div>
                   <div>
                     <span className="mb-1.5 block text-[12px] font-medium text-ink-dim">协议模式 (api)</span>
-                    <div className="flex gap-1.5">
-                      {[
-                        { value: 'chat_completions', label: 'Chat' },
-                        { value: 'anthropic_messages', label: 'Anthropic' },
-                        { value: 'codex_responses', label: 'Responses' },
-                      ].map((w) => (
-                        <button
-                          key={w.value}
-                          type="button"
-                          onClick={() => setForm((f) => ({ ...f, api_mode: w.value }))}
-                          className={`flex-1 rounded-md border px-2 py-1.5 text-[12px] font-medium transition-all ${
-                            (form.api_mode || 'chat_completions') === w.value
-                              ? 'border-accent bg-accent/8 text-accent'
-                              : 'border-line text-ink-dim hover:border-line-strong'
-                          }`}
-                        >
-                          {w.label}
-                        </button>
-                      ))}
-                    </div>
+                    <ApiModeSelector
+                      value={form.api_mode}
+                      onChange={(api_mode) => setForm((f) => ({ ...f, api_mode }))}
+                    />
                     <div className="mt-1 text-[11px] text-ink-faint">
                       写入 <code className="font-mono">models.providers.&lt;id&gt;.api</code>
                       。Provider 填 provider id（如 cpa）；primary ={' '}
@@ -1644,6 +1568,43 @@ export function ProfileModal({
           )}
         </fieldset>
       </form>
+
+      {pendingTool && (
+        <ConfirmDialog
+          title="切换目标工具？"
+          message={
+            `各工具需要的字段不同，切到 ${SUPPORTED_TOOLS.find((t) => t.id === pendingTool)?.displayName ?? pendingTool} 会清空当前已填的内容。`
+          }
+          confirmText="切换并清空"
+          cancelText="留在当前工具"
+          danger
+          onCancel={() => setPendingTool(null)}
+          onConfirm={() => {
+            const next = pendingTool;
+            setPendingTool(null);
+            if (next) applyToolChange(next);
+          }}
+        />
+      )}
+
+      {confirmDiscard && (
+        <ConfirmDialog
+          title="放弃未保存的修改？"
+          message={
+            profile
+              ? `「${profile.name}」的修改尚未保存，关闭后会丢失。`
+              : '新建的档案尚未保存，关闭后会丢失。'
+          }
+          confirmText="放弃修改"
+          cancelText="继续编辑"
+          danger
+          onCancel={() => setConfirmDiscard(false)}
+          onConfirm={() => {
+            setConfirmDiscard(false);
+            onClose();
+          }}
+        />
+      )}
     </Modal>
   );
 }

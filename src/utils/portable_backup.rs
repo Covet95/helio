@@ -144,10 +144,10 @@ pub fn extract_portable_backup(archive_path: &Path) -> Result<PortableBackupCont
         let mut entry = entry.context("Failed to read portable archive entry")?;
         let header = entry.header();
         if header.entry_type().is_symlink() || header.entry_type().is_hard_link() {
-            anyhow::bail!("Portable archive contains a link entry");
+            anyhow::bail!("便携备份里含有链接条目，已拒绝");
         }
         if !header.entry_type().is_file() {
-            anyhow::bail!("Portable archive contains a non-file entry");
+            anyhow::bail!("便携备份里含有非普通文件条目，已拒绝");
         }
         let path = entry
             .path()
@@ -163,7 +163,7 @@ pub fn extract_portable_backup(archive_path: &Path) -> Result<PortableBackupCont
         match name {
             MANIFEST_NAME => {
                 if manifest.is_some() || size > MAX_MANIFEST_BYTES {
-                    anyhow::bail!("Portable archive manifest is invalid");
+                    anyhow::bail!("便携备份的 manifest 无效");
                 }
                 let mut bytes = Vec::with_capacity(size as usize);
                 entry
@@ -177,15 +177,15 @@ pub fn extract_portable_backup(archive_path: &Path) -> Result<PortableBackupCont
             }
             DATABASE_NAME | SKILLS_NAME => {
                 if size > MAX_COMPONENT_BYTES {
-                    anyhow::bail!("Portable archive component is too large: {name}");
+                    anyhow::bail!("便携备份里的条目过大：{name}");
                 }
                 let destination = staging.path().join(name);
                 match name {
                     DATABASE_NAME if database_seen => {
-                        anyhow::bail!("Portable archive has duplicate database")
+                        anyhow::bail!("便携备份里有重复的数据库条目")
                     }
                     SKILLS_NAME if skills_seen => {
-                        anyhow::bail!("Portable archive has duplicate Skills archive")
+                        anyhow::bail!("便携备份里有重复的 Skills 归档")
                     }
                     DATABASE_NAME => database_seen = true,
                     SKILLS_NAME => skills_seen = true,
@@ -193,7 +193,7 @@ pub fn extract_portable_backup(archive_path: &Path) -> Result<PortableBackupCont
                 }
                 copy_entry(&mut entry, &destination)?;
             }
-            _ => anyhow::bail!("Portable archive contains an unexpected entry: {name}"),
+            _ => anyhow::bail!("便携备份里含有预期外的条目：{name}"),
         }
     }
 
@@ -204,7 +204,7 @@ pub fn extract_portable_backup(archive_path: &Path) -> Result<PortableBackupCont
         || !database_seen
         || !skills_seen
     {
-        anyhow::bail!("Portable archive manifest does not match required components");
+        anyhow::bail!("便携备份的 manifest 与必需组件不匹配");
     }
 
     let database_path = staging.path().join(DATABASE_NAME);
@@ -212,7 +212,7 @@ pub fn extract_portable_backup(archive_path: &Path) -> Result<PortableBackupCont
     if manifest.database.sha256 != sha256_file(&database_path)?
         || manifest.skills.sha256 != sha256_file(&skills_path)?
     {
-        anyhow::bail!("Portable archive component integrity check failed");
+        anyhow::bail!("便携备份的组件完整性校验未通过");
     }
 
     Ok(PortableBackupContents {

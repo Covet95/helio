@@ -307,7 +307,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 fn hex_decode(input: &str) -> Result<Vec<u8>> {
     if !input.len().is_multiple_of(2) {
-        anyhow::bail!("odd hex length");
+        anyhow::bail!("十六进制字符串长度为奇数");
     }
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len() / 2);

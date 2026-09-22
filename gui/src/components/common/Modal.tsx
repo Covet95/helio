@@ -22,16 +22,73 @@ export function Modal({
   descriptionId?: string;
 }) {
   const titleId = useId();
+  const panelRef = useRef<HTMLDivElement>(null);
   // Esc 关闭。注意：这里刻意不用原生 <dialog>——旧版 WebKit 里顶层 dialog
   // 按 fit-content 收缩，纵向 flex 的内容区会被压到只剩一行；普通 overlay
   // div + 定高面板在所有引擎表现一致。
+  //
+  // **只有最上层的对话框响应 Esc**：监听挂在 document 上，嵌套时（例如表单
+  // 上再叠一个「放弃修改？」确认框）两个监听器都会收到事件——外层先注册、
+  // 先执行，会把确认框关掉的同时触发它自己的 onClose。用「DOM 里有没有更晚
+  // 出现的同级面板」判断谁在最上层，只让最上层处理。
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !busy) onClose();
+      if (event.key !== 'Escape' || busy) return;
+      const panels = document.querySelectorAll('[data-modal-panel]');
+      if (panels.length > 0 && panels[panels.length - 1] !== panelRef.current) return;
+      onClose();
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
   }, [onClose, busy]);
+
+  /**
+   * 焦点陷阱：Tab 在对话框内循环，不逃到背后的页面。
+   *
+   * 不这么做的话：模态框在 DOM 里位于页面内容之后，Tab 越过页脚就回到
+   * 侧栏导航——回车切路由 → 页面卸载 → 对话框连同未保存内容一起消失，
+   * 连未保存守卫都来不及触发。这是键盘用户实际会踩到的数据丢失路径。
+   *
+   * 只拦 Tab（不拦其它键），且只有最上层响应，与 Esc 的判断口径一致。
+   */
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Tab') return;
+      const panel = panelRef.current;
+      if (!panel) return;
+      const panels = document.querySelectorAll('[data-modal-panel]');
+      if (panels.length > 0 && panels[panels.length - 1] !== panel) return;
+
+      // 不加可见性过滤：`offsetParent` 在 jsdom 里恒为 null（无布局引擎），
+      // 用它会把所有元素都滤掉、让陷阱静默失效；而且固定定位元素在生产里
+      // 的 offsetParent 也是 null。这里只按「可聚焦」筛选。
+      const focusable = Array.from(
+        panel.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      );
+      if (focusable.length === 0) return;
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement as HTMLElement | null;
+      // 焦点已经在外面（例如刚打开还没进来）→ 拉回第一个。
+      if (!active || !panel.contains(active)) {
+        event.preventDefault();
+        first.focus();
+        return;
+      }
+      if (event.shiftKey && active === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, []);
   useEffect(() => {
     const trigger = document.activeElement as HTMLElement | null;
     return () => {
@@ -42,6 +99,8 @@ export function Modal({
   return (
     <div className="fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-black/40 p-4">
       <div
+        ref={panelRef}
+        data-modal-panel=""
         role={role}
         aria-modal="true"
         aria-labelledby={titleId}

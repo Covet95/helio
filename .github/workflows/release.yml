@@ -1,11 +1,16 @@
 # 推送 v* tag → GitHub Actions 跨平台打包并挂到同一 Release
 #
 # 用法（推荐）:
-#   1. 改版本号：src-tauri/tauri.conf.json + gui/package.json
+#   1. 改版本号：**四处都要改**
+#      - Cargo.toml
+#      - src-tauri/Cargo.toml
+#      - src-tauri/tauri.conf.json
+#      - gui/package.json
+#      （verify job 会断言这四处与 tag 一致，漏改会直接失败）
 #   2. git push origin main
-#   3. git tag v0.1.2 && git push origin v0.1.2
+#   3. git tag vX.Y.Z && git push origin vX.Y.Z
 #
-# 或：Actions → Release → Run workflow，填写 tag（如 v0.1.2）
+# 或：Actions → Release → Run workflow，填写 tag（如 vX.Y.Z）
 name: Release
 
 on:
@@ -15,7 +20,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag（如 v0.1.2；须已存在于仓库，或将由本 workflow 创建 Release）"
+        description: "Release tag（如 vX.Y.Z）"
         required: true
         type: string
 
@@ -27,7 +32,71 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # 出厂门禁：不通过就不打包。
+  #
+  # 此前打 tag 即出安装包，**不跑任何 test / lint**——tag 可以指向没过 CI 的
+  # commit，发错版本号也不会失败。这里补上两道闸：
+  #   1. 全量测试（Rust 核心库 + src-tauri + 前端）；
+  #   2. tag 与四处版本号一致性（历史上有过版本漂移）。
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 校验 tag 与四处版本号一致
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+
+          # 四处版本号必须与 tag 相同（漏改任一处都会在这里失败）。
+          CARGO_VERSION=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+          GUI_CARGO_VERSION=$(grep -m1 '^version' src-tauri/Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+          TAURI_VERSION=$(jq -r '.version' src-tauri/tauri.conf.json)
+          PKG_VERSION=$(jq -r '.version' gui/package.json)
+
+          echo "tag=$TAG_VERSION cargo=$CARGO_VERSION gui-cargo=$GUI_CARGO_VERSION tauri=$TAURI_VERSION package=$PKG_VERSION"
+
+          fail=0
+          for pair in "Cargo.toml:$CARGO_VERSION" "src-tauri/Cargo.toml:$GUI_CARGO_VERSION" \
+                      "src-tauri/tauri.conf.json:$TAURI_VERSION" "gui/package.json:$PKG_VERSION"; do
+            file="${pair%%:*}"; actual="${pair##*:}"
+            if [ "$actual" != "$TAG_VERSION" ]; then
+              echo "::error::$file 版本号是 $actual，与 tag $TAG_VERSION 不一致"
+              fail=1
+            fi
+          done
+          exit $fail
+
+      - name: 安装 Tauri 系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target\nsrc-tauri -> target"
+
+      - name: Rust 测试
+        run: cargo test --workspace
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: gui/package-lock.json
+
+      - name: 前端测试与类型检查
+        working-directory: gui
+        run: |
+          npm ci
+          npm run type-check
+          npm test
+
   publish:
+    needs: verify
     strategy:
       fail-fast: false
       matrix:

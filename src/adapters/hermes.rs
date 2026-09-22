@@ -14,11 +14,19 @@ pub struct HermesAdapter {
 }
 
 impl HermesAdapter {
-    pub fn new() -> Self {
-        let home = dirs::home_dir().expect("Failed to get home directory");
-        Self {
+    pub fn new() -> Result<Self> {
+        // 不用 `expect`：主目录解析不出来时切换会直接 panic，而这是可恢复的
+        // 环境异常——返回 Err 让命令层报错即可。
+        //
+        // 触发条件比想象中窄：macOS/多数 Linux 上 `dirs::home_dir()` 在 `$HOME`
+        // 未设时会回退到 getpwuid（实测去掉 HOME 仍返回 /Users/<user>）。
+        // 但该回退同样可能失败——容器里没有 passwd 条目、或服务账户无 home。
+        // 那种环境下 panic 会让整个切换崩在半途，而不是干净地报错。
+        let home =
+            dirs::home_dir().ok_or_else(|| anyhow::anyhow!("无法定位用户主目录（HOME 未设置）"))?;
+        Ok(Self {
             config_dir: home.join(".hermes"),
-        }
+        })
     }
 
     #[cfg(test)]
@@ -276,12 +284,6 @@ impl HermesAdapter {
     }
 }
 
-impl Default for HermesAdapter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// 剥离 `custom_providers[].api_key`。
 fn strip_credentials(config: &mut serde_json::Value) {
     super::credentials::strip_credential_array(config, &["custom_providers"], &["api_key"]);
@@ -374,7 +376,7 @@ impl ConfigAdapter for HermesAdapter {
     fn backup_config(&self) -> Result<PathBuf> {
         let path = self.config_file_path();
         if !path.exists() {
-            anyhow::bail!("Config file does not exist");
+            anyhow::bail!("配置文件不存在");
         }
         let backup_path = backup::backup_required(&self.config_dir, &path, "config")?;
 

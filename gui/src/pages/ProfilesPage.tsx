@@ -1,11 +1,12 @@
 import { lazy, Suspense, useState, useEffect, useMemo, useRef } from 'react';
+import { Alert } from '@/components/common/Alert';
 import { useNavigate } from 'react-router-dom';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '../store';
 import { Button } from '../components/common/Button';
 import { Spinner } from '../components/common/Spinner';
 import { PageHeader } from '../components/common/PageHeader';
-import { ConfirmDialog } from '../components/common/Modal';
+import { ConfirmDialog, Modal } from '../components/common/Modal';
 import { Plus, Search, X, FileDown } from 'lucide-react';
 import type { ApiProfile, TargetApp } from '../types';
 import { SUPPORTED_TOOLS, toolById } from '../types';
@@ -27,11 +28,12 @@ const ProfileModal = lazy(() => import('./profiles/ProfileFormModal').then((modu
 
 export default function ProfilesPage() {
   const {
-    profiles, status, loadingProfiles,
+    profiles, status, loadingProfiles, profilesError,
     fetchProfiles, fetchStatus, addProfile, updateProfile, deleteProfile, switchProfile,
     sharedTool, setSelectedTool,
   } = useStore(useShallow((state) => ({
     profiles: state.profiles, status: state.status, loadingProfiles: state.loadingProfiles,
+    profilesError: state.profilesError,
     fetchProfiles: state.fetchProfiles, fetchStatus: state.fetchStatus,
     addProfile: state.addProfile, updateProfile: state.updateProfile,
     deleteProfile: state.deleteProfile, switchProfile: state.switchProfile,
@@ -63,6 +65,16 @@ export default function ProfilesPage() {
 
   const selectedTool = toolById(targetApp)!;
   const activeProfile = activeProfileFor(status, targetApp);
+  /**
+   * 待删除的档案是否正是该工具当前启用的那个。
+   *
+   * 后端会拒绝（`conflict`），但让用户点了「删除」才吃一个报错很糟——
+   * 确认框应当先说清楚为什么不行。这里只负责把话说在前面，判断口径与
+   * 后端一致（同名 + 同工具）。
+   */
+  const isDeletingActive = Boolean(
+    deleting && activeProfile && deleting.name === activeProfile.name,
+  );
   const claudeSeed = activeProfileFor(status, 'claude-code')
     || profiles.find((p) => p.target_app === 'claude-code');
   const normalizedQuery = query.trim().toLowerCase();
@@ -113,16 +125,31 @@ export default function ProfilesPage() {
 
   const runDedup = async () => {
     setFeedback(null);
+    const keepNote = `保留：${dupPlan.keep.map((p) => p.name).join('、') || '—'}`;
+    // 逐个删并记下失败的——原实现遇到第一个失败就抛出，只报「去重失败」，
+    // 而前面几个**已经删掉了**，用户无从知道现在剩什么。批量删除同理。
+    const failures: string[] = [];
+    let deleted = 0;
     try {
       for (const p of dupPlan.remove) {
-        await tauriApi.deleteProfile(p.target_app ?? targetApp, p.name);
+        try {
+          await tauriApi.deleteProfile(p.target_app ?? targetApp, p.name);
+          deleted += 1;
+        } catch (e) {
+          failures.push(`${p.name}（${humanizeError(e)}）`);
+        }
       }
-      setFeedback({
-        kind: 'success',
-        text: `已清理 ${dupPlan.remove.length} 个重复档案（保留：${dupPlan.keep.map((p) => p.name).join('、') || '—'}）`,
-      });
-    } catch (e) {
-      setFeedback({ kind: 'error', text: `去重失败：${humanizeError(e)}` });
+      if (failures.length === 0) {
+        setFeedback({
+          kind: 'success',
+          text: `已清理 ${deleted} 个重复档案（${keepNote}）`,
+        });
+      } else {
+        setFeedback({
+          kind: 'error',
+          text: `已清理 ${deleted} 个，${failures.length} 个失败：${failures.join('；')}（${keepNote}）`,
+        });
+      }
     } finally {
       await useStore.getState().refresh();
       setDedupConfirm(false);
@@ -179,19 +206,30 @@ export default function ProfilesPage() {
 
   const claimAllLegacy = async () => {
     setFeedback(null);
-    try {
-      let n = 0;
-      for (const p of legacyProfiles) {
-        if (p.id == null) continue;
+    // 逐个认领并记账：原实现遇错即停、只报「认领失败」，而前面几个**已经
+    // 改了归属**——用户以为无事发生。与 runDedup 的批量语义对齐。
+    const failures: string[] = [];
+    let claimed = 0;
+    for (const p of legacyProfiles) {
+      if (p.id == null) continue;
+      try {
         await tauriApi.assignLegacyProfile(p.id, legacyTool[p.id] ?? targetApp);
-        n += 1;
+        claimed += 1;
+      } catch (e) {
+        failures.push(`${p.name}（${humanizeError(e)}）`);
       }
-      setFeedback({ kind: 'success', text: `已认领 ${n} 个档案到 ${toolById(targetApp)?.displayName ?? targetApp}（可在各行下拉框里单独改目标）` });
-      await fetchProfiles();
-      await fetchStatus();
-    } catch (e) {
-      setFeedback({ kind: 'error', text: `认领失败：${humanizeError(e)}` });
     }
+    const target = toolById(targetApp)?.displayName ?? targetApp;
+    if (failures.length === 0) {
+      setFeedback({ kind: 'success', text: `已认领 ${claimed} 个档案到 ${target}（可在各行下拉框里单独改目标）` });
+    } else {
+      setFeedback({
+        kind: 'error',
+        text: `已认领 ${claimed} 个，${failures.length} 个失败：${failures.join('；')}`,
+      });
+    }
+    await fetchProfiles();
+    await fetchStatus();
   };
 
   const dropLegacy = async () => {
@@ -322,21 +360,35 @@ export default function ProfilesPage() {
         )}
 
         {feedback && (
-          <div role={feedback.kind === 'error' ? 'alert' : 'status'} className={cn(
-            'mb-3 rounded-md border px-3 py-2 text-[13px]',
-            (feedback?.kind === 'success') ? 'border-ok/30 bg-ok/8 text-ok'
-              : (feedback?.kind === 'info') ? 'border-line bg-surface text-ink-dim'
-              : 'border-danger/30 bg-danger/8 text-danger',
-          )}>
-            <div className="flex items-start justify-between gap-2">
-              <span className="min-w-0 break-words">{feedback.text}</span>
+          <Alert
+            tone={feedback.kind === 'success' ? 'success' : feedback.kind === 'info' ? 'info' : 'error'}
+            className="mb-3"
+            action={
               <button type="button" className="icon-button" title="关闭提示" aria-label="关闭提示" onClick={() => setFeedback(null)}><X size={14} /></button>
-            </div>
-          </div>
+            }
+          >
+            {feedback.text}
+          </Alert>
         )}
 
         {loadingProfiles && profiles.length === 0 ? (
           <div className="grid place-items-center py-32"><Spinner size="lg" /></div>
+        ) : profiles.length === 0 && profilesError ? (
+          /*
+            读失败与「真的没有档案」是两件事：都落到 EmptyState 会让用户以为
+            数据没了（同时顶部还有一条红条，两句话互相矛盾）。
+          */
+          <div className="grid place-items-center py-20">
+            <div className="max-w-md text-center">
+              <Alert tone="error" className="text-left">
+                <div className="font-medium">加载档案失败</div>
+                <div className="mt-1 text-[12px] opacity-90">{profilesError}</div>
+              </Alert>
+              <Button variant="secondary" className="mt-4" disabled={loadingProfiles} onClick={() => fetchProfiles(true)}>
+                重试
+              </Button>
+            </div>
+          </div>
         ) : profiles.length === 0 ? (
           <EmptyState />
         ) : toolProfiles.length === 0 ? (
@@ -404,7 +456,27 @@ export default function ProfilesPage() {
         </Suspense>
       )}
 
-      {deleting && (
+      {/*
+        删除当前启用的档案：后端会拒绝，但让用户点了「删除」才吃报错很糟。
+        改成纯告知——没有可执行的删除动作，所以不用 ConfirmDialog（那个的
+        确认按钮一定会真的执行）。
+      */}
+      {deleting && isDeletingActive && (
+        <Modal
+          title="无法删除当前启用的档案"
+          onClose={() => setDeleting(null)}
+          footer={
+            <Button variant="secondary" onClick={() => setDeleting(null)}>知道了</Button>
+          }
+        >
+          <p className="text-[13px] leading-relaxed text-ink-dim">
+            「{deleting.name}」正在被 {toolById(deleting.tool)?.displayName ?? deleting.tool} 使用，
+            无法删除。请先启用该工具下的其他档案，再回来删除它。
+          </p>
+        </Modal>
+      )}
+
+      {deleting && !isDeletingActive && (
         <ConfirmDialog
           title="删除配置档案"
           message={`确定要删除「${deleting.name}」（${toolById(deleting.tool)?.displayName ?? deleting.tool}）吗？此操作不可撤销。`}

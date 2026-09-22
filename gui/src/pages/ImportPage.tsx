@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react';
+import { Alert } from '@/components/common/Alert';
 import { useStore } from '../store';
 import { Button } from '../components/common/Button';
 import { Spinner } from '../components/common/Spinner';
@@ -8,43 +9,11 @@ import {
   Search, FileDown, KeyRound, Boxes, FileWarning,
 } from 'lucide-react';
 import { SUPPORTED_TOOLS } from '../types';
-import type { OpenCodeModelConfig, TargetApp } from '../types';
+import type { Feedback, TargetApp } from '../types';
 import { tauriApi, type CcSwitchProvider } from '../lib/tauri';
 import { AppSelector } from './profiles/helpers';
 import { cn, humanizeError, maskApiKey } from '../lib/utils';
-
-interface Scanned {
-  found: boolean;
-  api_url: string;
-  api_key: string;
-  provider: string;
-  model?: string;
-  model_mapping?: Record<string, string>;
-  reasoning_effort?: string;
-  reasoning_summary?: string;
-  verbosity?: string;
-  context_1m?: boolean;
-  wire_api?: string;
-  env_key?: string;
-  requires_openai_auth?: boolean;
-  experimental_bearer_token?: string;
-  service_tier?: string;
-  supports_standalone_web_search?: boolean;
-  aws_profile?: string;
-  aws_region?: string;
-  auth_command?: string;
-  auth_args?: string[];
-  auth_timeout_ms?: number;
-  auth_refresh_interval_ms?: number;
-  auth_cwd?: string;
-  api_mode?: string;
-  opencode_api_mode?: string;
-  opencode_models?: string[];
-  opencode_model_configs?: Record<string, OpenCodeModelConfig>;
-  max_tokens?: number;
-  source: string;
-}
-type Feedback = { text: string; kind: 'success' | 'error' | 'info' };
+import { buildImportPayload, friendlyImportError, type ScannedApi } from './importMapping';
 
 export default function ImportPage() {
   const tool = useStore((state) => state.selectedTool);
@@ -57,7 +26,7 @@ function ImportToolPage({ tool, onToolChange }: { tool: TargetApp; onToolChange:
   const [importing, setImporting] = useState(false);
   const importingRef = useRef(false);
   const [scanning, setScanning] = useState(false);
-  const [api, setApi] = useState<Scanned | null>(null);
+  const [api, setApi] = useState<ScannedApi | null>(null);
   const [name, setName] = useState('');
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [ccProviders, setCcProviders] = useState<CcSwitchProvider[] | null>(null);
@@ -122,43 +91,10 @@ function ImportToolPage({ tool, onToolChange }: { tool: TargetApp; onToolChange:
     importingRef.current = true;
     setImporting(true);
     try {
-      await addProfile({
-        name: name.trim(),
-        provider: api.provider,
-        api_url: api.api_url,
-        api_key: api.api_key,
-        model: api.model,
-        model_mapping: api.model_mapping,
-        reasoning_effort: api.reasoning_effort,
-        reasoning_summary: tool === 'codex' ? api.reasoning_summary : undefined,
-        verbosity: tool === 'codex' ? api.verbosity : undefined,
-        context_1m: api.context_1m,
-        env_key: tool === 'codex' ? api.env_key : undefined,
-        wire_api: tool === 'codex' ? api.wire_api : undefined,
-        requires_openai_auth: tool === 'codex' ? api.requires_openai_auth : undefined,
-        experimental_bearer_token: tool === 'codex' ? api.experimental_bearer_token : undefined,
-        auth_command: tool === 'codex' ? api.auth_command : undefined,
-        auth_args: tool === 'codex' ? api.auth_args : undefined,
-        auth_timeout_ms: tool === 'codex' ? api.auth_timeout_ms : undefined,
-        auth_refresh_interval_ms: tool === 'codex' ? api.auth_refresh_interval_ms : undefined,
-        auth_cwd: tool === 'codex' ? api.auth_cwd : undefined,
-        api_mode: tool === 'hermes' || tool === 'openclaw' ? api.api_mode : undefined,
-        opencode_api_mode: tool === 'opencode' ? api.opencode_api_mode : undefined,
-        models: tool === 'opencode' ? api.opencode_models : undefined,
-        model_configs: tool === 'opencode' ? api.opencode_model_configs : undefined,
-        max_tokens: tool === 'openclaw' ? api.max_tokens : undefined,
-        service_tier: api.service_tier,
-        supports_standalone_web_search: api.supports_standalone_web_search,
-        aws_profile: api.aws_profile,
-        aws_region: api.aws_region,
-        target_app: tool,
-      });
+      await addProfile(buildImportPayload(api, tool, name.trim()) as never);
       setFeedback({ text: `已导入为配置档案「${name.trim()}」`, kind: 'success' });
     } catch (e) {
-      const msg = String(e);
-      const friendly = /UNIQUE constraint failed/i.test(msg)
-        ? `已存在同名档案「${name.trim()}」，请改个名字再导入`
-        : `导入失败: ${humanizeError(e)}`;
+      const friendly = friendlyImportError(String(e), name.trim(), humanizeError(e));
       setFeedback({ text: friendly, kind: 'error' });
     } finally {
       importingRef.current = false;
@@ -249,11 +185,10 @@ function ImportToolPage({ tool, onToolChange }: { tool: TargetApp; onToolChange:
         </section>}
 
         {feedback && (
-          <div role={feedback.kind === 'error' ? 'alert' : 'status'} className={`break-words rounded-md border px-3 py-2 text-[13px] animate-fade-up ${
-            feedback.kind === 'success' ? 'border-ok/30 bg-ok/10 text-ok'
-            : feedback.kind === 'error' ? 'border-danger/30 bg-danger/10 text-danger'
-            : 'border-line bg-surface text-ink-dim'
-          }`}>{feedback.text}</div>
+          <Alert
+            tone={feedback.kind === 'success' ? 'success' : feedback.kind === 'error' ? 'error' : 'info'}
+            className="animate-fade-up"
+          >{feedback.text}</Alert>
         )}
 
         {scanning && <div className="grid place-items-center py-16"><Spinner size="lg" /></div>}

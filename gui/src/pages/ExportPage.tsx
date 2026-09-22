@@ -1,13 +1,27 @@
 import { useState } from 'react';
+import { Alert } from '@/components/common/Alert';
 import { Button } from '../components/common/Button';
 import { PageHeader } from '../components/common/PageHeader';
-import { Download, Upload, FolderCog } from 'lucide-react';
+import { Download, Upload, FolderCog, RotateCcw, ChevronDown } from 'lucide-react';
 import { ConfirmDialog } from '../components/common/Modal';
-import { tauriApi } from '../lib/tauri';
+import { tauriApi, type DatabaseBackupInfo } from '../lib/tauri';
 import { useStore } from '../store';
-import { humanizeError } from '../lib/utils';
+import { cn, formatBackupTime, formatBytes, humanizeError } from '../lib/utils';
+import { tauriTransferDeps } from './exportDialog';
+import { runTransfer, type TransferSpec } from './exportFlow';
+import {
+  databaseExportMessage,
+  databaseImportMessage,
+  portableExportMessage,
+  portableImportMessage,
+  skillsExportMessage,
+  skillsImportMessage,
+  type Feedback,
+} from './exportMessages';
 
-type Feedback = { text: string; kind: 'success' | 'error' | 'info' };
+const DB_FILTER = { filterName: 'Database', extensions: ['db', 'sqlite'] };
+const ARCHIVE_FILTER = { filterName: 'Helio 便携备份', extensions: ['tar.gz', 'tgz'] };
+const SKILLS_FILTER = { filterName: 'Skills 备份', extensions: ['tar.gz', 'tgz'] };
 
 export default function ExportPage() {
   const [portableImporting, setPortableImporting] = useState(false);
@@ -20,25 +34,16 @@ export default function ExportPage() {
   const [confirmPortableImport, setConfirmPortableImport] = useState(false);
   const [confirmImport, setConfirmImport] = useState(false);
   const [confirmSkillsImport, setConfirmSkillsImport] = useState(false);
-
-  const handleExport = async () => {
-    try {
-      setExporting(true);
-      setFeedback(null);
-      const { save } = await import('@tauri-apps/plugin-dialog');
-      const filePath = await save({
-        defaultPath: `helio-backup-${Date.now()}.db`,
-        filters: [{ name: 'Database', extensions: ['db', 'sqlite'] }],
-      });
-      if (!filePath) { setFeedback({ text: '导出已取消', kind: 'info' }); return; }
-      await tauriApi.exportDatabase(filePath);
-      setFeedback({ text: '数据库导出成功', kind: 'success' });
-    } catch (err) {
-      setFeedback({ text: `导出失败: ${humanizeError(err)}`, kind: 'error' });
-    } finally {
-      setExporting(false);
-    }
-  };
+  /**
+   * 是否有任一传输在进行中。
+   *
+   * 各按钮的 `xxxing` 只禁用自己——便携备份写到一半时，数据库导出按钮仍可点，
+   * 于是两个导出并发跑。它们争的是同一把后端写锁，不会损坏数据，但用户看到
+   * 两个进度同时转、两条反馈互相覆盖，分不清哪个结果对应哪次操作。
+   * 用这个总开关把整组按钮一起锁上。
+   */
+  const busy =
+    portableExporting || portableImporting || exporting || importing || skillsExporting || skillsImporting;
 
   const refreshAppData = async () => {
     try {
@@ -49,126 +54,116 @@ export default function ExportPage() {
     }
   };
 
-  const handlePortableExport = async () => {
+  /**
+   * 统一走 `runTransfer`：置忙 → 清反馈 → 执行 → 写反馈 → 复位。
+   *
+   * `afterSuccess` 在反馈**之后**跑——导入的提示语是「正在刷新…」，
+   * 得先让它显示出来再刷新。
+   */
+  const transfer = async (
+    spec: TransferSpec,
+    setBusy: (v: boolean) => void,
+    afterSuccess?: () => Promise<void>,
+  ) => {
+    setBusy(true);
+    setFeedback(null);
     try {
-      setPortableExporting(true);
-      setFeedback(null);
-      const { save } = await import('@tauri-apps/plugin-dialog');
-      const filePath = await save({
-        defaultPath: `helio-portable-${Date.now()}.tar.gz`,
-        filters: [{ name: 'Helio 便携备份', extensions: ['tar.gz', 'tgz'] }],
-      });
-      if (!filePath) { setFeedback({ text: '导出已取消', kind: 'info' }); return; }
-      const result = await tauriApi.exportPortableBackup(filePath);
-      setFeedback({
-        text: `便携备份导出成功：Skills ${result.skills.total} 个`,
-        kind: 'success',
-      });
-    } catch (err) {
-      setFeedback({ text: `便携备份导出失败: ${humanizeError(err)}`, kind: 'error' });
+      const outcome = await runTransfer(tauriTransferDeps(), spec);
+      setFeedback(outcome);
+      if (outcome.kind === 'success' && afterSuccess) await afterSuccess();
     } finally {
-      setPortableExporting(false);
+      setBusy(false);
     }
   };
 
-  const handlePortableImport = async () => {
-    try {
-      setPortableImporting(true);
-      setConfirmPortableImport(false);
-      setFeedback(null);
-      const { open } = await import('@tauri-apps/plugin-dialog');
-      const filePath = await open({
-        multiple: false,
-        filters: [{ name: 'Helio 便携备份', extensions: ['tar.gz', 'tgz'] }],
-      });
-      if (!filePath) { setFeedback({ text: '导入已取消', kind: 'info' }); return; }
-      const result = await tauriApi.importPortableBackup(filePath as string);
-      const targets = result.restored_targets.length > 0
-        ? `，已恢复 ${result.restored_targets.length} 个工具配置`
-        : '';
-      const skipped = result.skills.skipped > 0 ? `，跳过同名 Skills ${result.skills.skipped} 个` : '';
-      setFeedback({
-        text: `便携备份恢复完成：Skills ${result.skills.restored} 个${skipped}${targets}`,
-        kind: 'success',
-      });
-      await refreshAppData();
-    } catch (err) {
-      setFeedback({ text: `便携备份恢复失败: ${humanizeError(err)}`, kind: 'error' });
-    } finally {
-      setPortableImporting(false);
-    }
+  const handleExport = () =>
+    transfer(
+      {
+        mode: 'export',
+        action: '导出',
+        request: { ...DB_FILTER, defaultPath: `helio-backup-${Date.now()}.db` },
+        execute: async (path) => {
+          await tauriApi.exportDatabase(path);
+          return { text: databaseExportMessage(path), kind: 'success' };
+        },
+      },
+      setExporting,
+    );
+
+  const handlePortableExport = () =>
+    transfer(
+      {
+        mode: 'export',
+        action: '便携备份导出',
+        request: { ...ARCHIVE_FILTER, defaultPath: `helio-portable-${Date.now()}.tar.gz` },
+        execute: async (path) => {
+          const result = await tauriApi.exportPortableBackup(path);
+          // 用后端回报的路径（而非用户选的路径）：跨设备/软链时二者可能不同。
+          return { text: portableExportMessage(result.skills.total, result.path), kind: 'success' };
+        },
+      },
+      setPortableExporting,
+    );
+
+  const handlePortableImport = () => {
+    setConfirmPortableImport(false);
+    return transfer(
+      {
+        mode: 'import',
+        action: '便携备份恢复',
+        request: ARCHIVE_FILTER,
+        execute: async (path) => {
+          const result = await tauriApi.importPortableBackup(path);
+          return { text: portableImportMessage(result), kind: 'success' };
+        },
+      },
+      setPortableImporting,
+      refreshAppData,
+    );
   };
 
-  const handleImport = async () => {
-    try {
-      setImporting(true);
-      setConfirmImport(false);
-      setFeedback(null);
-      const { open } = await import('@tauri-apps/plugin-dialog');
-      const filePath = await open({
-        multiple: false,
-        filters: [{ name: 'Database', extensions: ['db', 'sqlite'] }],
-      });
-      if (!filePath) { setFeedback({ text: '导入已取消', kind: 'info' }); return; }
-      await tauriApi.importDatabase(filePath as string);
-      setFeedback({ text: '数据库导入成功，正在刷新…', kind: 'success' });
-      await refreshAppData();
-    } catch (err) {
-      setFeedback({ text: `导入失败: ${humanizeError(err)}`, kind: 'error' });
-    } finally {
-      setImporting(false);
-    }
+  const handleImport = () => {
+    setConfirmImport(false);
+    return transfer(
+      {
+        mode: 'import',
+        action: '导入',
+        request: DB_FILTER,
+        execute: async (path) => {
+          await tauriApi.importDatabase(path);
+          return { text: databaseImportMessage(), kind: 'success' };
+        },
+      },
+      setImporting,
+      refreshAppData,
+    );
   };
 
-  const handleSkillsExport = async () => {
-    try {
-      setSkillsExporting(true);
-      setFeedback(null);
-      const { save } = await import('@tauri-apps/plugin-dialog');
-      const filePath = await save({
-        defaultPath: `helio-skills-${Date.now()}.tar.gz`,
-        filters: [{ name: 'Skills 备份', extensions: ['tar.gz', 'tgz'] }],
-      });
-      if (!filePath) { setFeedback({ text: '导出已取消', kind: 'info' }); return; }
-      const result = await tauriApi.exportSkills(filePath);
-      setFeedback({
-        text: result.total > 0
-          ? `Skills 导出成功：共 ${result.total} 个（${result.apps.map(a => `${a.app} ${a.count}`).join('、')}）`
-          : '未发现任何 Skills',
-        kind: result.total > 0 ? 'success' : 'info',
-      });
-    } catch (err) {
-      setFeedback({ text: `Skills 导出失败: ${humanizeError(err)}`, kind: 'error' });
-    } finally {
-      setSkillsExporting(false);
-    }
-  };
+  const handleSkillsExport = () =>
+    transfer(
+      {
+        mode: 'export',
+        action: 'Skills 导出',
+        request: { ...SKILLS_FILTER, defaultPath: `helio-skills-${Date.now()}.tar.gz` },
+        execute: async (path) => skillsExportMessage(await tauriApi.exportSkills(path)),
+      },
+      setSkillsExporting,
+    );
 
-  const handleSkillsImport = async () => {
-    try {
-      setSkillsImporting(true);
-      setConfirmSkillsImport(false);
-      setFeedback(null);
-      const { open } = await import('@tauri-apps/plugin-dialog');
-      const filePath = await open({
-        multiple: false,
-        filters: [{ name: 'Skills 备份', extensions: ['tar.gz', 'tgz'] }],
-      });
-      if (!filePath) { setFeedback({ text: '导入已取消', kind: 'info' }); return; }
-      const result = await tauriApi.importSkills(filePath as string);
-      if (result.skipped > 0) {
-        setFeedback({
-          text: `Skills 导入完成：恢复 ${result.restored} 个，跳过同名 ${result.skipped} 个（${result.skipped_names.join('、')}）`,
-          kind: 'success',
-        });
-      } else {
-        setFeedback({ text: `Skills 导入完成：恢复 ${result.restored} 个`, kind: 'success' });
-      }
-    } catch (err) {
-      setFeedback({ text: `Skills 导入失败: ${humanizeError(err)}`, kind: 'error' });
-    } finally {
-      setSkillsImporting(false);
-    }
+  const handleSkillsImport = () => {
+    setConfirmSkillsImport(false);
+    return transfer(
+      {
+        mode: 'import',
+        action: 'Skills 导入',
+        request: SKILLS_FILTER,
+        execute: async (path) => {
+          const result = await tauriApi.importSkills(path);
+          return { text: skillsImportMessage(result), kind: 'success' };
+        },
+      },
+      setSkillsImporting,
+    );
   };
 
   return (
@@ -177,13 +172,12 @@ export default function ExportPage() {
 
       <div className="max-w-3xl px-4 py-4 sm:px-7 sm:py-5">
         {feedback && (
-          <div className={`mb-4 rounded-md border px-3 py-2 text-[13px] ${
-            feedback.kind === 'success' ? 'border-ok/30 bg-ok/10 text-ok'
-            : feedback.kind === 'error' ? 'border-danger/30 bg-danger/10 text-danger'
-            : 'border-line bg-surface text-ink-dim'
-          }`}>
+          <Alert
+            tone={feedback.kind === 'success' ? 'success' : feedback.kind === 'error' ? 'error' : 'info'}
+            className="mb-4"
+          >
             {feedback.text}
-          </div>
+          </Alert>
         )}
 
         <div className="overflow-hidden rounded-lg border border-line bg-card">
@@ -191,13 +185,13 @@ export default function ExportPage() {
             icon={<Download size={20} className="text-accent" />}
             title="导出便携备份"
             meta="推荐 · 数据库 + Skills，换机迁移用这个"
-            button={<Button onClick={handlePortableExport} disabled={portableExporting}><Download size={16} />{portableExporting ? '导出中…' : '导出'}</Button>}
+            button={<Button onClick={handlePortableExport} disabled={busy}><Download size={16} />{portableExporting ? '导出中…' : '导出'}</Button>}
           />
           <ActionRow
             icon={<Upload size={20} className="text-opencode" />}
             title="恢复便携备份"
             meta="推荐 · 校验后恢复数据库、Skills 与激活配置"
-            button={<Button variant="secondary" onClick={() => setConfirmPortableImport(true)} disabled={portableImporting}><Upload size={16} />{portableImporting ? '恢复中…' : '恢复'}</Button>}
+            button={<Button variant="secondary" onClick={() => setConfirmPortableImport(true)} disabled={busy}><Upload size={16} />{portableImporting ? '恢复中…' : '恢复'}</Button>}
           />
         </div>
         <p className="mt-3 text-[12px] leading-relaxed text-ink-faint">
@@ -214,26 +208,27 @@ export default function ExportPage() {
               icon={<Download size={20} className="text-accent" />}
               title="导出数据库"
               meta=".db / .sqlite"
-              button={<Button onClick={handleExport} disabled={exporting}><Download size={16} />{exporting ? '导出中…' : '导出'}</Button>}
+              button={<Button onClick={handleExport} disabled={busy}><Download size={16} />{exporting ? '导出中…' : '导出'}</Button>}
             />
             <ActionRow
               icon={<Upload size={20} className="text-opencode" />}
               title="导入数据库"
               meta="仅接受 Helio 备份 · 覆盖前自动备份"
-              button={<Button variant="secondary" onClick={() => setConfirmImport(true)} disabled={importing}><Upload size={16} />{importing ? '导入中…' : '导入'}</Button>}
+              button={<Button variant="secondary" onClick={() => setConfirmImport(true)} disabled={busy}><Upload size={16} />{importing ? '导入中…' : '导入'}</Button>}
             />
             <ActionRow
               icon={<FolderCog size={20} className="text-accent" />}
               title="导出 Skills"
               meta="全部工具 Skills 目录"
-              button={<Button onClick={handleSkillsExport} disabled={skillsExporting}><Download size={16} />{skillsExporting ? '导出中…' : '导出'}</Button>}
+              button={<Button onClick={handleSkillsExport} disabled={busy}><Download size={16} />{skillsExporting ? '导出中…' : '导出'}</Button>}
             />
             <ActionRow
               icon={<FolderCog size={20} className="text-opencode" />}
               title="导入 Skills"
               meta="tar.gz · 整体校验 · 同名跳过"
-              button={<Button variant="secondary" onClick={() => setConfirmSkillsImport(true)} disabled={skillsImporting}><Upload size={16} />{skillsImporting ? '导入中…' : '导入'}</Button>}
+              button={<Button variant="secondary" onClick={() => setConfirmSkillsImport(true)} disabled={busy}><Upload size={16} />{skillsImporting ? '导入中…' : '导入'}</Button>}
             />
+            <DbBackupList disabled={busy} onRestored={refreshAppData} />
           </div>
         </details>
         </div>
@@ -270,6 +265,129 @@ export default function ExportPage() {
         />
       )}
     </div>
+  );
+}
+
+/**
+ * 数据库自动备份的回退入口。
+ *
+ * 导入确认框一直承诺「导入前自动备份当前库，可回退」，但此前**没有任何地方
+ * 能看到这些备份**——承诺是空的。这里补上：列出备份、可一键回退。
+ */
+function DbBackupList({
+  disabled,
+  onRestored,
+}: {
+  disabled: boolean;
+  onRestored: () => Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [backups, setBackups] = useState<DatabaseBackupInfo[] | null>(null);
+  const [restoring, setRestoring] = useState<string | null>(null);
+  const [error, setError] = useState('');
+  const [pending, setPending] = useState<DatabaseBackupInfo | null>(null);
+
+  const load = async () => {
+    setError('');
+    try {
+      setBackups(await tauriApi.listDatabaseBackups());
+    } catch (e) {
+      setError(humanizeError(e));
+      setBackups([]);
+    }
+  };
+
+  const toggle = () => {
+    const next = !open;
+    setOpen(next);
+    if (next) void load();
+  };
+
+  const doRestore = async (backup: DatabaseBackupInfo) => {
+    setPending(null);
+    setRestoring(backup.path);
+    setError('');
+    try {
+      await tauriApi.restoreDatabaseBackup(backup.path);
+      await Promise.all([load(), onRestored()]);
+    } catch (e) {
+      setError(humanizeError(e));
+    } finally {
+      setRestoring(null);
+    }
+  };
+
+  return (
+    <>
+      <div className="border-b border-line last:border-b-0">
+        <button
+          type="button"
+          onClick={toggle}
+          aria-expanded={open}
+          disabled={disabled}
+          className="flex w-full items-center gap-3 px-4 py-3.5 text-left transition-colors hover:bg-elevated/45 disabled:opacity-40"
+        >
+          <div className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-line bg-surface">
+            <RotateCcw size={20} className="text-warn" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h3 className="text-[14px] font-semibold text-ink">回退数据库</h3>
+            <p className="truncate text-[12px] text-ink-faint">
+              导入与迁移前的自动备份，最多保留 10 份
+            </p>
+          </div>
+          <ChevronDown size={16} className={cn('shrink-0 text-ink-faint transition-transform', open && 'rotate-180')} />
+        </button>
+
+        {open && (
+          <div className="border-t border-line/60 bg-surface/40 px-4 py-3">
+            {error && <Alert tone="error" className="mb-2">{error}</Alert>}
+            {backups === null ? (
+              <div className="py-3 text-center text-[12px] text-ink-faint">读取中…</div>
+            ) : backups.length === 0 ? (
+              <div className="py-3 text-center text-[12px] text-ink-faint">
+                还没有自动备份（导入或迁移前会自动生成）
+              </div>
+            ) : (
+              <ul className="space-y-1.5">
+                {backups.map((b) => (
+                  <li key={b.path} className="flex flex-wrap items-center gap-2 rounded-md border border-line bg-card px-3 py-2">
+                    <span className="shrink-0 font-mono text-[11.5px] text-ink-dim">{formatBackupTime(b.time)}</span>
+                    <span className="shrink-0 text-[11px] text-ink-faint">{formatBytes(b.size_bytes)}</span>
+                    <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink-faint" title={b.path}>
+                      {b.path}
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={restoring !== null || disabled}
+                      onClick={() => setPending(b)}
+                    >
+                      <RotateCcw size={13} className={restoring === b.path ? 'animate-spin' : ''} />
+                      {restoring === b.path ? '回退中…' : '回退'}
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+      </div>
+
+      {pending && (
+        <ConfirmDialog
+          title="回退数据库"
+          message={
+            `将用这份备份覆盖当前数据库：\n${formatBackupTime(pending.time)}\n\n` +
+            `回退前会再自动备份一次当前库，仍可再退回。`
+          }
+          confirmText="回退"
+          danger
+          onCancel={() => setPending(null)}
+          onConfirm={() => doRestore(pending)}
+        />
+      )}
+    </>
   );
 }
 

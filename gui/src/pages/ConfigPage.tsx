@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { Alert } from '@/components/common/Alert';
 import { Button } from '../components/common/Button';
 import { Spinner } from '../components/common/Spinner';
 import { PageHeader } from '../components/common/PageHeader';
@@ -6,24 +7,12 @@ import {
   RefreshCw, Boxes, Sparkles, Webhook, ShieldCheck, ChevronDown, Terminal, Globe, AlertCircle, Layers, FileCog, Save, X, CheckCircle2, SlidersHorizontal, History, RotateCcw,
 } from 'lucide-react';
 import type { TargetApp } from '../types';
+import type { LocalConfigInfo, McpServerConfig } from '../types';
+import { ConfirmDialog } from '../components/common/Modal';
 import { cn, humanizeError } from '../lib/utils';
 import { tauriApi, type ConfigBackupInfo } from '../lib/tauri';
 import { useStore } from '../store';
 import { AppSelector } from './profiles/helpers';
-
-interface McpServerCfg {
-  command?: string;
-  args?: string[];
-  url?: string | null;
-  env?: Record<string, string> | null;
-}
-interface LocalInfo {
-  mcp_servers: Record<string, McpServerCfg>;
-  skills: string[];
-  hooks: Record<string, unknown>;
-  permissions: Record<string, unknown>;
-  other: Record<string, unknown>;
-}
 
 export default function ConfigPage() {
   const targetApp = useStore((state) => state.selectedTool);
@@ -32,7 +21,7 @@ export default function ConfigPage() {
 }
 
 function ToolConfigPage({ targetApp, onToolChange }: { targetApp: TargetApp; onToolChange: (tool: TargetApp) => void }) {
-  const [info, setInfo] = useState<LocalInfo | null>(null);
+  const [info, setInfo] = useState<LocalConfigInfo | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [showRaw, setShowRaw] = useState(false);
@@ -46,7 +35,7 @@ function ToolConfigPage({ targetApp, onToolChange }: { targetApp: TargetApp; onT
     setLoading(true);
     setError('');
     try {
-      const result = (await tauriApi.getLocalConfigInfo(targetApp)) as LocalInfo;
+      const result = await tauriApi.getLocalConfigInfo(targetApp);
       if (seq === loadSeq.current) setInfo(result);
     } catch (err) {
       if (seq !== loadSeq.current) return;
@@ -90,10 +79,12 @@ function ToolConfigPage({ targetApp, onToolChange }: { targetApp: TargetApp; onT
         </div>
 
         {error && (
-          <div role="alert" className="mb-3 flex items-center gap-2 rounded-md border border-danger/30 bg-danger/8 px-3 py-2 text-[13px] text-danger">
-            <AlertCircle size={15} className="shrink-0" />
-            <span className="min-w-0 flex-1 break-words">{error}</span>
-          </div>
+          <Alert tone="error" className="mb-3">
+            <span className="flex items-center gap-2">
+              <AlertCircle size={15} className="shrink-0" />
+              <span className="min-w-0 flex-1 break-words">{error}</span>
+            </span>
+          </Alert>
         )}
 
         {loading && !info ? (
@@ -378,19 +369,24 @@ function CodexBehaviorSettings({
         </div>
 
         {dangerCombo && (
-          <div className="flex items-start gap-2 rounded-md border border-danger/30 bg-danger/8 px-3 py-2 text-[12px] text-danger">
-            <AlertCircle size={14} className="mt-0.5 shrink-0" />
-            <span className="flex-1">
-              approval_policy=never 与 sandbox_mode=danger-full-access 组合在官方 Codex 会触发回退，请确认这是你想要的设置。
+          <Alert tone="error">
+            <span className="flex items-start gap-2">
+              <AlertCircle size={14} className="mt-0.5 shrink-0" />
+              <span className="flex-1">
+                approval_policy=never 与 sandbox_mode=danger-full-access
+                组合在官方 Codex 会触发回退，请确认这是你想要的设置。
+              </span>
             </span>
-          </div>
+          </Alert>
         )}
 
         {err && (
-          <div className="flex items-start gap-2 rounded-md border border-danger/30 bg-danger/8 px-3 py-2 text-[12px] text-danger">
-            <AlertCircle size={14} className="mt-0.5 shrink-0" />
-            <span className="flex-1 whitespace-pre-wrap break-words">{err}</span>
-          </div>
+          <Alert tone="error">
+            <span className="flex items-start gap-2">
+              <AlertCircle size={14} className="mt-0.5 shrink-0" />
+              <span className="flex-1 whitespace-pre-wrap break-words">{err}</span>
+            </span>
+          </Alert>
         )}
 
         <div className="text-[11px] text-ink-faint">
@@ -425,15 +421,11 @@ function ConfigBackups({ targetApp, onRestored }: { targetApp: TargetApp; onRest
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [targetApp]);
 
-  const restore = async (b: ConfigBackupInfo) => {
-    const name = b.path.split('/').pop() || b.path;
-    if (
-      !window.confirm(
-        `确定恢复备份 ${name}？\n\n恢复前会自动备份当前配置；恢复内容将覆盖配置文件:\n${b.target ?? '（未知，此备份不可恢复）'}`,
-      )
-    ) {
-      return;
-    }
+  /** 待确认恢复的备份；null 表示没有待确认项。 */
+  const [pendingRestore, setPendingRestore] = useState<ConfigBackupInfo | null>(null);
+
+  const doRestore = async (b: ConfigBackupInfo) => {
+    setPendingRestore(null);
     setRestoring(b.path);
     setErr('');
     setMsg('');
@@ -466,16 +458,20 @@ function ConfigBackups({ targetApp, onRestored }: { targetApp: TargetApp; onRest
       </div>
       <div className="p-4">
         {msg && (
-          <div className="mb-3 flex items-center gap-2 rounded-md border border-ok/30 bg-ok/8 px-3 py-2 text-[12px] text-ok">
-            <CheckCircle2 size={14} className="shrink-0" />
-            <span className="flex-1">{msg}</span>
-          </div>
+          <Alert tone="success" className="mb-3">
+            <span className="flex items-center gap-2">
+              <CheckCircle2 size={14} className="shrink-0" />
+              <span className="flex-1">{msg}</span>
+            </span>
+          </Alert>
         )}
         {err && (
-          <div className="mb-3 flex items-center gap-2 rounded-md border border-danger/30 bg-danger/8 px-3 py-2 text-[12px] text-danger">
-            <AlertCircle size={14} className="shrink-0" />
-            <span className="flex-1 whitespace-pre-wrap break-words">{err}</span>
-          </div>
+          <Alert tone="error" className="mb-3">
+            <span className="flex items-center gap-2">
+              <AlertCircle size={14} className="shrink-0" />
+              <span className="flex-1 whitespace-pre-wrap break-words">{err}</span>
+            </span>
+          </Alert>
         )}
         {backups && backups.length === 0 ? (
           <Empty>暂无备份（每次切换/保存配置时自动生成，保留最近 10 个）</Empty>
@@ -494,7 +490,7 @@ function ConfigBackups({ targetApp, onRestored }: { targetApp: TargetApp; onRest
                   <Button
                     size="sm"
                     variant="secondary"
-                    onClick={() => restore(b)}
+                    onClick={() => setPendingRestore(b)}
                     disabled={restoring !== null}
                   >
                     <RotateCcw size={13} className={restoring === b.path ? 'animate-spin' : ''} />
@@ -511,6 +507,26 @@ function ConfigBackups({ targetApp, onRestored }: { targetApp: TargetApp; onRest
           恢复前自动备份当前配置；恢复目标由备份文件名推导，仅限本工具生成的备份。
         </div>
       </div>
+
+      {/*
+        用应用自己的 ConfirmDialog 而不是 window.confirm：原生弹窗样式与
+        全站不一致、无法跟随主题、文案不可换行排版，而且在 Tauri 里会阻塞
+        webview 线程。这里同时把「覆盖哪个文件」写清楚——这是恢复操作里
+        用户最需要确认的一件事。
+      */}
+      {pendingRestore && (
+        <ConfirmDialog
+          title="恢复配置备份"
+          message={
+            `将用这份备份覆盖当前配置：\n${pendingRestore.path}\n\n` +
+            `恢复前会自动备份当前配置，可再回退。`
+          }
+          confirmText="恢复"
+          danger
+          onCancel={() => setPendingRestore(null)}
+          onConfirm={() => doRestore(pendingRestore)}
+        />
+      )}
     </section>
   );
 }
@@ -540,10 +556,15 @@ function Field({
 function CodexConfigEditor({ onSaved }: { onSaved: () => void }) {
   const [editing, setEditing] = useState(false);
   const [content, setContent] = useState('');
+  /** 进入编辑时的原文，用于判断是否有未保存改动。 */
+  const [original, setOriginal] = useState('');
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [loadingRaw, setLoadingRaw] = useState(false);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
   const [saved, setSaved] = useState(false);
+
+  const dirty = editing && content !== original;
 
   const enterEdit = async () => {
     setErr('');
@@ -552,12 +573,24 @@ function CodexConfigEditor({ onSaved }: { onSaved: () => void }) {
     try {
       const raw = await tauriApi.readCodexConfigRaw();
       setContent(raw);
+      setOriginal(raw);
       setEditing(true);
     } catch (e) {
       setErr('读取 config.toml 失败: ' + humanizeError(e));
     } finally {
       setLoadingRaw(false);
     }
+  };
+
+  /** 退出编辑；有未保存改动时先问一句。 */
+  const requestExit = () => {
+    if (saving) return;
+    if (!dirty) {
+      setEditing(false);
+      setErr('');
+      return;
+    }
+    setConfirmDiscard(true);
   };
 
   const save = async () => {
@@ -608,17 +641,19 @@ function CodexConfigEditor({ onSaved }: { onSaved: () => void }) {
               className="h-96 w-full resize-y overflow-auto rounded-md border border-line bg-surface px-3 py-2 font-mono text-[12px] leading-relaxed text-ink focus:border-accent focus:outline-none"
             />
             {err && (
-              <div className="flex items-start gap-2 rounded-md border border-danger/30 bg-danger/8 px-3 py-2 text-[12px] text-danger">
-                <AlertCircle size={14} className="mt-0.5 shrink-0" />
-                <span className="flex-1 whitespace-pre-wrap break-words font-mono">{err}</span>
-              </div>
+              <Alert tone="error">
+                <span className="flex items-start gap-2">
+                  <AlertCircle size={14} className="mt-0.5 shrink-0" />
+                  <span className="flex-1 whitespace-pre-wrap break-words font-mono">{err}</span>
+                </span>
+              </Alert>
             )}
             <div className="flex flex-wrap items-center gap-2">
               <Button onClick={save} disabled={saving}>
                 <Save size={15} />
                 {saving ? '保存中…' : '保存'}
               </Button>
-              <Button variant="secondary" onClick={() => { setEditing(false); setErr(''); }} disabled={saving}>
+              <Button variant="secondary" onClick={requestExit} disabled={saving}>
                 <X size={15} />
                 取消
               </Button>
@@ -629,6 +664,23 @@ function CodexConfigEditor({ onSaved }: { onSaved: () => void }) {
           </div>
         )}
       </div>
+
+      {confirmDiscard && (
+        <ConfirmDialog
+          title="放弃未保存的修改？"
+          message="config.toml 的改动尚未保存，取消编辑后会丢失。"
+          confirmText="放弃修改"
+          cancelText="继续编辑"
+          danger
+          onCancel={() => setConfirmDiscard(false)}
+          onConfirm={() => {
+            setConfirmDiscard(false);
+            setContent(original);
+            setEditing(false);
+            setErr('');
+          }}
+        />
+      )}
     </section>
   );
 }
@@ -656,7 +708,7 @@ function Section({
   );
 }
 
-function McpCard({ name, cfg }: { name: string; cfg: McpServerCfg }) {
+function McpCard({ name, cfg }: { name: string; cfg: McpServerConfig }) {
   const hasUrl = !!cfg.url;
   const cmdLine = [cfg.command, ...(cfg.args || [])].filter(Boolean).join(' ');
   const envCount = cfg.env ? Object.keys(cfg.env).length : 0;

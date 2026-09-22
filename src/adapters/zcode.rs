@@ -15,17 +15,20 @@ pub struct ZCodeAdapter {
 }
 
 impl ZCodeAdapter {
-    pub fn new() -> Self {
-        Self {
-            config_dir: Self::default_config_dir(),
-        }
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            config_dir: Self::default_config_dir()?,
+        })
     }
 
-    fn default_config_dir() -> PathBuf {
-        Self::resolve_config_dir(
+    fn default_config_dir() -> Result<PathBuf> {
+        // 不用 `expect`：HOME 缺失时切换会 panic，而这是可恢复的环境异常。
+        let home =
+            dirs::home_dir().ok_or_else(|| anyhow::anyhow!("无法定位用户主目录（HOME 未设置）"))?;
+        Ok(Self::resolve_config_dir(
             std::env::var("ZCODE_DATA_BASE_DIR").ok().as_deref(),
-            dirs::home_dir().expect("Failed to get home directory"),
-        )
+            home,
+        ))
     }
 
     /// `{base}/.zcode/v2` — `base` is `ZCODE_DATA_BASE_DIR` or `$HOME`.
@@ -138,7 +141,7 @@ impl ZCodeAdapter {
             .unwrap_or(false);
 
         if !provider_still_used && provider_managed {
-            Self::new().remove_provider(&provider_id)?;
+            Self::new()?.remove_provider(&provider_id)?;
         }
 
         let deleted = db.delete_profile(name, crate::models::TargetApp::ZCode)?;
@@ -220,12 +223,6 @@ impl ZCodeAdapter {
             }
         }
         model_id.to_string()
-    }
-}
-
-impl Default for ZCodeAdapter {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -397,7 +394,7 @@ impl ConfigAdapter for ZCodeAdapter {
     fn backup_config(&self) -> Result<PathBuf> {
         let path = self.config_path();
         if !path.exists() {
-            anyhow::bail!("Config file does not exist");
+            anyhow::bail!("配置文件不存在");
         }
         let backup_path = backup::backup_required(&self.config_dir, &path, "zcode")?;
         self.cleanup_old_backups(10)?;

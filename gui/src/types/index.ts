@@ -215,6 +215,29 @@ export interface StatusInfo {
   database: DatabaseInfo;
 }
 
+/** 单个 MCP server 的配置（只读展示）。 */
+export interface McpServerConfig {
+  command?: string;
+  args?: string[];
+  url?: string | null;
+  env?: Record<string, string> | null;
+}
+
+/**
+ * `get_local_config_info` 的返回体：某工具当前 live 配置里被同步的部分。
+ *
+ * 字段与后端 `LocalConfigInfo` 一一对应——`other` 曾在此缺失，页面只好用
+ * `as LocalInfo` 强转掩盖，导致类型体系失效（后端新增字段前端不会报错）。
+ */
+export interface LocalConfigInfo {
+  mcp_servers: Record<string, McpServerConfig>;
+  skills: string[];
+  hooks: Record<string, unknown>;
+  permissions: Record<string, unknown>;
+  /** 其余被同步但未单独归类的顶层配置（tui / plugins / features 等）。 */
+  other: Record<string, unknown>;
+}
+
 export interface SessionMeta {
   id: string;
   tool: string;
@@ -264,4 +287,16 @@ export interface AppError {
   kind: ErrorKind;
   message: string;
   detail?: string;
+}
+
+/**
+ * 页面顶部/底部的结果反馈条。
+ *
+ * `kind` 是 `AlertTone` 的子集——反馈条只用这三种语气（`warning` 留给
+ * 静态提示，不作为操作结果）。此前 `ImportPage` 与 `exportMessages` 各写了
+ * 一遍同样的形状。
+ */
+export interface Feedback {
+  text: string;
+  kind: 'success' | 'error' | 'info';
 }

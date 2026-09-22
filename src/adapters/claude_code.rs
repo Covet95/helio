@@ -10,10 +10,18 @@ pub struct ClaudeCodeAdapter {
 }
 
 impl ClaudeCodeAdapter {
-    pub fn new() -> Self {
-        let home = dirs::home_dir().expect("Failed to get home directory");
+    pub fn new() -> Result<Self> {
+        // 不用 `expect`：主目录解析不出来时切换会直接 panic，而这是可恢复的
+        // 环境异常——返回 Err 让命令层报错即可。
+        //
+        // 触发条件比想象中窄：macOS/多数 Linux 上 `dirs::home_dir()` 在 `$HOME`
+        // 未设时会回退到 getpwuid（实测去掉 HOME 仍返回 /Users/<user>）。
+        // 但该回退同样可能失败——容器里没有 passwd 条目、或服务账户无 home。
+        // 那种环境下 panic 会让整个切换崩在半途，而不是干净地报错。
+        let home =
+            dirs::home_dir().ok_or_else(|| anyhow::anyhow!("无法定位用户主目录（HOME 未设置）"))?;
         let config_dir = home.join(".claude");
-        Self { config_dir }
+        Ok(Self { config_dir })
     }
 
     /// 获取 settings.json 路径（Claude Code 的用户级/全局配置文件）
@@ -42,12 +50,6 @@ impl ClaudeCodeAdapter {
         let content = fs::read_to_string(path).ok()?;
         let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
         parsed.get("mcpServers").cloned()
-    }
-}
-
-impl Default for ClaudeCodeAdapter {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -197,23 +199,39 @@ impl ConfigAdapter for ClaudeCodeAdapter {
         config
     }
 
+    /// 把 MCP 写入 `~/.claude.json`。
+    ///
+    /// **只改 `mcpServers` 一个键**，其余内容（用户自己的键、Claude Code 的
+    /// 运行时状态如 `numStartups`/项目历史、JSONC 注释）一律保留。
+    ///
+    /// 早期实现是「解析失败就从 `{}` 起步 + 全量序列化写回」：`~/.claude.json`
+    /// 是 JSONC（带注释），`serde_json` 严格解析必然失败，于是整个文件被替换成
+    /// `{"mcpServers": ...}`——用户的键和运行时状态全丢。实测确认。
+    ///
+    /// 现在走 `doc` 层的合并路径：读 live 文本 → 只改目标键 → 写回。
     fn apply_auxiliary_config(&self, shared_config: &serde_json::Value) -> Result<()> {
         let Some(mcp) = shared_config.get("mcpServers").cloned() else {
             return Ok(());
         };
         let path = self.claude_json_path();
-        let mut claude_json: serde_json::Value = if path.exists() {
-            fs::read_to_string(&path)
-                .ok()
-                .and_then(|c| serde_json::from_str(&c).ok())
-                .unwrap_or_else(|| serde_json::json!({}))
+
+        let live_text = if path.exists() {
+            fs::read_to_string(&path).context("Failed to read claude.json")?
         } else {
-            serde_json::json!({})
+            String::new()
         };
-        if let Some(obj) = claude_json.as_object_mut() {
-            obj.insert("mcpServers".to_string(), mcp);
-        }
-        let content = serde_json::to_string_pretty(&claude_json).context("Failed to serialize")?;
+
+        let next = serde_json::json!({ "mcpServers": mcp });
+        let content = crate::doc::merge_document(
+            crate::doc::DocFormat::Json,
+            &live_text,
+            // 无 previous：`mcpServers` 是唯一受管键，首次写入时只叠加不摘除，
+            // 不会动用户的任何内容。
+            None,
+            &next,
+        )
+        .context("Failed to merge claude.json")?;
+
         atomic_write_private(&path, content.as_bytes()).context("Failed to write claude.json")?;
         Ok(())
     }
@@ -234,7 +252,7 @@ impl ConfigAdapter for ClaudeCodeAdapter {
     fn backup_config(&self) -> Result<PathBuf> {
         let path = self.config_path();
         if !path.exists() {
-            anyhow::bail!("Config file does not exist");
+            anyhow::bail!("配置文件不存在");
         }
 
         let backup_path = backup::backup_required(&self.config_dir, &path, "settings")?;
@@ -253,6 +271,11 @@ impl ConfigAdapter for ClaudeCodeAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 测试用构造：测试环境必有 HOME，取不到就直接失败。
+    fn adapter() -> ClaudeCodeAdapter {
+        ClaudeCodeAdapter::new().expect("测试环境应能取到 HOME")
+    }
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -347,7 +370,7 @@ mod tests {
 
     #[test]
     fn test_merge_config() {
-        let adapter = ClaudeCodeAdapter::new();
+        let adapter = adapter();
 
         let api_profile = ApiProfile {
             id: Some(1),

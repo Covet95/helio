@@ -29,10 +29,18 @@ pub struct CodexAdapter {
 }
 
 impl CodexAdapter {
-    pub fn new() -> Self {
-        let home = dirs::home_dir().expect("Failed to get home directory");
+    pub fn new() -> Result<Self> {
+        // 不用 `expect`：主目录解析不出来时切换会直接 panic，而这是可恢复的
+        // 环境异常——返回 Err 让命令层报错即可。
+        //
+        // 触发条件比想象中窄：macOS/多数 Linux 上 `dirs::home_dir()` 在 `$HOME`
+        // 未设时会回退到 getpwuid（实测去掉 HOME 仍返回 /Users/<user>）。
+        // 但该回退同样可能失败——容器里没有 passwd 条目、或服务账户无 home。
+        // 那种环境下 panic 会让整个切换崩在半途，而不是干净地报错。
+        let home =
+            dirs::home_dir().ok_or_else(|| anyhow::anyhow!("无法定位用户主目录（HOME 未设置）"))?;
         let config_dir = home.join(".codex");
-        Self { config_dir }
+        Ok(Self { config_dir })
     }
 
     fn config_file_path(&self) -> PathBuf {
@@ -438,7 +446,7 @@ impl CodexAdapter {
         Ok(match value {
             serde_json::Value::Null => {
                 // TOML 不支持 null，跳过（用空字符串占位会污染配置，调用方应过滤）
-                anyhow::bail!("TOML does not support null values")
+                anyhow::bail!("TOML 不支持 null 值")
             }
             serde_json::Value::Bool(b) => toml::Value::Boolean(*b),
             serde_json::Value::Number(n) => {
@@ -447,7 +455,7 @@ impl CodexAdapter {
                 } else if let Some(f) = n.as_f64() {
                     toml::Value::Float(f)
                 } else {
-                    anyhow::bail!("Unsupported number type")
+                    anyhow::bail!("不支持的数字类型")
                 }
             }
             serde_json::Value::String(s) => toml::Value::String(s.clone()),
@@ -471,11 +479,199 @@ impl CodexAdapter {
             }
         })
     }
-}
 
-impl Default for CodexAdapter {
-    fn default() -> Self {
-        Self::new()
+    /// Bedrock 模式：走 Codex 内置 AWS 认证，只写 provider id 与可选 aws 段。
+    ///
+    /// 从 `merge_config` 里抽出。那段原本把 Bedrock 与自定义 provider 两个
+    /// 正交维度交织在一个 330 行的函数里——改一边得读懂另一边，而它们其实
+    /// 互不相干（`if/else` 各走各的）。
+    fn apply_bedrock_provider(config: &mut serde_json::Value, api_profile: &ApiProfile) {
+        config["model_provider"] = serde_json::Value::String("amazon-bedrock".to_string());
+        if let Some(providers) = config
+            .get_mut("model_providers")
+            .and_then(|value| value.as_object_mut())
+        {
+            providers.remove("amazon-bedrock-custom");
+            let profile = api_profile
+                .codex
+                .aws_profile
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let region = api_profile
+                .codex
+                .aws_region
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            if profile.is_some() || region.is_some() {
+                let mut aws = serde_json::Map::new();
+                if let Some(profile) = profile {
+                    aws.insert(
+                        "profile".to_string(),
+                        serde_json::Value::String(profile.to_string()),
+                    );
+                }
+                if let Some(region) = region {
+                    aws.insert(
+                        "region".to_string(),
+                        serde_json::Value::String(region.to_string()),
+                    );
+                }
+                providers.insert(
+                    "amazon-bedrock".to_string(),
+                    serde_json::json!({ "aws": aws }),
+                );
+            } else {
+                providers.remove("amazon-bedrock");
+            }
+        }
+    }
+
+    /// 自定义 provider 模式：写入 provider 条目（base_url / 鉴权 / wire_api），
+    /// 其他 provider 不动。
+    ///
+    /// 与 `apply_bedrock_provider` 是互斥的两条路；同理由 `merge_config` 抽出。
+    fn apply_custom_provider(config: &mut serde_json::Value, api_profile: &ApiProfile) {
+        // 使用 profile.provider 作为 provider id（默认沿用 "custom"）。
+        // Codex 保留了内置 provider id（如 `openai`），不允许在 model_providers
+        // 中覆盖；若撞上保留字则加 `-custom` 后缀（与 Codex 报错建议一致）。
+        let (provider_id, _) = Self::active_provider_id(api_profile);
+
+        // 写入目标 provider 配置并保留 Profile 指定的协议与鉴权模式；其他 provider 不动。
+        if let Some(providers) = config
+            .get_mut("model_providers")
+            .and_then(|v| v.as_object_mut())
+        {
+            let is_new = !providers.contains_key(&provider_id);
+            let entry = providers
+                .entry(provider_id.clone())
+                .or_insert_with(|| serde_json::json!({}));
+            if let Some(p) = entry.as_object_mut() {
+                p.insert(
+                    "base_url".to_string(),
+                    serde_json::Value::String(api_profile.api_url.clone()),
+                );
+                let bearer_token = api_profile
+                    .codex
+                    .experimental_bearer_token
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                if api_profile.codex.has_command_auth() {
+                    // 命令式 token：写 [model_providers.<id>.auth]，清掉互斥的静态凭据键。
+                    let command = api_profile
+                        .codex
+                        .auth_command
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or_default();
+                    let mut auth = serde_json::Map::new();
+                    auth.insert(
+                        "command".to_string(),
+                        serde_json::Value::String(command.to_string()),
+                    );
+                    let args: Vec<serde_json::Value> = api_profile
+                        .codex
+                        .auth_args
+                        .as_ref()
+                        .map(|list| {
+                            list.iter()
+                                .map(|arg| arg.trim())
+                                .filter(|arg| !arg.is_empty())
+                                .map(|arg| serde_json::Value::String(arg.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if !args.is_empty() {
+                        auth.insert("args".to_string(), serde_json::Value::Array(args));
+                    }
+                    for (key, value) in [
+                        ("timeout_ms", api_profile.codex.auth_timeout_ms),
+                        (
+                            "refresh_interval_ms",
+                            api_profile.codex.auth_refresh_interval_ms,
+                        ),
+                    ] {
+                        if let Some(ms) = value.filter(|ms| *ms > 0) {
+                            auth.insert(key.to_string(), serde_json::Value::Number(ms.into()));
+                        }
+                    }
+                    if let Some(cwd) = api_profile
+                        .codex
+                        .auth_cwd
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                    {
+                        auth.insert(
+                            "cwd".to_string(),
+                            serde_json::Value::String(cwd.to_string()),
+                        );
+                    }
+                    p.insert("auth".to_string(), serde_json::Value::Object(auth));
+                    p.remove("env_key");
+                    p.remove("experimental_bearer_token");
+                    p.remove("requires_openai_auth");
+                } else {
+                    p.remove("auth");
+                    if let Some(env_key) = Self::env_key(api_profile) {
+                        p.insert(
+                            "env_key".to_string(),
+                            serde_json::Value::String(env_key.to_string()),
+                        );
+                    } else {
+                        p.remove("env_key");
+                    }
+                    // 鉴权默认：显式值优先；env_key / bearer 模式不需要登录态 → false；
+                    // 其余（auth.json 写 key）保持 true，否则 Codex 不会读取 auth.json。
+                    let requires_openai_auth = api_profile
+                        .codex
+                        .requires_openai_auth
+                        .or_else(|| Self::env_key(api_profile).map(|_| false))
+                        .or_else(|| bearer_token.map(|_| false))
+                        .or(Some(true));
+                    if let Some(requires_openai_auth) = requires_openai_auth {
+                        p.insert(
+                            "requires_openai_auth".to_string(),
+                            serde_json::Value::Bool(requires_openai_auth),
+                        );
+                    }
+                    if api_profile.codex.supports_standalone_web_search == Some(true) {
+                        p.insert(
+                            "supports_standalone_web_search".to_string(),
+                            serde_json::Value::Bool(true),
+                        );
+                    } else {
+                        p.remove("supports_standalone_web_search");
+                    }
+                    match bearer_token {
+                        Some(token) => {
+                            p.insert(
+                                "experimental_bearer_token".to_string(),
+                                serde_json::Value::String(token.to_string()),
+                            );
+                        }
+                        None => {
+                            p.remove("experimental_bearer_token");
+                        }
+                    }
+                } // 命令式 token 分支结束；以下对两种鉴权模式通用
+                  // wire_api 固定 responses：chat 已于 2026-02 被官方删除，
+                  // 历史值在这里自愈（validate 会提示用户清理存量）。
+                p.insert(
+                    "wire_api".to_string(),
+                    serde_json::Value::String("responses".to_string()),
+                );
+                if is_new {
+                    // 全新 provider：补上 Codex 必需的 name 默认值。
+                    p.entry("name".to_string())
+                        .or_insert_with(|| serde_json::Value::String(provider_id.clone()));
+                }
+            }
+        }
+        config["model_provider"] = serde_json::Value::String(provider_id);
     }
 }
 
@@ -547,7 +743,7 @@ impl ConfigAdapter for CodexAdapter {
     fn validate_profile(&self, api_profile: &ApiProfile) -> Result<()> {
         if !Self::is_amazon_bedrock_profile(api_profile) {
             if api_profile.api_url.trim().is_empty() {
-                anyhow::bail!("Codex custom provider requires an API URL");
+                anyhow::bail!("Codex 自定义 provider 需要填写 API URL");
             }
             if Self::env_key(api_profile).is_none()
                 && api_profile.api_key.trim().is_empty()
@@ -567,7 +763,7 @@ impl ConfigAdapter for CodexAdapter {
             // auth 命令式 token 与其它静态凭据互斥（官方要求）。
             if api_profile.codex.has_command_auth() {
                 if Self::env_key(api_profile).is_some() {
-                    anyhow::bail!("Codex auth command cannot be combined with env_key");
+                    anyhow::bail!("Codex 的 auth 命令不能与 env_key 同时使用");
                 }
                 if api_profile
                     .codex
@@ -619,7 +815,7 @@ impl ConfigAdapter for CodexAdapter {
                 );
             }
             if !is_supported_wire_api(wire) {
-                anyhow::bail!("Unsupported Codex wire_api: {wire}");
+                anyhow::bail!("不支持的 Codex wire_api：{wire}");
             }
         }
 
@@ -631,7 +827,7 @@ impl ConfigAdapter for CodexAdapter {
             .filter(|value| !value.is_empty())
         {
             if !CODEX_REASONING_LEVELS.contains(&effort) {
-                anyhow::bail!("Unsupported Codex reasoning effort: {effort}");
+                anyhow::bail!("不支持的 Codex reasoning effort：{effort}");
             }
         }
 
@@ -654,7 +850,7 @@ impl ConfigAdapter for CodexAdapter {
         ] {
             if let Some(v) = value.map(str::trim).filter(|v| !v.is_empty()) {
                 if !allowed.contains(&v) {
-                    anyhow::bail!("Unsupported Codex {label}: {v}");
+                    anyhow::bail!("不支持的 Codex {label}：{v}");
                 }
             }
         }
@@ -698,186 +894,9 @@ impl ConfigAdapter for CodexAdapter {
         }
 
         if is_bedrock {
-            config["model_provider"] = serde_json::Value::String("amazon-bedrock".to_string());
-            if let Some(providers) = config
-                .get_mut("model_providers")
-                .and_then(|value| value.as_object_mut())
-            {
-                providers.remove("amazon-bedrock-custom");
-                let profile = api_profile
-                    .codex
-                    .aws_profile
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty());
-                let region = api_profile
-                    .codex
-                    .aws_region
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty());
-                if profile.is_some() || region.is_some() {
-                    let mut aws = serde_json::Map::new();
-                    if let Some(profile) = profile {
-                        aws.insert(
-                            "profile".to_string(),
-                            serde_json::Value::String(profile.to_string()),
-                        );
-                    }
-                    if let Some(region) = region {
-                        aws.insert(
-                            "region".to_string(),
-                            serde_json::Value::String(region.to_string()),
-                        );
-                    }
-                    providers.insert(
-                        "amazon-bedrock".to_string(),
-                        serde_json::json!({ "aws": aws }),
-                    );
-                } else {
-                    providers.remove("amazon-bedrock");
-                }
-            }
+            Self::apply_bedrock_provider(&mut config, api_profile);
         } else {
-            // 使用 profile.provider 作为 provider id（默认沿用 "custom"）。
-            // Codex 保留了内置 provider id（如 `openai`），不允许在 model_providers
-            // 中覆盖；若撞上保留字则加 `-custom` 后缀（与 Codex 报错建议一致）。
-            let (provider_id, _) = Self::active_provider_id(api_profile);
-
-            // 写入目标 provider 配置并保留 Profile 指定的协议与鉴权模式；其他 provider 不动。
-            if let Some(providers) = config
-                .get_mut("model_providers")
-                .and_then(|v| v.as_object_mut())
-            {
-                let is_new = !providers.contains_key(&provider_id);
-                let entry = providers
-                    .entry(provider_id.clone())
-                    .or_insert_with(|| serde_json::json!({}));
-                if let Some(p) = entry.as_object_mut() {
-                    p.insert(
-                        "base_url".to_string(),
-                        serde_json::Value::String(api_profile.api_url.clone()),
-                    );
-                    let bearer_token = api_profile
-                        .codex
-                        .experimental_bearer_token
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty());
-                    if api_profile.codex.has_command_auth() {
-                        // 命令式 token：写 [model_providers.<id>.auth]，清掉互斥的静态凭据键。
-                        let command = api_profile
-                            .codex
-                            .auth_command
-                            .as_deref()
-                            .map(str::trim)
-                            .filter(|value| !value.is_empty())
-                            .unwrap_or_default();
-                        let mut auth = serde_json::Map::new();
-                        auth.insert(
-                            "command".to_string(),
-                            serde_json::Value::String(command.to_string()),
-                        );
-                        let args: Vec<serde_json::Value> = api_profile
-                            .codex
-                            .auth_args
-                            .as_ref()
-                            .map(|list| {
-                                list.iter()
-                                    .map(|arg| arg.trim())
-                                    .filter(|arg| !arg.is_empty())
-                                    .map(|arg| serde_json::Value::String(arg.to_string()))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        if !args.is_empty() {
-                            auth.insert("args".to_string(), serde_json::Value::Array(args));
-                        }
-                        for (key, value) in [
-                            ("timeout_ms", api_profile.codex.auth_timeout_ms),
-                            (
-                                "refresh_interval_ms",
-                                api_profile.codex.auth_refresh_interval_ms,
-                            ),
-                        ] {
-                            if let Some(ms) = value.filter(|ms| *ms > 0) {
-                                auth.insert(key.to_string(), serde_json::Value::Number(ms.into()));
-                            }
-                        }
-                        if let Some(cwd) = api_profile
-                            .codex
-                            .auth_cwd
-                            .as_deref()
-                            .map(str::trim)
-                            .filter(|value| !value.is_empty())
-                        {
-                            auth.insert(
-                                "cwd".to_string(),
-                                serde_json::Value::String(cwd.to_string()),
-                            );
-                        }
-                        p.insert("auth".to_string(), serde_json::Value::Object(auth));
-                        p.remove("env_key");
-                        p.remove("experimental_bearer_token");
-                        p.remove("requires_openai_auth");
-                    } else {
-                        p.remove("auth");
-                        if let Some(env_key) = Self::env_key(api_profile) {
-                            p.insert(
-                                "env_key".to_string(),
-                                serde_json::Value::String(env_key.to_string()),
-                            );
-                        } else {
-                            p.remove("env_key");
-                        }
-                        // 鉴权默认：显式值优先；env_key / bearer 模式不需要登录态 → false；
-                        // 其余（auth.json 写 key）保持 true，否则 Codex 不会读取 auth.json。
-                        let requires_openai_auth = api_profile
-                            .codex
-                            .requires_openai_auth
-                            .or_else(|| Self::env_key(api_profile).map(|_| false))
-                            .or_else(|| bearer_token.map(|_| false))
-                            .or(Some(true));
-                        if let Some(requires_openai_auth) = requires_openai_auth {
-                            p.insert(
-                                "requires_openai_auth".to_string(),
-                                serde_json::Value::Bool(requires_openai_auth),
-                            );
-                        }
-                        if api_profile.codex.supports_standalone_web_search == Some(true) {
-                            p.insert(
-                                "supports_standalone_web_search".to_string(),
-                                serde_json::Value::Bool(true),
-                            );
-                        } else {
-                            p.remove("supports_standalone_web_search");
-                        }
-                        match bearer_token {
-                            Some(token) => {
-                                p.insert(
-                                    "experimental_bearer_token".to_string(),
-                                    serde_json::Value::String(token.to_string()),
-                                );
-                            }
-                            None => {
-                                p.remove("experimental_bearer_token");
-                            }
-                        }
-                    } // 命令式 token 分支结束；以下对两种鉴权模式通用
-                      // wire_api 固定 responses：chat 已于 2026-02 被官方删除，
-                      // 历史值在这里自愈（validate 会提示用户清理存量）。
-                    p.insert(
-                        "wire_api".to_string(),
-                        serde_json::Value::String("responses".to_string()),
-                    );
-                    if is_new {
-                        // 全新 provider：补上 Codex 必需的 name 默认值。
-                        p.entry("name".to_string())
-                            .or_insert_with(|| serde_json::Value::String(provider_id.clone()));
-                    }
-                }
-            }
-            config["model_provider"] = serde_json::Value::String(provider_id);
+            Self::apply_custom_provider(&mut config, api_profile);
         }
 
         // API key 不写 config.toml —— 走 auth.json（见 apply_api_credentials），
@@ -1019,7 +1038,7 @@ impl ConfigAdapter for CodexAdapter {
             anyhow::anyhow!("Codex merge result is not an object; refusing to write")
         })?;
         if merged_obj.is_empty() {
-            anyhow::bail!("Codex merge result is empty; refusing to write");
+            anyhow::bail!("Codex 合并结果为空，拒绝写入");
         }
         let (provider_id, is_bedrock) = Self::active_provider_id(api_profile);
         let active = merged_obj
@@ -1027,7 +1046,7 @@ impl ConfigAdapter for CodexAdapter {
             .and_then(|value| value.as_str())
             .unwrap_or("");
         if active != provider_id {
-            anyhow::bail!("Codex merge result provider mismatch; refusing to write");
+            anyhow::bail!("Codex 合并结果的 provider 不匹配，拒绝写入");
         }
         // Bedrock without aws settings is intentionally omitted by merge; otherwise
         // the target section must exist and offer a working endpoint/credential route.
@@ -1094,7 +1113,7 @@ impl ConfigAdapter for CodexAdapter {
         let path = self.config_path();
 
         if !path.exists() {
-            anyhow::bail!("Config file does not exist");
+            anyhow::bail!("配置文件不存在");
         }
 
         let backup_path = backup::backup_required(&self.config_dir, &path, "config")?;
@@ -1186,6 +1205,11 @@ impl ConfigAdapter for CodexAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 测试用构造：测试环境必有 HOME，取不到就直接失败。
+    fn adapter() -> CodexAdapter {
+        CodexAdapter::new().expect("测试环境应能取到 HOME")
+    }
     use crate::models::CodexProfileFields;
 
     fn sample_profile() -> ApiProfile {
@@ -1201,7 +1225,7 @@ mod tests {
 
     #[test]
     fn test_merge_with_non_object_shared_starts_empty() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         // Guard: null shared config no longer panics; merge starts from empty object.
         let merged = adapter.merge_config(&sample_profile(), &serde_json::Value::Null);
         assert_eq!(merged["model_provider"], "openai-custom");
@@ -1213,7 +1237,7 @@ mod tests {
 
     #[test]
     fn test_verify_merged_config_accepts_valid_merge() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let shared = adapter.extract_shared_config(&serde_json::json!({
             "model_provider": "openai-custom",
             "sandbox_mode": "danger-full-access",
@@ -1232,7 +1256,7 @@ mod tests {
 
     #[test]
     fn test_verify_merged_config_rejects_stripped_config() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let profile = sample_profile();
         // Empty object.
         assert!(adapter
@@ -1435,7 +1459,7 @@ command = "npx"
 
     #[test]
     fn test_extract_shared_removes_api() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let config = serde_json::json!({
             "api_key": "sk-secret",
             "model_provider": "openai",
@@ -1468,7 +1492,7 @@ command = "npx"
 
     #[test]
     fn test_extract_shared_removes_provider_secrets_from_inactive_providers() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let config = serde_json::json!({
             "model_provider": "active",
             "model_providers": {
@@ -1505,7 +1529,7 @@ command = "npx"
 
     #[test]
     fn test_merge_inserts_api() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let shared = serde_json::json!({
             "mcp_servers": {
                 "fs": { "command": "npx" }
@@ -1542,7 +1566,7 @@ command = "npx"
 
     #[test]
     fn test_merge_uses_built_in_amazon_bedrock() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         // 非保留字 provider 原样使用
         let custom = ApiProfile {
             provider: "myproxy".to_string(),
@@ -1593,7 +1617,7 @@ command = "npx"
 
     #[test]
     fn test_merge_applies_codex_model_parameters() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let profile = ApiProfile {
             model: Some("gpt-5.5".to_string()),
             context_1m: Some(true),
@@ -1613,7 +1637,7 @@ command = "npx"
 
     #[test]
     fn test_merge_clears_disabled_codex_model_parameters() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let shared = serde_json::json!({
             "model": "old-model",
             "model_reasoning_effort": "high",
@@ -1634,7 +1658,7 @@ command = "npx"
 
     #[test]
     fn test_merge_normalizes_legacy_auth_fields() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         // 已有 provider 用 responses，profile 的 requires_openai_auth=false 被应用，
         // 历史遗留的 wire_api="chat" 自愈为 responses（chat 已被官方删除）。
         let shared = serde_json::json!({
@@ -1671,7 +1695,7 @@ command = "npx"
 
     #[test]
     fn test_merge_uses_provider_env_key_and_preserves_bearer() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let profile = ApiProfile {
             provider: "myproxy".to_string(),
             codex: CodexProfileFields {
@@ -1699,7 +1723,7 @@ command = "npx"
 
     #[test]
     fn test_merge_writes_standalone_web_search_only_when_enabled() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let enabled = ApiProfile {
             provider: "myproxy".into(),
             codex: CodexProfileFields {
@@ -1733,7 +1757,7 @@ command = "npx"
 
     #[test]
     fn test_validate_rejects_unsupported_reasoning_levels() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let profile = ApiProfile {
             codex: CodexProfileFields {
                 reasoning_effort: Some("ultra".into()),
@@ -1780,7 +1804,7 @@ command = "npx"
 
     #[test]
     fn test_switch_preserves_unrelated_provider_exactly() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let current = serde_json::json!({
             "model_provider": "provider-a",
             "model_providers": {
@@ -1805,7 +1829,7 @@ command = "npx"
 
     #[test]
     fn test_merge_applies_top_level_codex_params() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let profile = ApiProfile {
             codex: CodexProfileFields {
                 service_tier: Some("fast".to_string()),
@@ -1821,7 +1845,7 @@ command = "npx"
 
     #[test]
     fn test_merge_clears_disabled_top_level_codex_params() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let shared = serde_json::json!({
             "model_thinking_enabled": true,
             "service_tier": "fast",
@@ -1836,7 +1860,7 @@ command = "npx"
 
     #[test]
     fn test_merge_preserves_existing_provider_protocol() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         // 已有 custom provider，带 wire_api / requires_openai_auth
         let shared = serde_json::json!({
             "model_providers": {
@@ -1871,7 +1895,7 @@ command = "npx"
 
     #[test]
     fn test_merge_fills_missing_openai_auth_on_existing_provider() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let shared = serde_json::json!({
             "model_providers": {
                 "custom": {
@@ -2295,7 +2319,7 @@ command = "npx"
 
     #[test]
     fn test_validate_rejects_removed_chat_wire() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let profile = ApiProfile {
             codex: CodexProfileFields {
                 wire_api: Some("chat".to_string()),
@@ -2318,7 +2342,7 @@ command = "npx"
 
     #[test]
     fn test_validate_rejects_bad_tiers_and_summaries() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         for codex in [
             CodexProfileFields {
                 service_tier: Some("ultra".into()),
@@ -2353,7 +2377,7 @@ command = "npx"
 
     #[test]
     fn test_merge_bearer_only_defaults_openai_auth_false() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let profile = ApiProfile {
             provider: "myproxy".to_string(),
             codex: CodexProfileFields {
@@ -2377,7 +2401,7 @@ command = "npx"
 
     #[test]
     fn test_merge_command_auth_writes_auth_table() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let profile = ApiProfile {
             provider: "myproxy".to_string(),
             codex: CodexProfileFields {
@@ -2409,7 +2433,7 @@ command = "npx"
 
     #[test]
     fn test_validate_rejects_auth_command_conflicts() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         for codex in [
             CodexProfileFields {
                 auth_command: Some("cmd".into()),
@@ -2437,7 +2461,7 @@ command = "npx"
 
     #[test]
     fn test_merge_writes_summary_and_verbosity_without_clearing_unset() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let profile = ApiProfile {
             codex: CodexProfileFields {
                 reasoning_summary: Some("concise".to_string()),
@@ -2462,7 +2486,7 @@ command = "npx"
 
     #[test]
     fn test_merge_context_none_preserves_existing_window() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let shared = serde_json::json!({
             "model_context_window": 128000,
             "model_auto_compact_token_limit": 100000,
@@ -2482,7 +2506,7 @@ command = "npx"
 
     #[test]
     fn test_merge_clears_cli_auth_store_when_env_key() {
-        let adapter = CodexAdapter::new();
+        let adapter = adapter();
         let shared = serde_json::json!({ "cli_auth_credentials_store": "file" });
         let profile = ApiProfile {
             provider: "myproxy".to_string(),

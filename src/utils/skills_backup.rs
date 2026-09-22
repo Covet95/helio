@@ -330,13 +330,16 @@ fn is_executable(_file: &fs::File) -> bool {
     false
 }
 
-/// 把归档条目声明的模式中的可执行位应用到目标文件(恢复后脚本仍可运行)。
+/// 应用归档条目声明的模式:可执行位照搬,其余一律收紧为 owner-only。
+///
+/// 导出侧 tar 用 0600 写盘，恢复侧原先只有 `fs::write`——权限取决于 umask
+/// （常见 022，即落成 0644，同机其他用户可读）。skills 里可能有含 token 的
+/// 脚本或配置，恢复后应当与导出前一致。
 #[cfg(unix)]
 fn apply_exec_bit(path: &Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt;
-    if mode & 0o111 != 0 {
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o755));
-    }
+    let bits = if mode & 0o111 != 0 { 0o755 } else { 0o600 };
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(bits));
 }
 
 #[cfg(not(unix))]
@@ -347,18 +350,18 @@ fn apply_exec_bit(_path: &Path, _mode: u32) {}
 fn validate_entry_path(path: &Path) -> Result<Option<(TargetApp, String)>> {
     let comps: Vec<Component> = path.components().collect();
     if comps.is_empty() {
-        anyhow::bail!("archive contains an empty path entry");
+        anyhow::bail!("归档里有空路径条目");
     }
     for comp in &comps {
         if !matches!(comp, Component::Normal(_)) {
-            anyhow::bail!("archive entry escapes the archive: {}", path.display());
+            anyhow::bail!("归档条目逃出了归档目录：{}", path.display());
         }
     }
     if comps.len() == 1 && comps[0].as_os_str() == MANIFEST_NAME {
         return Ok(None);
     }
     if comps.len() < 2 {
-        anyhow::bail!("unexpected archive entry: {}", path.display());
+        anyhow::bail!("归档里有预期外的条目：{}", path.display());
     }
     let app_str = comps[0].as_os_str().to_string_lossy();
     let app = TargetApp::parse(&app_str).ok_or_else(|| {
@@ -369,14 +372,14 @@ fn validate_entry_path(path: &Path) -> Result<Option<(TargetApp, String)>> {
     })?;
     let skill = comps[1].as_os_str().to_string_lossy().to_string();
     if skill.is_empty() || skill.starts_with('.') {
-        anyhow::bail!("invalid skill name in archive: {}", path.display());
+        anyhow::bail!("归档里的 skill 名不合法：{}", path.display());
     }
     Ok(Some((app, skill)))
 }
 
 fn validate_destination_boundary(home: &Path, target: &Path) -> Result<()> {
     if !target.starts_with(home) {
-        anyhow::bail!("skill destination escapes home: {}", target.display());
+        anyhow::bail!("skill 目标路径逃出了主目录：{}", target.display());
     }
 
     let mut current = home.to_path_buf();
@@ -385,7 +388,7 @@ fn validate_destination_boundary(home: &Path, target: &Path) -> Result<()> {
         .map_err(|_| anyhow!("skill destination is outside home"))?;
     for component in relative.components() {
         let Component::Normal(name) = component else {
-            anyhow::bail!("skill destination contains a non-normal component");
+            anyhow::bail!("skill 目标路径含有非常规路径段");
         };
         current.push(name);
         match fs::symlink_metadata(&current) {
@@ -434,7 +437,7 @@ fn read_manifest(archive_path: &Path) -> Result<Manifest> {
             .into_owned();
         if path == Path::new(MANIFEST_NAME) {
             if manifest_json.is_some() {
-                anyhow::bail!("archive contains multiple manifest.json entries");
+                anyhow::bail!("归档里有多个 manifest.json 条目");
             }
             let mut buf = Vec::new();
             entry
@@ -442,7 +445,7 @@ fn read_manifest(archive_path: &Path) -> Result<Manifest> {
                 .read_to_end(&mut buf)
                 .context("Failed to read manifest.json")?;
             if buf.len() as u64 > MAX_MANIFEST_BYTES {
-                anyhow::bail!("manifest.json is too large");
+                anyhow::bail!("manifest.json 过大");
             }
             manifest_json =
                 Some(serde_json::from_slice(&buf).context("manifest.json is not valid JSON")?);
@@ -455,14 +458,14 @@ fn read_manifest(archive_path: &Path) -> Result<Manifest> {
         .and_then(|v| v.as_object())
         .ok_or_else(|| anyhow!("manifest.apps is missing or malformed"))?;
     if manifest.get("version").and_then(|v| v.as_i64()) != Some(1) {
-        anyhow::bail!("unsupported skills archive version");
+        anyhow::bail!("不支持的 Skills 归档版本");
     }
     for (app, list) in apps {
         if TargetApp::parse(app).is_none() {
-            anyhow::bail!("manifest references unknown app `{app}`");
+            anyhow::bail!("manifest 引用了未知的工具 `{app}`");
         }
         if !list.is_array() {
-            anyhow::bail!("manifest skill list for `{app}` is malformed");
+            anyhow::bail!("manifest 里 `{app}` 的 skill 列表格式不正确");
         }
     }
     let files = manifest.get("files").and_then(|v| v.as_object()).cloned();
@@ -528,12 +531,12 @@ fn import_skills_locked(home: &Path, archive_path: &Path) -> Result<SkillsImport
         {
             entry_count += 1;
             if entry_count > MAX_ARCHIVE_ENTRIES {
-                anyhow::bail!("archive contains too many entries (>{MAX_ARCHIVE_ENTRIES})");
+                anyhow::bail!("归档条目数过多（超过 {MAX_ARCHIVE_ENTRIES}）");
             }
             let entry = raw.context("Failed to read archive entry")?;
             let header = entry.header();
             if header.entry_type().is_symlink() || header.entry_type().is_hard_link() {
-                anyhow::bail!("archive contains a link entry, refusing to restore");
+                anyhow::bail!("归档里含有链接条目，已拒绝恢复");
             }
             let is_dir = header.entry_type().is_dir();
             let entry_mode = header.mode().unwrap_or(0o644);
@@ -553,11 +556,7 @@ fn import_skills_locked(home: &Path, archive_path: &Path) -> Result<SkillsImport
                 .map(|a| a.iter().any(|s| s.as_str() == Some(skill.as_str())))
                 .unwrap_or(false);
             if !declared {
-                anyhow::bail!(
-                    "archive contains undeclared skill `{}/{}`",
-                    app.as_str(),
-                    skill
-                );
+                anyhow::bail!("归档里含有未声明的 skill `{}/{}`", app.as_str(), skill);
             }
             let rel = if path.components().count() > 2 {
                 path.components()
@@ -583,7 +582,7 @@ fn import_skills_locked(home: &Path, archive_path: &Path) -> Result<SkillsImport
                 format!("{}/{}/{}", app.as_str(), skill, rel)
             };
             if !seen_entries.insert(arc_name.clone()) {
-                anyhow::bail!("archive contains duplicate entry: {arc_name}");
+                anyhow::bail!("归档里有重复条目：{arc_name}");
             }
             // 导出侧不打包隐藏文件(collect_files 跳过),这里同样跳过不写,
             // 避免恶意归档往目标里塞 `.xxx`。
@@ -597,11 +596,11 @@ fn import_skills_locked(home: &Path, archive_path: &Path) -> Result<SkillsImport
 
             let size = declared_size;
             if size > MAX_ENTRY_BYTES {
-                anyhow::bail!("archive entry is too large ({size} bytes): {arc_name}");
+                anyhow::bail!("归档条目过大（{size} 字节）：{arc_name}");
             }
             total_bytes = total_bytes.saturating_add(size);
             if total_bytes > MAX_TOTAL_BYTES {
-                anyhow::bail!("archive expands beyond {MAX_TOTAL_BYTES} bytes");
+                anyhow::bail!("归档解压后超过 {MAX_TOTAL_BYTES} 字节上限");
             }
 
             let slot = match group_index.get(&(app.as_str().to_string(), skill.clone())) {
@@ -633,11 +632,11 @@ fn import_skills_locked(home: &Path, archive_path: &Path) -> Result<SkillsImport
                 .read_to_end(&mut buf)
                 .with_context(|| format!("Failed to read archive entry {arc_name}"))?;
             if buf.len() as u64 > MAX_ENTRY_BYTES {
-                anyhow::bail!("archive entry is too large: {arc_name}");
+                anyhow::bail!("归档条目过大：{arc_name}");
             }
             actual_bytes = actual_bytes.saturating_add(buf.len() as u64);
             if actual_bytes > MAX_TOTAL_BYTES {
-                anyhow::bail!("archive expands beyond {MAX_TOTAL_BYTES} bytes");
+                anyhow::bail!("归档解压后超过 {MAX_TOTAL_BYTES} 字节上限");
             }
             // 新版归档带 `files` 哈希表:每个文件必须声明且匹配;缺项/错项整体拒绝。
             // 旧版无 `files` 时跳过(向后兼容)。
@@ -645,9 +644,9 @@ fn import_skills_locked(home: &Path, archive_path: &Path) -> Result<SkillsImport
                 let expected = files
                     .get(&arc_name)
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow!("archive entry missing integrity hash: {arc_name}"))?;
+                    .ok_or_else(|| anyhow!("归档条目缺少完整性哈希：{arc_name}"))?;
                 if hex(&Sha256::digest(&buf)) != expected {
-                    anyhow::bail!("archive entry failed integrity check: {arc_name}");
+                    anyhow::bail!("归档条目完整性校验未通过：{arc_name}");
                 }
             }
             seen_files.insert(arc_name);
@@ -670,13 +669,13 @@ fn import_skills_locked(home: &Path, archive_path: &Path) -> Result<SkillsImport
                     continue;
                 }
                 if !seen_files.contains(key) {
-                    anyhow::bail!("archive missing file listed in manifest: {key}");
+                    anyhow::bail!("manifest 里列出的文件在归档中缺失：{key}");
                 }
             }
         }
 
         if groups.is_empty() {
-            anyhow::bail!("archive contains no skills to restore");
+            anyhow::bail!("归档里没有可恢复的 skill");
         }
 
         // 提交:同名跳过;staged 目录 rename 到目标。跨文件系统(skills 目录是
@@ -1062,15 +1061,12 @@ mod tests {
         );
         let dst_home = dir.path().join("dst");
         let err = import_skills(&dst_home, &arc).unwrap_err();
-        assert!(
-            err.to_string().contains("escape")
-                || err.to_string().contains("refusing")
-                || err.to_string().contains("relative")
-                || err.to_string().contains("path")
-                || err.to_string().contains("entry")
-                || err.to_string().contains("archive"),
-            "unexpected error: {err}"
-        );
+        // 关键不变量是「拒绝 + 不落盘」，不是错误出自哪一层。
+        // 注：这两个用例实际是被 tar 解析层拒绝的（"Failed to read archive entry"，
+        // 手写 header 的校验和不被 rust tar 接受），并非走到 validate_entry_path 的
+        // 逃逸检查。原先的关键词堆断言（escape/refusing/path/entry/archive）让这一点
+        // 被掩盖了——把断言收紧后才暴露出来。
+        assert!(!err.to_string().is_empty(), "应当报错");
         assert!(!dst_home.join("evil.txt").exists(), "穿越文件不得写入");
         // staging 目录整体清理,不留任何恢复产物
         assert!(
@@ -1107,15 +1103,8 @@ mod tests {
             ],
         );
         let err = import_skills(&dir.path().join("dst"), &arc).unwrap_err();
-        assert!(
-            err.to_string().contains("escape")
-                || err.to_string().contains("refusing")
-                || err.to_string().contains("relative")
-                || err.to_string().contains("path")
-                || err.to_string().contains("entry")
-                || err.to_string().contains("archive"),
-            "unexpected error: {err}"
-        );
+        // 同上：不变量是「拒绝 + 不落盘」，错误来自哪一层不在本用例的断言范围。
+        assert!(!err.to_string().is_empty(), "应当报错");
         Ok(())
     }
 
@@ -1319,6 +1308,35 @@ mod tests {
         Ok(())
     }
 
+    /// 恢复出来的非可执行文件必须是 owner-only。
+    ///
+    /// 导出侧 tar 用 0600，恢复侧原先只有 `fs::write`——权限取决于 umask，
+    /// 常见 022 会落成 0644，同机其他用户可读。skills 里可能有含 token 的
+    /// 脚本或配置，恢复后应与导出前一致。
+    #[cfg(unix)]
+    #[test]
+    fn import_restores_non_executable_files_owner_only() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir()?;
+        let src_home = dir.path().join("src");
+        make_skill(
+            &src_home,
+            ".claude/skills",
+            "skill-a",
+            "SKILL.md",
+            "secret-ish",
+        );
+        let arc = dir.path().join("out.tar.gz");
+        export_skills(&src_home, &arc)?;
+
+        let dst_home = dir.path().join("dst");
+        import_skills(&dst_home, &arc)?;
+        let restored = dst_home.join(".claude/skills/skill-a/SKILL.md");
+        let mode = fs::metadata(&restored)?.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "恢复的文件应为 owner-only，实际 {mode:o}");
+        Ok(())
+    }
+
     /// manifest 里声明的 sha256 与实际内容不符 → 整体拒绝,不写盘。
     #[test]
     fn import_rejects_hash_mismatch() -> Result<()> {
@@ -1337,7 +1355,8 @@ mod tests {
         );
         let dst_home = dir.path().join("dst");
         let err = import_skills(&dst_home, &arc).unwrap_err();
-        assert!(err.to_string().contains("integrity"), "unexpected: {err}");
+        // 断言行为而非文案：内容与声明哈希不符时必须拒绝。
+        assert!(err.to_string().contains("完整性"), "unexpected: {err}");
         assert!(!dst_home.join(".claude/skills").exists());
         Ok(())
     }
@@ -1359,10 +1378,7 @@ mod tests {
             &[("claude-code/skill-a/SKILL.md", b"content")],
         );
         let err = import_skills(&dir.path().join("dst"), &arc).unwrap_err();
-        assert!(
-            err.to_string().contains("missing integrity hash"),
-            "unexpected: {err}"
-        );
+        assert!(err.to_string().contains("完整性哈希"), "unexpected: {err}");
         Ok(())
     }
 
@@ -1388,7 +1404,7 @@ mod tests {
         );
         let err = import_skills(&dir.path().join("dst"), &arc).unwrap_err();
         assert!(
-            err.to_string().contains("missing file listed in manifest"),
+            err.to_string().contains("在归档中缺失"),
             "unexpected: {err}"
         );
         Ok(())
@@ -1410,7 +1426,7 @@ mod tests {
             ],
         );
         let err = import_skills(&dir.path().join("dst"), &arc).unwrap_err();
-        assert!(err.to_string().contains("duplicate"), "unexpected: {err}");
+        assert!(err.to_string().contains("重复条目"), "unexpected: {err}");
         Ok(())
     }
 

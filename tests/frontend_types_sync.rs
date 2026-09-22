@@ -37,6 +37,10 @@ const MIRRORED_TYPES: &[&str] = &[
     "PreviewMessage",
     "DeleteResult",
     "AppError",
+    "LocalConfigInfo",
+    "McpServerConfig",
+    // 29 字段的扫描结果——此前被抄了三份且无守卫。
+    "ScannedApi",
 ];
 
 /// 必须与 `gui/src/types/index.ts` 字符串联合类型一致的 Rust 枚举。
@@ -45,7 +49,13 @@ const MIRRORED_TYPES: &[&str] = &[
 /// 的结果），而不是 Rust 里的变体名。
 const MIRRORED_ENUMS: &[&str] = &["TargetApp", "ReachabilityStatus", "ErrorKind"];
 
-const TS_TYPES_PATH: &str = "gui/src/types/index.ts";
+/// 前端类型所在文件。
+///
+/// 不止 `types/index.ts`：跨 IPC 边界的类型也可能定义在页面模块里
+/// （`Scanned` 在 `pages/importMapping.ts`）。此前只扫一个文件，
+/// 于是 `ScannedApi` 与它的 TS 镜像**没有守卫**——而它正好是 29 个字段
+/// 的大结构，此前还被抄了三份。这里把所有承载 IPC 形状的文件都列上。
+const TS_TYPES_PATHS: &[&str] = &["gui/src/types/index.ts", "gui/src/pages/importMapping.ts"];
 
 // ---------------------------------------------------------------- 测试入口
 
@@ -53,7 +63,7 @@ const TS_TYPES_PATH: &str = "gui/src/types/index.ts";
 fn frontend_types_mirror_rust_structs() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let rust = RustIndex::load(root);
-    let ts = TsIndex::load(&root.join(TS_TYPES_PATH));
+    let ts = TsIndex::load_all(root, TS_TYPES_PATHS);
 
     check_all_present(
         rust.bodies.keys(),
@@ -77,7 +87,7 @@ fn frontend_types_mirror_rust_structs() {
 
         if !missing_in_ts.is_empty() {
             problems.push(format!(
-                "{name}: Rust 有而 {TS_TYPES_PATH} 缺 {} —— 前端回传时这些字段会被静默丢弃",
+                "{name}: Rust 有而 {TS_TYPES_PATHS:?} 缺 {} —— 前端回传时这些字段会被静默丢弃",
                 fmt(&missing_in_ts)
             ));
         }
@@ -91,7 +101,7 @@ fn frontend_types_mirror_rust_structs() {
 
     assert!(
         problems.is_empty(),
-        "前后端类型已漂移，请同步 {TS_TYPES_PATH}：\n  {}",
+        "前后端类型已漂移，请同步 {TS_TYPES_PATHS:?}：\n  {}",
         problems.join("\n  ")
     );
 }
@@ -100,7 +110,7 @@ fn frontend_types_mirror_rust_structs() {
 fn frontend_enum_unions_mirror_rust_enums() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let rust = RustIndex::load(root);
-    let ts = TsIndex::load(&root.join(TS_TYPES_PATH));
+    let ts = TsIndex::load_all(root, TS_TYPES_PATHS);
 
     check_all_present(
         rust.enums.keys(),
@@ -124,7 +134,7 @@ fn frontend_enum_unions_mirror_rust_enums() {
 
         if !missing_in_ts.is_empty() {
             problems.push(format!(
-                "{name}: Rust 有而 {TS_TYPES_PATH} 缺 {} —— 前端无法表达该取值",
+                "{name}: Rust 有而 {TS_TYPES_PATHS:?} 缺 {} —— 前端无法表达该取值",
                 fmt(&missing_in_ts)
             ));
         }
@@ -138,7 +148,7 @@ fn frontend_enum_unions_mirror_rust_enums() {
 
     assert!(
         problems.is_empty(),
-        "枚举取值已漂移，请同步 {TS_TYPES_PATH}：\n  {}",
+        "枚举取值已漂移，请同步 {TS_TYPES_PATHS:?}：\n  {}",
         problems.join("\n  ")
     );
 }
@@ -162,7 +172,9 @@ fn check_all_present<'a>(
             ));
         }
         if !ts_names.contains(name) {
-            problems.push(format!("{name}: 未能在 {TS_TYPES_PATH} 中找到该 {ts_kind}"));
+            problems.push(format!(
+                "{name}: 未能在 {TS_TYPES_PATHS:?} 中找到该 {ts_kind}"
+            ));
         }
     }
     if !problems.is_empty() {
@@ -545,6 +557,34 @@ struct TsIndex {
 }
 
 impl TsIndex {
+    /// 依次读取多个文件并合并类型表。
+    ///
+    /// 同名类型出现在多个文件时以**先出现的为准**并断言两者一致——
+    /// 静默取其一会让守卫看不出「两处镜像已经开始漂移」。
+    fn load_all(root: &Path, paths: &[&str]) -> Self {
+        let mut merged = Self {
+            interfaces: BTreeMap::new(),
+            unions: BTreeMap::new(),
+        };
+        for rel in paths {
+            let one = Self::load(&root.join(rel));
+            for (name, value) in one.interfaces {
+                if let Some(existing) = merged.interfaces.get(&name) {
+                    assert_eq!(
+                        existing, &value,
+                        "类型 `{name}` 在多个文件里声明且不一致——请只保留一处（{rel}）"
+                    );
+                } else {
+                    merged.interfaces.insert(name, value);
+                }
+            }
+            for (name, value) in one.unions {
+                merged.unions.entry(name).or_insert(value);
+            }
+        }
+        merged
+    }
+
     fn load(path: &Path) -> Self {
         let raw = std::fs::read_to_string(path)
             .unwrap_or_else(|e| panic!("读取 {} 失败：{e}", path.display()));

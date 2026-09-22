@@ -3,6 +3,7 @@
 
 pub mod adapters;
 pub mod db;
+pub mod doc;
 pub mod error;
 pub mod models;
 pub mod probe;

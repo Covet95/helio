@@ -3,7 +3,7 @@ members = [".", "src-tauri"]
 
 [package]
 name = "switch-api"
-version = "0.2.6"
+version = "0.2.7"
 edition = "2021"
 authors = ["Switch API Team"]
 description = "Helio 桌面应用 API 配置管理核心库"
@@ -19,8 +19,13 @@ anyhow = "1.0"
 # Database
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["preserve_order"] }
 toml = "0.8"
+# 格式保真的 TOML 编辑（保留注释/键序）；`toml` 仅用于值级读写。
+toml_edit = "0.22"
+# 格式保真的 YAML 编辑（保留注释）。serde_yaml 已 deprecated，仅保留作
+# 值级回退，新代码走 yaml_edit。
+yaml-edit = "0.3"
 serde_yaml = "0.9"
 
 # Time
@@ -43,6 +48,17 @@ uuid = { version = "1.10", features = ["v4", "serde"] }
 tar = "0.4"
 flate2 = "1.0"
 sha2 = "0.10"
+
+# Windows 权限收紧（POSIX mode 在 Windows 上不存在，改用 ACL）。
+# 仅在 Windows 目标下参与编译。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tempfile = "3.10"

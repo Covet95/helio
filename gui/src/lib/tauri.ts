@@ -1,5 +1,9 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { ApiProfile, FetchedModel, ModelTestResult, StatusInfo, TargetApp, SessionMeta, PreviewMessage, DeleteResult } from '@/types';
+import type { ScannedApi } from '@/pages/importMapping';
+import type {
+  ApiProfile, DeleteResult, FetchedModel, LocalConfigInfo, ModelTestResult, PreviewMessage,
+  SessionMeta, StatusInfo, TargetApp,
+} from '@/types';
 
 const canUseTauri = () => typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
@@ -118,6 +122,13 @@ export const tauriApi = {
   importPortableBackup: (inputPath: string) =>
     command<PortableBackupImportResult>('import_portable_backup', { inputPath }),
 
+  // 数据库自动备份的查看与回退
+  listDatabaseBackups: () =>
+    command<DatabaseBackupInfo[]>('list_database_backups', undefined, []),
+
+  restoreDatabaseBackup: (backupPath: string) =>
+    command<void>('restore_database_backup', { backupPath }),
+
   // Skills 备份/恢复
   exportSkills: (outputPath: string) =>
     command<SkillsExportResult>('export_skills', { outputPath }),
@@ -126,16 +137,12 @@ export const tauriApi = {
     command<SkillsImportResult>('import_skills', { inputPath }),
 
   getLocalConfigInfo: (targetApp: TargetApp) =>
-    command<{
-      mcp_servers: Record<string, any>;
-      skills: string[];
-      hooks: any;
-      permissions: any;
-    }>('get_local_config_info', { targetApp }, {
+    command<LocalConfigInfo>('get_local_config_info', { targetApp }, {
       mcp_servers: {},
       skills: [],
       hooks: {},
       permissions: {},
+      other: {},
     }),
 
   // 配置备份列表 / 恢复
@@ -147,68 +154,7 @@ export const tauriApi = {
 
   // 从本地导入
   scanLocalApi: (targetApp: TargetApp) =>
-    command<{
-      found: boolean;
-      api_url: string;
-      api_key: string;
-      provider: string;
-      model?: string;
-      model_mapping?: Record<string, string>;
-      reasoning_effort?: string;
-      reasoning_summary?: string;
-      verbosity?: string;
-      context_1m?: boolean;
-      wire_api?: string;
-      env_key?: string;
-      requires_openai_auth?: boolean;
-      experimental_bearer_token?: string;
-      service_tier?: string;
-      supports_standalone_web_search?: boolean;
-      aws_profile?: string;
-      aws_region?: string;
-      auth_command?: string;
-      auth_args?: string[];
-      auth_timeout_ms?: number;
-      auth_refresh_interval_ms?: number;
-      auth_cwd?: string;
-      api_mode?: string;
-      opencode_api_mode?: string;
-      opencode_models?: string[];
-      opencode_model_configs?: Record<string, import('@/types').OpenCodeModelConfig>;
-      max_tokens?: number;
-      source: string;
-    }>('scan_local_api', { targetApp }, {
-      found: false,
-      api_url: '',
-      api_key: '',
-      provider: '',
-      model: undefined,
-      model_mapping: undefined,
-      reasoning_effort: undefined,
-      reasoning_summary: undefined,
-      verbosity: undefined,
-      context_1m: undefined,
-      wire_api: undefined,
-      env_key: undefined,
-      requires_openai_auth: undefined,
-      experimental_bearer_token: undefined,
-      service_tier: undefined,
-      supports_standalone_web_search: undefined,
-      aws_profile: undefined,
-      aws_region: undefined,
-      auth_command: undefined,
-      auth_args: undefined,
-      auth_timeout_ms: undefined,
-      auth_refresh_interval_ms: undefined,
-      auth_cwd: undefined,
-      api_mode: undefined,
-      opencode_api_mode: undefined,
-      opencode_models: undefined,
-      opencode_model_configs: undefined,
-      max_tokens: undefined,
-      source: `${targetApp} config`,
-    }),
-
+    command<ScannedApi>('scan_local_api', { targetApp }, emptyScanned(targetApp)),
 
   // Codex config.toml 原始文本编辑（仅 Codex）
   readCodexConfigRaw: () =>
@@ -264,6 +210,14 @@ export interface CcSwitchProvider {
   is_current: boolean;
 }
 
+/** 导入/迁移前自动生成的数据库备份。 */
+export interface DatabaseBackupInfo {
+  path: string;
+  /** 文件名里的时间戳（`YYYYmmdd_HHMMSS_ffffff`）。 */
+  time: string;
+  size_bytes: number;
+}
+
 export interface ConfigBackupInfo {
   path: string;
   time: string;
@@ -291,4 +245,29 @@ export interface PortableBackupExportResult {
 export interface PortableBackupImportResult {
   restored_targets: string[];
   skills: SkillsImportResult;
+}
+
+/**
+ * `scan_local_api` 的返回形状。
+ *
+ * 与 `pages/importMapping.ts` 的 `ScannedApi` 是**同一份数据**——此前两处各写
+ * 一遍 29 个字段（外加 tauri.ts 里再抄一份 29 行的空值对象）。三份手工镜像
+ * 意味着加一个字段要改三处，漏一处就是静默的类型漂移。
+ * 这里以 `ScannedApi` 为唯一来源，另两处引用它。
+ */
+export type { ScannedApi } from '@/pages/importMapping';
+
+/**
+ * 非 Tauri 环境（浏览器预览）下 `scanLocalApi` 的空值。
+ *
+ * 只列必填字段，其余可选字段天然是 `undefined`——不必逐个写出来。
+ */
+function emptyScanned(targetApp: TargetApp): ScannedApi {
+  return {
+    found: false,
+    api_url: '',
+    api_key: '',
+    provider: '',
+    source: `${targetApp} config`,
+  } as ScannedApi;
 }

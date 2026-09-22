@@ -69,6 +69,97 @@ pub trait ConfigAdapter {
     /// 原子写入配置
     fn write_config(&self, config: &serde_json::Value) -> Result<()>;
 
+    /// 三路合并写入：以 live 文件为基底，摘掉 `previous_managed` 的覆盖，
+    /// 再叠加 `next_managed`。**保留用户手写的未受管字段与键序。**
+    ///
+    /// 默认实现对**所有适配器**生效，且**复用各适配器自己的 `write_config`**
+    /// 做序列化——不另立一套写盘约定。策略按格式分派：
+    ///
+    /// - **TOML**：文本级合并（`toml_edit`）。TOML 有注释，只有文本级合并
+    ///   才能保住它们，因此这条路径自行序列化并写盘。
+    /// - **JSON / YAML**：值级合并后交给 [`Self::write_config`]。JSON 无注释，
+    ///   值级合并已能保住全部用户内容与键序，而委托给适配器可以保留它自己的
+    ///   缩进/排版约定。
+    ///
+    /// 解析失败时退回整体写入受管内容——「切换必须能完成」是硬需求，
+    /// 保真只是优化，不能因用户手改坏了文件就让切换卡死。
+    ///
+    /// `previous_managed` 为 `None` 表示首次切换（无可摘除的历史），此时
+    /// 只叠加、不摘除，不会删除 live 中的任何用户内容。
+    fn write_config_merged(
+        &self,
+        next_managed: &serde_json::Value,
+        previous_managed: Option<&serde_json::Value>,
+    ) -> Result<()> {
+        let path = self.config_path();
+        let format = self.config_format();
+
+        let live_text = if path.exists() {
+            match fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(error) => {
+                    // 读不出来（权限/编码）——退回整体写入，不让切换卡死。
+                    tracing::warn!("读取 {} 失败，整体写入受管配置：{error:#}", path.display());
+                    return self.write_config(next_managed);
+                }
+            }
+        } else {
+            String::new()
+        };
+
+        if live_text.trim().is_empty() {
+            // 无 live 文件：直接落盘受管内容，无需合并。
+            return self.write_config(next_managed);
+        }
+
+        let live_value = match crate::doc::parse(format, &live_text) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(
+                    "{} 无法解析为 {}，本次切换将整体写入受管配置：{error:#}",
+                    path.display(),
+                    format!("{format:?}"),
+                );
+                return self.write_config(next_managed);
+            }
+        };
+
+        // 把「live 有、merged 无」的顶层键作为删除意图并入 previous_managed。
+        // 这里才能拿到 live 文档——`shared_config` 已剥离凭据，算不出遗留键。
+        let previous_managed = merge_removal_intent(&live_value, next_managed, previous_managed);
+        let previous_managed = previous_managed.as_ref();
+
+        // TOML 与 YAML 都有注释，走文本级合并才能保住它们——这条路径自行
+        // 序列化并写盘。JSON 无注释概念，值级合并后委托给适配器自己的
+        // `write_config`，以保留它各自的缩进/排版约定。
+        match format {
+            crate::doc::DocFormat::Toml | crate::doc::DocFormat::Yaml => {
+                if let Some(parent) = path.parent() {
+                    crate::utils::secure_fs::ensure_private_dir(parent)
+                        .context("Failed to create config directory")?;
+                }
+                let content =
+                    crate::doc::merge_document(format, &live_text, previous_managed, next_managed)
+                        .with_context(|| format!("Failed to merge {}", path.display()))?;
+                crate::utils::secure_fs::atomic_write_private(&path, content.as_bytes())
+                    .with_context(|| format!("Failed to write {}", path.display()))?;
+                Ok(())
+            }
+            crate::doc::DocFormat::Json => {
+                let merged =
+                    crate::doc::merge_three_way(&live_value, previous_managed, next_managed);
+                self.write_config(&merged)
+            }
+        }
+    }
+
+    /// 主配置文件的格式。决定保真合并走哪条路径。
+    ///
+    /// 默认按扩展名推断；扩展名不标准时覆盖本方法。
+    fn config_format(&self) -> crate::doc::DocFormat {
+        crate::doc::DocFormat::from_path(&self.config_path()).unwrap_or(crate::doc::DocFormat::Json)
+    }
+
     /// 备份配置
     fn backup_config(&self) -> Result<PathBuf>;
 
@@ -129,7 +220,7 @@ pub fn restore_snapshots(snapshots: &[FileSnapshot]) -> Result<()> {
 pub fn snapshot_all_managed_files() -> Result<Vec<FileSnapshot>> {
     let mut snapshots = Vec::new();
     for target_app in TargetApp::all() {
-        let adapter = get_adapter(target_app);
+        let adapter = get_adapter(target_app)?;
         snapshots.extend(adapter.snapshot_files()?);
     }
     Ok(snapshots)
@@ -140,12 +231,28 @@ pub fn apply_profile_transaction(
     api_profile: &ApiProfile,
     shared_config: &serde_json::Value,
 ) -> Result<()> {
+    apply_profile_transaction_with_previous(adapter, api_profile, shared_config, None)
+}
+
+/// 带 `previous_managed` 的事务入口。
+///
+/// `previous_managed` 是**上次切换时写入的受管片段**，用于在保真写入路径上
+/// 摘除「上次受管、本次不再受管」的字段。为 `None` 时等价于首次切换：
+/// 只叠加、不摘除。
+///
+/// 未迁移到保真路径的适配器会忽略该参数（默认实现退化为整体写入）。
+pub fn apply_profile_transaction_with_previous(
+    adapter: &dyn ConfigAdapter,
+    api_profile: &ApiProfile,
+    shared_config: &serde_json::Value,
+    previous_managed: Option<&serde_json::Value>,
+) -> Result<()> {
     let snapshots = adapter.snapshot_files()?;
     let merged = adapter.merge_config(api_profile, shared_config);
     // 写盘前语义校验：不通过则直接走快照回滚，避免残缺配置落地。
     adapter.verify_merged_config(&merged, api_profile)?;
     if let Err(error) = adapter
-        .write_config(&merged)
+        .write_config_merged(&merged, previous_managed)
         .and_then(|_| adapter.apply_api_credentials(api_profile))
         .and_then(|_| adapter.apply_auxiliary_config(shared_config))
     {
@@ -161,6 +268,55 @@ pub fn apply_profile_transaction(
     Ok(())
 }
 
+/// 把「live 里有、merged 里没有」的**顶层键**并入 `previous_managed`，
+/// 让三路合并摘掉它们。
+///
+/// ## 为什么需要这一步
+///
+/// `merge_config` 会**无条件删除**某些键（清理历史遗留）：Codex 删顶层
+/// `api_key`/`aws_profile`/`aws_region`，Claude 删 `settings.json` 里的旧
+/// `mcpServers`。
+///
+/// 这类删除无法被三路合并表达：`previous_managed` 由 `merge_config` 推导，
+/// 它同样不含这些键，于是 `remove_covered` 找不到可摘路径，遗留键**永久残留**。
+/// （实测：旧实现会清掉 `api_key`，保真路径把它留下——真回归。）
+///
+/// 差集必须拿 **live 文档**算，不能用 `shared_config`：后者经
+/// `extract_shared_config` 已剥离凭据，`api_key` 之类的键在它里面根本不存在，
+/// 算不出来。
+///
+/// 只在**顶层**做差集：嵌套结构里「live 有而 merged 无」通常意味着用户手写的
+/// 内容，删掉会误伤；而遗留键清理都是顶层场景。
+pub fn merge_removal_intent(
+    live_doc: &serde_json::Value,
+    merged: &serde_json::Value,
+    previous_managed: Option<&serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let (Some(live_map), Some(merged_map)) = (live_doc.as_object(), merged.as_object()) else {
+        return previous_managed.cloned();
+    };
+
+    let removed: serde_json::Map<String, serde_json::Value> = live_map
+        .iter()
+        .filter(|(key, _)| !merged_map.contains_key(*key))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+
+    if removed.is_empty() {
+        return previous_managed.cloned();
+    }
+
+    let mut merged_previous = previous_managed
+        .cloned()
+        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+    if let Some(map) = merged_previous.as_object_mut() {
+        for (key, value) in removed {
+            map.insert(key, value);
+        }
+    }
+    Some(merged_previous)
+}
+
 /// 解析切换时应写入的共享配置（API 凭据除外）。
 ///
 /// 权威规则（磁盘为准）：
@@ -173,7 +329,7 @@ pub fn resolve_shared_config(
     target_app: TargetApp,
     persisted_shared_config: Option<crate::models::SharedConfig>,
 ) -> Result<serde_json::Value> {
-    let adapter = get_adapter(target_app);
+    let adapter = get_adapter(target_app)?;
     resolve_shared_config_with_adapter(persisted_shared_config, adapter.as_ref())
 }
 
@@ -223,19 +379,49 @@ pub fn apply_profile_configuration(
     api_profile: &ApiProfile,
     shared_config: &serde_json::Value,
     create_backup: bool,
+    previous_managed: Option<&serde_json::Value>,
 ) -> Result<ProfileApplicationResult> {
-    let adapter = get_adapter(target_app);
+    let adapter = get_adapter(target_app)?;
     adapter.validate_profile(api_profile)?;
     let backup_path = if create_backup && adapter.config_path().exists() {
         Some(adapter.backup_config()?)
     } else {
         None
     };
-    apply_profile_transaction(adapter.as_ref(), api_profile, shared_config)?;
+    apply_profile_transaction_with_previous(
+        adapter.as_ref(),
+        api_profile,
+        shared_config,
+        previous_managed,
+    )?;
     Ok(ProfileApplicationResult {
         backup_path,
         config_path: adapter.config_path(),
     })
+}
+
+/// 推导「上次写入的受管片段」，供保真写入路径摘除陈旧字段。
+///
+/// 做法：把**上一个 active Profile** 对当前共享配置跑一遍 `merge_config`，
+/// 结果就是「若它此刻被应用，Helio 会写入的内容」。因为两侧共用同一份
+/// `shared_config`，两份合并结果的共享部分完全相同，差集恰好是受管字段。
+///
+/// 上一个 Profile 不存在（首次切换）或已被删除时返回 `None`——此时保真路径
+/// 退化为纯叠加，不会摘除 live 中的任何内容。
+///
+/// 已知取舍：按**路径**摘除、不比对值。若用户手改过某个受管字段，切换时它
+/// 仍会被摘除（受管字段归 Helio 所有）。这样做的收益是陈旧字段不会无限累积。
+pub fn derive_previous_managed(
+    target_app: TargetApp,
+    previous_active: Option<&ApiProfile>,
+    shared_config: &serde_json::Value,
+) -> Result<Option<serde_json::Value>> {
+    let Some(previous) = previous_active else {
+        return Ok(None);
+    };
+    Ok(Some(
+        get_adapter(target_app)?.merge_config(previous, shared_config),
+    ))
 }
 
 /// 一次完整的配置切换（GUI / 托盘共用入口）：
@@ -257,7 +443,12 @@ pub fn apply_profile_switch(
     let profile_id = api_profile
         .id
         .ok_or_else(|| anyhow::anyhow!("Profile '{}' has no id", api_profile.name))?;
-    let adapter = get_adapter(target_app);
+    let adapter = get_adapter(target_app)?;
+    // 切换前的 active Profile，用于推导「上次写入的受管片段」。
+    //
+    // 必须在 `begin_switch` **之前**取：它恢复残留 journal 时可能改动 active，
+    // 而我们要的是「用户视角的上次切换目标」，不是恢复后的状态。
+    let previous_active_profile = db.get_active_profile_full(target_app)?;
     let previous_opencode_state = if target_app == TargetApp::OpenCode {
         Some(db.get_opencode_managed_models()?)
     } else {
@@ -311,19 +502,33 @@ pub fn apply_profile_switch(
 
         // 制造 `active != target` 窗口：仅当当前 active 已是目标时需要。
         // 不同 profile 之间切换时 active 本来就不是目标，无需动。
+        //
+        // 注意读取时机：必须**在 `begin_switch` 之后**重新查库，不能用上面
+        // 捕获的 `previous_active_profile`——`begin_switch` 会恢复残留 journal，
+        // 而恢复可能改变 active（例如中断的 A→A 切换会把 active 从 A 改成
+        // journal 记录的旧值）。用恢复前的值判断会漏掉「清 active」这一步，
+        // 使重复切换的半状态无法被区分。这与旧实现保持一致。
         let already_active = db
             .get_active_profile(target_app)?
-            .map(|a| a.profile_id == profile_id)
+            .map(|active| active.profile_id == profile_id)
             .unwrap_or(false);
         if already_active {
             db.clear_active_profile(target_app)?;
         }
         db.save_shared_config(target_app, effective_shared_config.clone())?;
+        // 上一个 active Profile 必须在写盘前取——切换成功后 active 已指向新档案。
+        // 它的 merge 结果即「上次写入的受管片段」，供保真路径摘除陈旧字段。
+        let previous_managed = derive_previous_managed(
+            target_app,
+            previous_active_profile.as_ref(),
+            &effective_shared_config,
+        )?;
         let applied = apply_profile_configuration(
             target_app,
             api_profile,
             &effective_shared_config,
             create_backup,
+            previous_managed.as_ref(),
         )?;
         if let Some(state) = next_opencode_state {
             db.replace_opencode_managed_models(&state)?;
@@ -366,7 +571,7 @@ pub fn apply_profile_switch(
 /// adapter 提取出的非档案配置，供便携备份取得导出瞬间的真实状态。
 pub fn sync_all_shared_configs(db: &crate::db::Database) -> Result<()> {
     for target_app in TargetApp::all() {
-        let adapter = get_adapter(target_app);
+        let adapter = get_adapter(target_app)?;
         sync_shared_config_if_present(db, target_app, adapter.as_ref())?;
     }
     Ok(())
@@ -380,7 +585,13 @@ pub fn sync_all_shared_configs(db: &crate::db::Database) -> Result<()> {
 pub fn sync_startup_shared_configs(db: &crate::db::Database) -> Vec<TargetApp> {
     let mut synced = Vec::new();
     for target_app in TargetApp::all() {
-        let adapter = get_adapter(target_app);
+        let adapter = match get_adapter(target_app) {
+            Ok(adapter) => adapter,
+            Err(error) => {
+                tracing::warn!("[Helio] startup sync: skip {target_app}: {error:#}");
+                continue;
+            }
+        };
         match sync_shared_config_if_present(db, target_app, adapter.as_ref()) {
             Ok(true) => synced.push(target_app),
             Ok(false) => {}
@@ -564,17 +775,21 @@ pub mod opencode;
 pub mod pi;
 pub mod zcode;
 
-/// 获取适配器
-pub fn get_adapter(target_app: TargetApp) -> Box<dyn ConfigAdapter> {
-    match target_app {
-        TargetApp::ClaudeCode => Box::new(claude_code::ClaudeCodeAdapter::new()),
-        TargetApp::Codex => Box::new(codex::CodexAdapter::new()),
-        TargetApp::Pi => Box::new(pi::PiAdapter::new()),
-        TargetApp::OpenCode => Box::new(opencode::OpenCodeAdapter::new()),
-        TargetApp::Hermes => Box::new(hermes::HermesAdapter::new()),
-        TargetApp::OpenClaw => Box::new(openclaw::OpenClawAdapter::new()),
-        TargetApp::ZCode => Box::new(zcode::ZCodeAdapter::new()),
-    }
+/// 获取适配器。
+///
+/// 返回 `Result` 而非直接构造：所有适配器的配置目录都在 `$HOME` 下，
+/// HOME 缺失（容器、服务账户）时以前会 `expect` panic——切换中途崩掉比
+/// 报一个清楚的错误糟得多。
+pub fn get_adapter(target_app: TargetApp) -> Result<Box<dyn ConfigAdapter>> {
+    Ok(match target_app {
+        TargetApp::ClaudeCode => Box::new(claude_code::ClaudeCodeAdapter::new()?),
+        TargetApp::Codex => Box::new(codex::CodexAdapter::new()?),
+        TargetApp::Pi => Box::new(pi::PiAdapter::new()?),
+        TargetApp::OpenCode => Box::new(opencode::OpenCodeAdapter::new()?),
+        TargetApp::Hermes => Box::new(hermes::HermesAdapter::new()?),
+        TargetApp::OpenClaw => Box::new(openclaw::OpenClawAdapter::new()?),
+        TargetApp::ZCode => Box::new(zcode::ZCodeAdapter::new()?),
+    })
 }
 
 #[cfg(test)]
@@ -925,5 +1140,88 @@ mod tests {
         assert_eq!(resolved["db_only"], 1);
         assert_eq!(resolved["mcp_servers"]["old"]["command"], "x");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod removal_intent_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// live 里有、merged 里没有的顶层键 → 必须并入 previous_managed，
+    /// 使三路合并摘掉它们。
+    ///
+    /// 回归：`merge_config` 会无条件删除历史遗留键（Codex 的顶层
+    /// `api_key`/`aws_profile`）。这类删除原先无法被三路合并表达——
+    /// `previous_managed` 由 merge_config 推导，同样不含这些键，于是遗留键
+    /// **永久残留**（旧实现会清掉，属真回归）。
+    #[test]
+    fn live_only_keys_become_removal_intent() {
+        let live = json!({ "model": "seed", "api_key": "legacy", "aws_profile": "legacy" });
+        let merged = json!({ "model": "new" });
+
+        let intent = merge_removal_intent(&live, &merged, None).expect("应有删除意图");
+
+        assert!(intent.get("api_key").is_some(), "api_key 应进入删除意图");
+        assert!(
+            intent.get("aws_profile").is_some(),
+            "aws_profile 应进入删除意图"
+        );
+        assert!(
+            intent.get("model").is_none(),
+            "merged 仍有的键不应进删除意图"
+        );
+
+        // 走一遍合并，确认遗留键确实被摘掉。
+        let out = crate::doc::merge_document(
+            crate::doc::DocFormat::Json,
+            &live.to_string(),
+            Some(&intent),
+            &merged,
+        )
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(
+            parsed.get("api_key").is_none(),
+            "遗留 api_key 应被清理：{out}"
+        );
+        assert!(
+            parsed.get("aws_profile").is_none(),
+            "遗留 aws_profile 应被清理：{out}"
+        );
+        assert_eq!(parsed["model"], json!("new"));
+    }
+
+    /// 无遗留键时不应凭空造出删除意图（避免误删用户内容）。
+    #[test]
+    fn no_intent_when_nothing_removed() {
+        let live = json!({ "model": "a", "user_key": "keep" });
+        let merged = json!({ "model": "b", "user_key": "keep" });
+
+        assert!(merge_removal_intent(&live, &merged, None).is_none());
+    }
+
+    /// 已有 previous_managed 时，删除意图应**并入**而非覆盖。
+    #[test]
+    fn intent_merges_with_existing_previous() {
+        let live = json!({ "api_key": "legacy", "model": "seed" });
+        let merged = json!({ "model": "new" });
+        let previous = json!({ "service_tier": "fast" });
+
+        let intent = merge_removal_intent(&live, &merged, Some(&previous)).unwrap();
+
+        assert!(intent.get("service_tier").is_some(), "原有受管片段应保留");
+        assert!(intent.get("api_key").is_some(), "删除意图应并入");
+    }
+
+    /// 嵌套结构不做差集——「live 有而 merged 无」在嵌套层通常意味着用户
+    /// 手写内容，删掉会误伤。
+    #[test]
+    fn nested_differences_are_not_treated_as_removals() {
+        let live = json!({ "provider": { "user_extra": "keep", "managed": "old" } });
+        let merged = json!({ "provider": { "managed": "new" } });
+
+        let intent = merge_removal_intent(&live, &merged, None);
+        assert!(intent.is_none(), "嵌套差异不应产生删除意图");
     }
 }
