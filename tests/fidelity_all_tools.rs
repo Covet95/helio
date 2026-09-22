@@ -333,3 +333,103 @@ fn user_edits_between_switches_survive() {
     })()
     .expect("用户手改内容存活契约失败");
 }
+
+/// OpenCode 的多轮切换：验证 provider 增删与用户内容留存。
+///
+/// OpenCode 的 shared_config 会被 `prepare_shared_config_for_switch` 变换，
+/// 是唯一在切换路径上改动共享配置的适配器，因此单独钉一条。
+#[test]
+fn opencode_multi_switch_keeps_user_content() {
+    let _home = HomeGuard::new();
+
+    (|| -> anyhow::Result<()> {
+        let adapter = get_adapter(TargetApp::OpenCode);
+        let path = adapter.config_path();
+        std::fs::create_dir_all(path.parent().context("config dir")?)?;
+        std::fs::write(
+            &path,
+            r#"{
+  "$schema": "https://opencode.ai/config.json",
+  "theme": "my-theme",
+  "username": "keep-me",
+  "provider": {}
+}
+"#,
+        )?;
+
+        let a = profile(TargetApp::OpenCode, "provA", "https://a.example/v1", "ma");
+        let live = adapter.read_config()?;
+        let shared = adapter.extract_shared_config(&live);
+        let merged_a = adapter.merge_config(&a, &shared);
+        switch_api::adapters::apply_profile_transaction_with_previous(
+            adapter.as_ref(), &a, &shared, None,
+        )?;
+
+        let b = profile(TargetApp::OpenCode, "provB", "https://b.example/v1", "mb");
+        let live2 = adapter.read_config()?;
+        let shared2 = adapter.extract_shared_config(&live2);
+        switch_api::adapters::apply_profile_transaction_with_previous(
+            adapter.as_ref(), &b, &shared2, Some(&merged_a),
+        )?;
+
+        let after = std::fs::read_to_string(&path)?;
+
+        // 用户内容必须存活。
+        ensure!(after.contains("my-theme"), "用户 theme 丢失:\n{after}");
+        ensure!(after.contains("keep-me"), "用户 username 丢失:\n{after}");
+        ensure!(
+            after.contains("$schema"),
+            "用户 $schema 丢失:\n{after}"
+        );
+        // 新 provider 写入。
+        ensure!(
+            after.contains("https://b.example/v1"),
+            "新 provider 未写入:\n{after}"
+        );
+        // 旧 provider **应当保留**：OpenCode 是多 provider 共存语义
+        // （见 `merge_config` 的「从磁盘补回其他 provider 的 key」注释），
+        // 切换到 B 不应删掉 A。这条与其余单 provider 工具不同，勿照搬断言。
+        ensure!(
+            after.contains("https://a.example/v1"),
+            "旧 provider 被误删（OpenCode 应共存）:\n{after}"
+        );
+
+        Ok(())
+    })()
+    .expect("OpenCode 多轮切换契约失败");
+}
+
+/// 边界：live 文件是**合法但非对象**的 JSON（数组 / 标量）。
+///
+/// 这类文件通常不是工具的真实配置（用户误放、或工具改了格式）。行为必须是
+/// **整体覆盖为受管内容**，而不是崩溃、也不是产出损坏文件。
+#[test]
+fn non_object_live_file_is_replaced_not_crashed() {
+    let _home = HomeGuard::new();
+
+    (|| -> anyhow::Result<()> {
+        let adapter = get_adapter(TargetApp::ZCode);
+        let path = adapter.config_path();
+        std::fs::create_dir_all(path.parent().context("config dir")?)?;
+
+        // 顶层是数组的「合法 JSON」。
+        std::fs::write(&path, "[1, 2, 3]")?;
+
+        let api_profile = profile(TargetApp::ZCode, "custom", "https://new.example/v1", "m");
+        switch_api::adapters::apply_profile_transaction_with_previous(
+            adapter.as_ref(),
+            &api_profile,
+            &serde_json::json!({}),
+            None,
+        )?;
+
+        let after = std::fs::read_to_string(&path)?;
+        // 关键：结果必须是合法 JSON，且写入成功。
+        let parsed: serde_json::Value = serde_json::from_str(&after)
+            .unwrap_or_else(|e| panic!("产出不是合法 JSON：{e}\n{after}"));
+        ensure!(parsed.is_object(), "结果应是对象:\n{after}");
+
+        Ok(())
+    })()
+    .expect("非对象 live 文件处理失败");
+}
