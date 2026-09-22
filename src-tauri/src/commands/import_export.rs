@@ -4,7 +4,7 @@
 //! 导入侧更重：换库（`replace_database_locked`）是一个完整的补偿事务——
 //! 备份 live → 替换 → 失败逐级回滚，且回滚失败要标记 `PartialFailure`。
 
-use crate::commands::helpers::{default_db_path, home_dir};
+use crate::commands::helpers::{default_db_path, home_dir, reject_export_onto_live_db};
 use crate::commands::{AppError, AppState};
 use serde::Serialize;
 use switch_api::db::Database;
@@ -17,6 +17,7 @@ pub async fn export_database(
 ) -> Result<(), AppError> {
     let _db = state.db.lock()?;
     let db_path = default_db_path()?;
+    reject_export_onto_live_db(&output_path)?;
 
     // 快照而非文件拷贝：拷主文件会漏掉还在 -wal 里的已提交数据（实测可导出成空档案库）。
     // 导出目标由用户选择，snapshot_to 只收紧文件本身权限，不动其所在目录。
@@ -33,6 +34,7 @@ pub async fn export_portable_backup(
 ) -> Result<switch_api::utils::portable_backup::PortableBackupExportResult, AppError> {
     let _write_guard = state.config_lock.lock()?;
     let db = state.db.lock()?;
+    reject_export_onto_live_db(&output_path)?;
     switch_api::adapters::sync_all_shared_configs(&db)
         .map_err(|e| AppError::from(e).with_context("导出前同步共享配置失败"))?;
     let db_path = default_db_path()?;
@@ -54,6 +56,7 @@ pub async fn export_skills(
 ) -> Result<switch_api::utils::skills_backup::SkillsExportResult, AppError> {
     // 与配置写路径互斥：导出期间避免并发切换改到半截 skill 目录。
     let _write_guard = state.config_lock.lock()?;
+    reject_export_onto_live_db(&output_path)?;
     let home = home_dir()?;
     switch_api::utils::skills_backup::export_skills(&home, std::path::Path::new(&output_path))
         .map_err(|e| AppError::from(e).with_context("导出 Skills 失败"))

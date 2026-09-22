@@ -124,3 +124,117 @@ pub(crate) fn default_provider(target: TargetApp) -> String {
 pub(crate) fn default_db_path() -> Result<std::path::PathBuf, AppError> {
     Ok(home_dir()?.join(".switch-api").join("db.sqlite"))
 }
+
+/// 拒绝把导出目标选成 live 数据库。
+///
+/// 导出是「写到用户选的路径」，而用户完全可能选到自己的库上（文件名就叫
+/// `db.sqlite`，看起来正合适）。实测把便携备份或 Skills 归档导出到 live
+/// 路径会把库**覆盖成 tar.gz，直接损坏且不可恢复**——档案与明文 key 全丢。
+/// 这不是理论风险：路径参数由前端给出，被攻破的 webview 也能这么干。
+///
+/// 比对用 canonicalize：`~/.switch-api/../.switch-api/db.sqlite` 这类
+/// 等价路径必须也能挡住。目标不存在时 canonicalize 会失败，退化为
+/// 逐段规范化后再比。
+pub(crate) fn reject_export_onto_live_db(output_path: &str) -> Result<(), AppError> {
+    let target = std::path::Path::new(output_path);
+    let live = default_db_path()?;
+    let live = std::fs::canonicalize(&live).unwrap_or(live);
+
+    // 目标可能还不存在（新建导出文件）：规范化其父目录再拼回文件名。
+    let normalized = std::fs::canonicalize(target)
+        .or_else(|_| {
+            let parent = target.parent().unwrap_or_else(|| std::path::Path::new("."));
+            let file = target.file_name().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "导出路径缺少文件名")
+            })?;
+            Ok::<_, std::io::Error>(std::fs::canonicalize(parent)?.join(file))
+        })
+        .unwrap_or_else(|_| target.to_path_buf());
+
+    if normalized == live {
+        return Err(AppError::invalid_input(
+            "导出目标不能是 Helio 数据库本身（会覆盖并损坏档案库），请换一个路径",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// 在临时 HOME 下造出 `<home>/.switch-api/db.sqlite`，返回 (临时目录, live 路径)。
+    ///
+    /// `default_db_path()` 依赖 `home_dir()`，而后者读进程级 `HOME`——
+    /// 多个测试并行改它会互相打架，所以本模块内串行（见 `HOME_LOCK`）。
+    fn with_fake_home<T>(f: impl FnOnce(&std::path::Path) -> T) -> T {
+        static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let api_dir = home.join(".switch-api");
+        fs::create_dir_all(&api_dir).unwrap();
+        let live = api_dir.join("db.sqlite");
+        fs::write(&live, b"db").unwrap();
+
+        let previous = std::env::var_os("HOME");
+        std::env::set_var("HOME", home);
+        let out = f(&live);
+        match previous {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        out
+    }
+
+    #[test]
+    fn rejects_export_onto_live_db() {
+        with_fake_home(|live| {
+            let err = reject_export_onto_live_db(&live.to_string_lossy())
+                .expect_err("导出到 live 库必须被拒绝");
+            assert!(
+                err.to_string().contains("不能是 Helio 数据库本身"),
+                "错误信息应说明原因：{err}"
+            );
+        });
+    }
+
+    #[test]
+    fn rejects_equivalent_path_with_dot_segments() {
+        with_fake_home(|live| {
+            // `~/.switch-api/../.switch-api/db.sqlite` 指向同一个文件，
+            // 只做字符串比较会漏掉它。
+            let sneaky = live
+                .parent()
+                .unwrap()
+                .join("..")
+                .join(".switch-api")
+                .join("db.sqlite");
+            assert!(
+                reject_export_onto_live_db(&sneaky.to_string_lossy()).is_err(),
+                "等价路径也必须挡住：{}",
+                sneaky.display()
+            );
+        });
+    }
+
+    #[test]
+    fn allows_export_next_to_live_db() {
+        with_fake_home(|live| {
+            // 同目录下换个文件名是正常的导出操作，不能误伤。
+            let sibling = live.with_file_name("helio-backup.db");
+            reject_export_onto_live_db(&sibling.to_string_lossy()).expect("导出到库旁边应当允许");
+        });
+    }
+
+    #[test]
+    fn allows_export_to_nonexistent_path() {
+        with_fake_home(|live| {
+            let target = live.with_file_name("brand-new-backup.tar.gz");
+            assert!(!target.exists());
+            reject_export_onto_live_db(&target.to_string_lossy())
+                .expect("导出到尚不存在的文件应当允许");
+        });
+    }
+}
