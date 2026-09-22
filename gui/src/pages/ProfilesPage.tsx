@@ -6,7 +6,7 @@ import { useStore } from '../store';
 import { Button } from '../components/common/Button';
 import { Spinner } from '../components/common/Spinner';
 import { PageHeader } from '../components/common/PageHeader';
-import { ConfirmDialog } from '../components/common/Modal';
+import { ConfirmDialog, Modal } from '../components/common/Modal';
 import { Plus, Search, X, FileDown } from 'lucide-react';
 import type { ApiProfile, TargetApp } from '../types';
 import { SUPPORTED_TOOLS, toolById } from '../types';
@@ -64,6 +64,16 @@ export default function ProfilesPage() {
 
   const selectedTool = toolById(targetApp)!;
   const activeProfile = activeProfileFor(status, targetApp);
+  /**
+   * 待删除的档案是否正是该工具当前启用的那个。
+   *
+   * 后端会拒绝（`conflict`），但让用户点了「删除」才吃一个报错很糟——
+   * 确认框应当先说清楚为什么不行。这里只负责把话说在前面，判断口径与
+   * 后端一致（同名 + 同工具）。
+   */
+  const isDeletingActive = Boolean(
+    deleting && activeProfile && deleting.name === activeProfile.name,
+  );
   const claudeSeed = activeProfileFor(status, 'claude-code')
     || profiles.find((p) => p.target_app === 'claude-code');
   const normalizedQuery = query.trim().toLowerCase();
@@ -418,7 +428,27 @@ export default function ProfilesPage() {
         </Suspense>
       )}
 
-      {deleting && (
+      {/*
+        删除当前启用的档案：后端会拒绝，但让用户点了「删除」才吃报错很糟。
+        改成纯告知——没有可执行的删除动作，所以不用 ConfirmDialog（那个的
+        确认按钮一定会真的执行）。
+      */}
+      {deleting && isDeletingActive && (
+        <Modal
+          title="无法删除当前启用的档案"
+          onClose={() => setDeleting(null)}
+          footer={
+            <Button variant="secondary" onClick={() => setDeleting(null)}>知道了</Button>
+          }
+        >
+          <p className="text-[13px] leading-relaxed text-ink-dim">
+            「{deleting.name}」正在被 {toolById(deleting.tool)?.displayName ?? deleting.tool} 使用，
+            无法删除。请先启用该工具下的其他档案，再回来删除它。
+          </p>
+        </Modal>
+      )}
+
+      {deleting && !isDeletingActive && (
         <ConfirmDialog
           title="删除配置档案"
           message={`确定要删除「${deleting.name}」（${toolById(deleting.tool)?.displayName ?? deleting.tool}）吗？此操作不可撤销。`}
