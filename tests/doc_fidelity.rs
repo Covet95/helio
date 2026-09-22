@@ -47,15 +47,30 @@ fn editing_a_field_keeps_every_handwritten_comment() {
     assert!(out.contains("我习惯永不确认"), "行尾注释丢失:\n{out}");
 
     // 未受管的子表必须原样存活。
-    assert!(out.contains("[model_providers.custom]"), "provider 表丢失:\n{out}");
-    assert!(out.contains("base_url = \"https://relay.example/v1\""), "base_url 丢失:\n{out}");
-    assert!(out.contains("[mcp_servers.filesystem]"), "mcp 表丢失:\n{out}");
+    assert!(
+        out.contains("[model_providers.custom]"),
+        "provider 表丢失:\n{out}"
+    );
+    assert!(
+        out.contains("base_url = \"https://relay.example/v1\""),
+        "base_url 丢失:\n{out}"
+    );
+    assert!(
+        out.contains("[mcp_servers.filesystem]"),
+        "mcp 表丢失:\n{out}"
+    );
     assert!(out.contains("[features]"), "features 表丢失:\n{out}");
     assert!(out.contains("plugins = true"), "plugins 丢失:\n{out}");
 
     // 受管字段被更新 / 新增。
-    assert!(out.contains("approval_policy = \"on-request\""), "字段未更新:\n{out}");
-    assert!(out.contains("service_tier = \"priority\""), "新字段未写入:\n{out}");
+    assert!(
+        out.contains("approval_policy = \"on-request\""),
+        "字段未更新:\n{out}"
+    );
+    assert!(
+        out.contains("service_tier = \"priority\""),
+        "新字段未写入:\n{out}"
+    );
     assert!(!out.contains("\"never\""), "旧值残留:\n{out}");
 }
 
@@ -69,7 +84,9 @@ fn editing_a_field_keeps_key_order() {
 
     let model = out.find("model =").expect("model 应存在");
     let provider = out.find("model_provider =").expect("model_provider 应存在");
-    let policy = out.find("approval_policy =").expect("approval_policy 应存在");
+    let policy = out
+        .find("approval_policy =")
+        .expect("approval_policy 应存在");
     assert!(model < provider, "键序被打乱:\n{out}");
     assert!(provider < policy, "键序被打乱:\n{out}");
 }
@@ -84,7 +101,10 @@ fn removing_a_field_keeps_the_rest() {
 
     assert!(!out.contains("approval_policy"), "字段应被删除:\n{out}");
     assert!(out.contains("手写注释，不许动"), "删除不应影响注释:\n{out}");
-    assert!(out.contains("[model_providers.custom]"), "删除不应影响子表:\n{out}");
+    assert!(
+        out.contains("[model_providers.custom]"),
+        "删除不应影响子表:\n{out}"
+    );
 }
 
 /// 幂等：同样的编辑连做两次，第二次不再改变文本。
@@ -108,5 +128,8 @@ fn custom_user_keys_survive() {
     )
     .unwrap();
 
-    assert!(out.contains("my_custom_key = \"do not touch\""), "自定义键丢失:\n{out}");
+    assert!(
+        out.contains("my_custom_key = \"do not touch\""),
+        "自定义键丢失:\n{out}"
+    );
 }

@@ -14,7 +14,8 @@ pub fn parse(text: &str) -> Result<Value> {
 
 /// 渲染 JSON 文本：两空格缩进，行尾无多余空白。
 pub fn render(value: &Value) -> Result<String> {
-    let mut text = serde_json::to_string_pretty(value).context("Failed to serialize JSON document")?;
+    let mut text =
+        serde_json::to_string_pretty(value).context("Failed to serialize JSON document")?;
     text.push('\n');
     Ok(text)
 }

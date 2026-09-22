@@ -168,7 +168,6 @@ pub fn parse_document(text: &str, label: &str) -> Result<DocumentMut> {
         .with_context(|| format!("Failed to parse {label} as TOML"))
 }
 
-
 /// 在保留格式的前提下，对顶层键做「设置 / 删除」。
 ///
 /// `updates` 中值为 `null` 表示删除该键，否则设置。**其余内容一律不动**——
@@ -265,9 +264,7 @@ fn toml_to_json(value: toml::Value) -> Value {
             .unwrap_or(Value::Null),
         toml::Value::Boolean(b) => Value::Bool(b),
         toml::Value::Datetime(d) => Value::String(d.to_string()),
-        toml::Value::Array(items) => {
-            Value::Array(items.into_iter().map(toml_to_json).collect())
-        }
+        toml::Value::Array(items) => Value::Array(items.into_iter().map(toml_to_json).collect()),
         toml::Value::Table(table) => Value::Object(
             table
                 .into_iter()
@@ -336,13 +333,24 @@ base_url = \"https://new.example\"
 
         let merged = merge_documents(live, Some(previous), next_text(next)).unwrap();
 
-        assert!(merged.contains("# 用户手写的说明"), "顶层注释应保留:\n{merged}");
+        assert!(
+            merged.contains("# 用户手写的说明"),
+            "顶层注释应保留:\n{merged}"
+        );
         assert!(merged.contains("# 行尾注释"), "行尾注释应保留:\n{merged}");
-        assert!(merged.contains("https://new.example"), "受管字段应更新:\n{merged}");
-        assert!(!merged.contains("https://old.example"), "旧值应被替换:\n{merged}");
+        assert!(
+            merged.contains("https://new.example"),
+            "受管字段应更新:\n{merged}"
+        );
+        assert!(
+            !merged.contains("https://old.example"),
+            "旧值应被替换:\n{merged}"
+        );
 
         let model_pos = merged.find("model =").expect("model 应存在");
-        let policy_pos = merged.find("approval_policy").expect("approval_policy 应存在");
+        let policy_pos = merged
+            .find("approval_policy")
+            .expect("approval_policy 应存在");
         assert!(model_pos < policy_pos, "键序应保留:\n{merged}");
     }
 
@@ -383,7 +391,10 @@ base_url = \"https://new.example\"
 
         let merged = merge_documents(live, None, next).unwrap();
 
-        assert!(merged.contains("# keep"), "首次切换不应摘除任何内容:\n{merged}");
+        assert!(
+            merged.contains("# keep"),
+            "首次切换不应摘除任何内容:\n{merged}"
+        );
         assert!(merged.contains("model = \"gpt-5\""));
         assert!(merged.contains("https://new.example"));
     }
@@ -450,8 +461,14 @@ base_url = \"https://new.example\"
 
         let merged = merge_documents(live, Some(previous), next).unwrap();
 
-        assert!(merged.contains("https://new.example"), "值应更新:\n{merged}");
-        assert!(merged.contains("# 我搭的中转"), "子表内注释应存活:\n{merged}");
+        assert!(
+            merged.contains("https://new.example"),
+            "值应更新:\n{merged}"
+        );
+        assert!(
+            merged.contains("# 我搭的中转"),
+            "子表内注释应存活:\n{merged}"
+        );
     }
 
     // ---- 值级读写 ----
@@ -472,7 +489,10 @@ base_url = \"https://new.example\"
     #[test]
     fn null_is_rejected_on_render() {
         let value = serde_json::json!({ "a": null });
-        assert!(render(&value).is_err(), "TOML 无 null，应显式报错而非静默丢弃");
+        assert!(
+            render(&value).is_err(),
+            "TOML 无 null，应显式报错而非静默丢弃"
+        );
     }
 
     #[test]
@@ -500,15 +520,27 @@ approval_policy = \"never\"
 base_url = \"https://x.example\"
 ";
         let mut updates = serde_json::Map::new();
-        updates.insert("approval_policy".to_string(), serde_json::json!("on-request"));
+        updates.insert(
+            "approval_policy".to_string(),
+            serde_json::json!("on-request"),
+        );
 
         let result = apply_top_level_updates(live, &updates).unwrap();
 
-        assert!(result.contains("# 我的 Codex 配置"), "顶层注释应保留:\n{result}");
+        assert!(
+            result.contains("# 我的 Codex 配置"),
+            "顶层注释应保留:\n{result}"
+        );
         assert!(result.contains("# 行尾也要留"), "行尾注释应保留:\n{result}");
-        assert!(result.contains("approval_policy = \"on-request\""), "字段应更新:\n{result}");
+        assert!(
+            result.contains("approval_policy = \"on-request\""),
+            "字段应更新:\n{result}"
+        );
         assert!(!result.contains("\"never\""), "旧值应消失:\n{result}");
-        assert!(result.contains("[model_providers.custom]"), "子表应保留:\n{result}");
+        assert!(
+            result.contains("[model_providers.custom]"),
+            "子表应保留:\n{result}"
+        );
 
         let model_pos = result.find("model =").unwrap();
         let policy_pos = result.find("approval_policy").unwrap();
@@ -523,8 +555,14 @@ base_url = \"https://x.example\"
 
         let result = apply_top_level_updates(live, &updates).unwrap();
 
-        assert!(!result.contains("service_tier"), "null 应删除该键:\n{result}");
-        assert!(result.contains("model = \"gpt-5\""), "其余字段应保留:\n{result}");
+        assert!(
+            !result.contains("service_tier"),
+            "null 应删除该键:\n{result}"
+        );
+        assert!(
+            result.contains("model = \"gpt-5\""),
+            "其余字段应保留:\n{result}"
+        );
     }
 
     #[test]
@@ -536,7 +574,10 @@ base_url = \"https://x.example\"
         let result = apply_top_level_updates(live, &updates).unwrap();
 
         assert!(result.contains("# keep"), "注释应保留:\n{result}");
-        assert!(result.contains("verbosity = \"high\""), "新键应写入:\n{result}");
+        assert!(
+            result.contains("verbosity = \"high\""),
+            "新键应写入:\n{result}"
+        );
         assert!(result.contains("model = \"gpt-5\""));
     }
 

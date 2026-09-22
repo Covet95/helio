@@ -63,7 +63,10 @@ command = \"npx\"
 
         let after = std::fs::read_to_string(&config_path)?;
 
-        ensure!(after.contains("# 我的 Codex 配置"), "顶层注释丢失:\n{after}");
+        ensure!(
+            after.contains("# 我的 Codex 配置"),
+            "顶层注释丢失:\n{after}"
+        );
         ensure!(after.contains("# 我习惯永不确认"), "行尾注释丢失:\n{after}");
         ensure!(
             after.contains("[mcp_servers.filesystem]"),

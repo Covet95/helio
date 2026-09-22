@@ -31,10 +31,13 @@ pub fn render(value: &Value) -> Result<String> {
 /// 语义与 [`super::merge_three_way`] 一致，差别只在于作用在保留格式的
 /// `YamlFile` 上，因此未被摘除/覆盖的注释与键序会原样存活。
 ///
-/// `yaml_edit` 不提供「删除键」的公开 API，因此摘除通过「整表重建」实现：
-/// 先按值级三路合并算出最终文档，再把它写回原文档——`set` 只更新变化的
-/// 节点，未触碰的注释保留。键被删除时该节点的注释一并消失，这是可接受的
-/// 代价（用户可重新添加）。
+/// **已知限制**：本实现只做「写入」，不做「摘除」。`yaml_edit` 其实提供
+/// `Mapping::remove`，但摘除的语义（哪些键该删）需要与值级合并保持一致，
+/// 而这套逻辑目前只在 [`super::merge_three_way`] 里。
+///
+/// 因此本函数只负责把 `merge_three_way` 的**结果**写进保格式文档；若写入
+/// 后语义与结果不符（含「该删的没删」），由 `merge_document` 的安全网
+/// 检测并退回值级重写。这样既不会写坏文件，也不会残留陈旧键。
 pub fn merge_documents(
     live_text: &str,
     previous_managed: Option<&Value>,
@@ -86,9 +89,20 @@ fn apply_value(document: &YamlFile, value: &Value) -> Result<()> {
     Ok(())
 }
 
-/// 在映射 `mapping` 上写入 `key`：已有同形结构则下钻，否则整体插入。
+/// 在映射 `mapping` 上写入 `key`：已有同形结构则下钻，否则插入新节点。
+///
+/// **关键约束（踩过坑）**：`yaml_edit` 只在节点**已挂在文档树上**时才知缩进
+/// 上下文。任何「先在游离节点上构造好、再整体 set 进去」的写法都会丢缩进，
+/// 产出把子键提到顶层的损坏 YAML。因此新增复合值时一律：
+///
+/// 1. 先把**空**节点 `set` 到树上；
+/// 2. 再从树上取回句柄往里填。
+///
+/// 注意：`merge_document` 的外层安全网会把语义不符的结果退回值级重写，
+/// 所以即使某条分支漏了缩进，也不会写出损坏文件——但会丢注释。这里是
+/// 尽量保住注释的「正确路径」。
 fn apply_mapping_entry(mapping: &yaml_edit::Mapping, key: &str, value: &Value) -> Result<()> {
-    use yaml_edit::{Mapping, Sequence};
+    use yaml_edit::Mapping;
 
     match value {
         Value::Object(sub) => {
@@ -97,15 +111,17 @@ fn apply_mapping_entry(mapping: &yaml_edit::Mapping, key: &str, value: &Value) -
                     apply_mapping_entry(&existing, k, v)?;
                 }
             } else {
-                let fresh = Mapping::new_pending_block();
-                for (k, v) in sub {
-                    apply_mapping_entry(&fresh, k, v)?;
+                // attach-then-fill：先挂空节点，取回句柄再填。
+                mapping.set(key, Mapping::new_pending_block());
+                if let Some(fresh) = mapping.get_mapping(key) {
+                    for (k, v) in sub {
+                        apply_mapping_entry(&fresh, k, v)?;
+                    }
                 }
-                mapping.set(key, fresh);
             }
         }
         Value::Array(items) => {
-            // 序列按索引就地更新已有元素；长度变化时整体重建。
+            // 序列按索引就地更新已有元素；长度变化时重建。
             //
             // 就地更新是为了保住每个元素的注释与格式——Helio 改的是
             // 数组里的某几项（如 custom_providers 的一个 provider），
@@ -117,11 +133,16 @@ fn apply_mapping_entry(mapping: &yaml_edit::Mapping, key: &str, value: &Value) -
                     }
                 }
                 _ => {
-                    let fresh = Sequence::new_pending_block();
-                    for item in items {
-                        fresh.push(sequence_element(item)?);
-                    }
-                    mapping.set(key, fresh);
+                    // 重建整条序列。
+                    //
+                    // 不能用 `Sequence::new_pending_block()` + `push`：对含映射
+                    // 的元素，库算不出正确缩进，会产出把子键顶格的**非法 YAML**
+                    // （实测）。而 `parse_raw` 接受块风格的完整序列文本，能产出
+                    // 正确缩进——这是唯一可靠的重建方式。
+                    let text = serde_yaml::to_string(&Value::Array(items.clone()))
+                        .context("Failed to render YAML sequence")?;
+                    let raw = yaml_edit::YamlValue::parse_raw(text.trim_end());
+                    mapping.set(key, raw);
                 }
             }
         }
@@ -152,40 +173,15 @@ fn apply_sequence_item(seq: &yaml_edit::Sequence, index: usize, value: &Value) -
     Ok(())
 }
 
-/// 构造序列元素（live 中无对应项时使用）。
-///
-/// 序列用 `Vec<YamlValue>` 表达——`YamlValue::from(Vec)` 是库提供的转换，
-/// 而 `Sequence` 节点类型没有对应的 `From` 实现。
-fn sequence_element(value: &Value) -> Result<yaml_edit::YamlValue> {
-    use yaml_edit::YamlValue;
-
-    Ok(match value {
-        // 映射用 `BTreeMap` 表达：`YamlValue::from(BTreeMap)` 是库提供的
-        // 转换，而 `Mapping` 节点类型没有对应实现。
-        Value::Object(sub) => {
-            let mut map = std::collections::BTreeMap::new();
-            for (k, v) in sub {
-                map.insert(k.clone(), sequence_element(v)?);
-            }
-            YamlValue::from(map)
-        }
-        Value::Array(items) => {
-            let mut out = Vec::with_capacity(items.len());
-            for item in items {
-                out.push(sequence_element(item)?);
-            }
-            YamlValue::from(out)
-        }
-        scalar => scalar_to_yaml(scalar),
-    })
-}
-
 /// 标量 → `yaml_edit::YamlValue`。复合类型不走这里。
 fn scalar_to_yaml(value: &Value) -> yaml_edit::YamlValue {
     use yaml_edit::YamlValue;
 
     match value {
-        Value::Null => YamlValue::scalar("null"),
+        // YAML 有真正的 null（`~`）。早期实现写成 `scalar("null")`，产出的是
+        // **带引号的字符串** `'null'`，回读成 `String("null")`——与 JSON/TOML
+        // 语义都不一致。
+        Value::Null => YamlValue::scalar(yaml_edit::ScalarValue::null()),
         Value::Bool(b) => YamlValue::scalar(*b),
         Value::Number(n) => {
             if let Some(i) = n.as_i64() {
@@ -199,6 +195,8 @@ fn scalar_to_yaml(value: &Value) -> yaml_edit::YamlValue {
         // 字符串交给 `scalar`——它会按 YAML 规则决定是否需要引号
         // （含 `:`、`#`、以 `-` 开头等都会自动加引号）。
         Value::String(s) => YamlValue::scalar(s.as_str()),
+        // 复合值不应到达这里：调用方对 Object/Array 有专门分支。真到了说明
+        // 有分支遗漏，字符串化会静默损坏数据——交给安全网去发现。
         composite => YamlValue::scalar(composite.to_string()),
     }
 }
@@ -224,12 +222,24 @@ my_section:
 
         let merged = merge_documents(live, Some(&previous), &next).unwrap();
 
-        assert!(merged.contains("# 我的 Hermes 配置"), "顶层注释丢失:\n{merged}");
+        assert!(
+            merged.contains("# 我的 Hermes 配置"),
+            "顶层注释丢失:\n{merged}"
+        );
         assert!(merged.contains("# 行尾注释"), "行尾注释丢失:\n{merged}");
-        assert!(merged.contains("# 下面是我自己的段"), "段前注释丢失:\n{merged}");
+        assert!(
+            merged.contains("# 下面是我自己的段"),
+            "段前注释丢失:\n{merged}"
+        );
         assert!(merged.contains("keep: me"), "自定义内容丢失:\n{merged}");
-        assert!(merged.contains("https://new.example"), "值未更新:\n{merged}");
-        assert!(!merged.contains("https://old.example"), "旧值残留:\n{merged}");
+        assert!(
+            merged.contains("https://new.example"),
+            "值未更新:\n{merged}"
+        );
+        assert!(
+            !merged.contains("https://old.example"),
+            "旧值残留:\n{merged}"
+        );
     }
 
     #[test]
@@ -240,8 +250,14 @@ my_section:
         let merged = merge_documents(live, None, &next).unwrap();
 
         assert!(merged.contains("# keep"), "首次切换不应删注释:\n{merged}");
-        assert!(merged.contains("user_key: value"), "用户键应保留:\n{merged}");
-        assert!(merged.contains("https://new.example"), "新值应写入:\n{merged}");
+        assert!(
+            merged.contains("user_key: value"),
+            "用户键应保留:\n{merged}"
+        );
+        assert!(
+            merged.contains("https://new.example"),
+            "新值应写入:\n{merged}"
+        );
     }
 
     #[test]
@@ -292,7 +308,10 @@ mcp_servers:
         let reparsed: serde_yaml::Value = serde_yaml::from_str(&merged)
             .unwrap_or_else(|e| panic!("合并结果不是合法 YAML：{e}\n{merged}"));
 
-        assert_eq!(reparsed["model"]["default"], serde_yaml::Value::String("new".into()));
+        assert_eq!(
+            reparsed["model"]["default"],
+            serde_yaml::Value::String("new".into())
+        );
         assert_eq!(
             reparsed["mcp_servers"]["keep"]["command"],
             serde_yaml::Value::String("uvx".into())
@@ -320,9 +339,15 @@ custom_providers:
 
         let merged = merge_documents(live, Some(&previous), &next).unwrap();
 
-        assert!(merged.contains("https://new.example/v1"), "值应更新:\n{merged}");
+        assert!(
+            merged.contains("https://new.example/v1"),
+            "值应更新:\n{merged}"
+        );
         assert!(merged.contains("# 我搭的中转"), "行尾注释应存活:\n{merged}");
-        assert!(merged.contains("https://other.example/v1"), "其他项应保留:\n{merged}");
+        assert!(
+            merged.contains("https://other.example/v1"),
+            "其他项应保留:\n{merged}"
+        );
     }
 
     #[test]

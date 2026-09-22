@@ -2928,8 +2928,8 @@ mod codex_field_update_tests {
     #[test]
     fn test_set_new_field() {
         let live = "model_provider = \"openai\"\n";
-        let result = apply_top_level_updates(live, &updates(json!({ "approval_policy": "never" })))
-            .unwrap();
+        let result =
+            apply_top_level_updates(live, &updates(json!({ "approval_policy": "never" }))).unwrap();
         assert!(result.contains("approval_policy = \"never\""), "{result}");
         // 原有字段不受影响
         assert!(result.contains("model_provider = \"openai\""), "{result}");
@@ -2941,15 +2941,22 @@ mod codex_field_update_tests {
         let result =
             apply_top_level_updates(live, &updates(json!({ "sandbox_mode": "workspace-write" })))
                 .unwrap();
-        assert!(result.contains("sandbox_mode = \"workspace-write\""), "{result}");
+        assert!(
+            result.contains("sandbox_mode = \"workspace-write\""),
+            "{result}"
+        );
         assert!(!result.contains("read-only"), "{result}");
     }
 
     #[test]
     fn test_null_removes_field() {
         let live = "service_tier = \"fast\"\nmodel_provider = \"openai\"\n";
-        let result = apply_top_level_updates(live, &updates(json!({ "service_tier": null }))).unwrap();
-        assert!(!result.contains("service_tier"), "null 应删除该键:\n{result}");
+        let result =
+            apply_top_level_updates(live, &updates(json!({ "service_tier": null }))).unwrap();
+        assert!(
+            !result.contains("service_tier"),
+            "null 应删除该键:\n{result}"
+        );
         // 其他字段保留
         assert!(result.contains("model_provider = \"openai\""), "{result}");
     }
@@ -2977,12 +2984,24 @@ command = \"npx\"
         .unwrap();
 
         // 改了/加了指定字段
-        assert!(result.contains("approval_policy = \"untrusted\""), "{result}");
-        assert!(result.contains("model_auto_compact_token_limit = 200000"), "{result}");
-        assert!(result.contains("disable_response_storage = true"), "{result}");
+        assert!(
+            result.contains("approval_policy = \"untrusted\""),
+            "{result}"
+        );
+        assert!(
+            result.contains("model_auto_compact_token_limit = 200000"),
+            "{result}"
+        );
+        assert!(
+            result.contains("disable_response_storage = true"),
+            "{result}"
+        );
         // 完整保留嵌套结构
         assert!(result.contains("[model_providers.openai]"), "{result}");
-        assert!(result.contains("base_url = \"https://api.com\""), "{result}");
+        assert!(
+            result.contains("base_url = \"https://api.com\""),
+            "{result}"
+        );
         assert!(result.contains("[mcp_servers.fs]"), "{result}");
         assert!(result.contains("command = \"npx\""), "{result}");
         assert!(result.contains("model_provider = \"openai\""), "{result}");
@@ -3002,7 +3021,10 @@ command = \"npx\"
         .unwrap();
 
         assert!(!result.contains("personality"), "{result}");
-        assert!(result.contains("model_reasoning_effort = \"high\""), "{result}");
+        assert!(
+            result.contains("model_reasoning_effort = \"high\""),
+            "{result}"
+        );
         assert!(result.contains("enable_workflows = false"), "{result}");
     }
 
@@ -3022,13 +3044,24 @@ base_url = \"https://x.example\"
             apply_top_level_updates(live, &updates(json!({ "approval_policy": "on-request" })))
                 .unwrap();
 
-        assert!(result.contains("# 我的 Codex 配置"), "顶层注释应保留:\n{result}");
+        assert!(
+            result.contains("# 我的 Codex 配置"),
+            "顶层注释应保留:\n{result}"
+        );
         assert!(result.contains("# 行尾注释"), "行尾注释应保留:\n{result}");
-        assert!(result.contains("# 下面是中转配置"), "子表前注释应保留:\n{result}");
-        assert!(result.contains("approval_policy = \"on-request\""), "{result}");
+        assert!(
+            result.contains("# 下面是中转配置"),
+            "子表前注释应保留:\n{result}"
+        );
+        assert!(
+            result.contains("approval_policy = \"on-request\""),
+            "{result}"
+        );
 
         let model_pos = result.find("model =").expect("model 应存在");
-        let policy_pos = result.find("approval_policy").expect("approval_policy 应存在");
+        let policy_pos = result
+            .find("approval_policy")
+            .expect("approval_policy 应存在");
         assert!(model_pos < policy_pos, "键序应保留:\n{result}");
     }
 }

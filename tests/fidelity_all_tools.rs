@@ -14,9 +14,9 @@
 #![cfg(unix)]
 
 use anyhow::{ensure, Context};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use switch_api::adapters::get_adapter;
 use switch_api::models::{ApiProfile, TargetApp};
-use std::sync::{Mutex, MutexGuard, OnceLock};
 
 /// 串行化 `$HOME` 改写。`Mutex` 中毒不影响后续测试——我们只关心互斥，
 /// 不关心前一个测试的断言结果。
@@ -105,8 +105,7 @@ fn check_tool(
     )
     .with_context(|| format!("{tool:?} 切换事务失败"))?;
 
-    let after = std::fs::read_to_string(&path)
-        .with_context(|| format!("{tool:?} 读回失败"))?;
+    let after = std::fs::read_to_string(&path).with_context(|| format!("{tool:?} 读回失败"))?;
 
     for fragment in must_survive {
         ensure!(
@@ -149,8 +148,8 @@ fn check_aux_file(
     )
     .with_context(|| format!("{tool:?} 切换事务失败"))?;
 
-    let after = std::fs::read_to_string(&path)
-        .with_context(|| format!("{tool:?} 辅助文件读回失败"))?;
+    let after =
+        std::fs::read_to_string(&path).with_context(|| format!("{tool:?} 辅助文件读回失败"))?;
 
     for fragment in must_survive {
         ensure!(
@@ -178,7 +177,12 @@ fn every_tool_keeps_user_content_on_switch() {
 }
 "#,
             &["permissions", "Bash(ls:*)", "hooks"],
-            &profile(TargetApp::ClaudeCode, "anthropic", "https://new.example", "m"),
+            &profile(
+                TargetApp::ClaudeCode,
+                "anthropic",
+                "https://new.example",
+                "m",
+            ),
         )?;
 
         // ---------------- Pi：JSON ----------------
@@ -362,14 +366,20 @@ fn opencode_multi_switch_keeps_user_content() {
         let shared = adapter.extract_shared_config(&live);
         let merged_a = adapter.merge_config(&a, &shared);
         switch_api::adapters::apply_profile_transaction_with_previous(
-            adapter.as_ref(), &a, &shared, None,
+            adapter.as_ref(),
+            &a,
+            &shared,
+            None,
         )?;
 
         let b = profile(TargetApp::OpenCode, "provB", "https://b.example/v1", "mb");
         let live2 = adapter.read_config()?;
         let shared2 = adapter.extract_shared_config(&live2);
         switch_api::adapters::apply_profile_transaction_with_previous(
-            adapter.as_ref(), &b, &shared2, Some(&merged_a),
+            adapter.as_ref(),
+            &b,
+            &shared2,
+            Some(&merged_a),
         )?;
 
         let after = std::fs::read_to_string(&path)?;
@@ -377,10 +387,7 @@ fn opencode_multi_switch_keeps_user_content() {
         // 用户内容必须存活。
         ensure!(after.contains("my-theme"), "用户 theme 丢失:\n{after}");
         ensure!(after.contains("keep-me"), "用户 username 丢失:\n{after}");
-        ensure!(
-            after.contains("$schema"),
-            "用户 $schema 丢失:\n{after}"
-        );
+        ensure!(after.contains("$schema"), "用户 $schema 丢失:\n{after}");
         // 新 provider 写入。
         ensure!(
             after.contains("https://b.example/v1"),

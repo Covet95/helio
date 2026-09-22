@@ -386,8 +386,10 @@ pub fn apply_profile_switch(
         .id
         .ok_or_else(|| anyhow::anyhow!("Profile '{}' has no id", api_profile.name))?;
     let adapter = get_adapter(target_app);
-    // 切换前的 active Profile：既用于「制造 active != target 窗口」的判定，
-    // 也用于推导上次写入的受管片段。必须在任何写操作之前取。
+    // 切换前的 active Profile，用于推导「上次写入的受管片段」。
+    //
+    // 必须在 `begin_switch` **之前**取：它恢复残留 journal 时可能改动 active，
+    // 而我们要的是「用户视角的上次切换目标」，不是恢复后的状态。
     let previous_active_profile = db.get_active_profile_full(target_app)?;
     let previous_opencode_state = if target_app == TargetApp::OpenCode {
         Some(db.get_opencode_managed_models()?)
@@ -442,10 +444,16 @@ pub fn apply_profile_switch(
 
         // 制造 `active != target` 窗口：仅当当前 active 已是目标时需要。
         // 不同 profile 之间切换时 active 本来就不是目标，无需动。
-        let already_active = previous_active_profile
-            .as_ref()
-            .and_then(|profile| profile.id)
-            .is_some_and(|id| id == profile_id);
+        //
+        // 注意读取时机：必须**在 `begin_switch` 之后**重新查库，不能用上面
+        // 捕获的 `previous_active_profile`——`begin_switch` 会恢复残留 journal，
+        // 而恢复可能改变 active（例如中断的 A→A 切换会把 active 从 A 改成
+        // journal 记录的旧值）。用恢复前的值判断会漏掉「清 active」这一步，
+        // 使重复切换的半状态无法被区分。这与旧实现保持一致。
+        let already_active = db
+            .get_active_profile(target_app)?
+            .map(|active| active.profile_id == profile_id)
+            .unwrap_or(false);
         if already_active {
             db.clear_active_profile(target_app)?;
         }

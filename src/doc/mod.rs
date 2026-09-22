@@ -116,21 +116,62 @@ pub fn merge_three_way(
 
 /// 按格式做三路合并，返回渲染好的文本。
 ///
-/// 各适配器的统一入口：TOML 走保格式路径（`toml_edit`），其余格式走
-/// 值级合并后重新渲染。语义完全一致，差别只在格式保真能力。
+/// ## 安全网：先算「正确结果」，再验「保真结果」
+///
+/// 保真合并依赖第三方库（`toml_edit` / `yaml_edit`）在保留格式的前提下做
+/// 结构修改，而这类库的边角行为很难穷举验证——实测已踩到多个：嵌套值被
+/// 提到顶层、序列缩进错乱、新键写入被静默丢弃。
+///
+/// 因此本函数采取 **verify-then-commit**：
+///
+/// 1. 先用纯值级合并算出 `expected`（正确性基准，不依赖任何库的格式能力）；
+/// 2. 再跑保真合并得到 `candidate`（可能保住注释）；
+/// 3. 把 `candidate` 解析回来与 `expected` 比对——**只有语义完全一致才采用**；
+/// 4. 解析失败或语义不符 → 退回值级结果重新渲染。
+///
+/// 这样最坏情况退化为「旧的、正确但丢注释」的行为，**永远不会**产出损坏
+/// 文件或写错语义。保真是优化，正确性是底线。
 pub fn merge_document(
     format: DocFormat,
     live_text: &str,
     previous_managed: Option<&Value>,
     next_managed: &Value,
 ) -> Result<String> {
-    match format {
+    let live = parse(format, live_text)?;
+    let expected = merge_three_way(&live, previous_managed, next_managed);
+
+    // JSON 无注释，值级合并后直接渲染即是最终形态，无需保真路径。
+    if format == DocFormat::Json {
+        return json::render(&expected);
+    }
+
+    let candidate = match format {
         DocFormat::Toml => toml::merge_json_into_toml(live_text, previous_managed, next_managed),
         DocFormat::Yaml => yaml::merge_documents(live_text, previous_managed, next_managed),
-        DocFormat::Json => {
-            let live = parse(DocFormat::Json, live_text)?;
-            json::render(&merge_three_way(&live, previous_managed, next_managed))
+        DocFormat::Json => unreachable!("JSON 已在上方提前返回"),
+    };
+
+    match candidate {
+        Ok(text) if renders_to(&text, format, &expected) => Ok(text),
+        Ok(_) => {
+            tracing::warn!("保真合并结果与预期语义不符，退回整体重写（{format:?}）");
+            render(format, &expected)
         }
+        Err(error) => {
+            tracing::warn!("保真合并失败，退回整体重写（{format:?}）：{error:#}");
+            render(format, &expected)
+        }
+    }
+}
+
+/// 校验候选文本解析后是否与期望值语义一致。
+///
+/// 用「解析 + 比对」而非字符串比较：保真路径会改变空白与格式，语义才是
+/// 判定依据。解析失败即视为不一致。
+fn renders_to(text: &str, format: DocFormat, expected: &Value) -> bool {
+    match parse(format, text) {
+        Ok(actual) => actual == *expected,
+        Err(_) => false,
     }
 }
 
@@ -172,7 +213,11 @@ fn remove_covered(base: &mut Value, covered: &Value) {
         }
     }
     for key in emptied {
-        base_map.remove(&key);
+        // 用 `shift_remove` 而非 `remove`：启用 `preserve_order` 后，
+        // `serde_json::Map` 的 `remove` 实际是 `swap_remove`——它把**最后一个
+        // 元素搬到被删位置**，导致剩余键序被打乱。本模块的承诺是保留键序，
+        // 因此必须用保序的 `shift_remove`（代价是 O(n)，但配置文件规模很小）。
+        base_map.shift_remove(&key);
     }
 }
 
@@ -203,10 +248,22 @@ mod tests {
     #[test]
     fn format_from_extension() {
         use std::path::Path;
-        assert_eq!(DocFormat::from_path(Path::new("a.json")), Some(DocFormat::Json));
-        assert_eq!(DocFormat::from_path(Path::new("a.toml")), Some(DocFormat::Toml));
-        assert_eq!(DocFormat::from_path(Path::new("a.yaml")), Some(DocFormat::Yaml));
-        assert_eq!(DocFormat::from_path(Path::new("a.YML")), Some(DocFormat::Yaml));
+        assert_eq!(
+            DocFormat::from_path(Path::new("a.json")),
+            Some(DocFormat::Json)
+        );
+        assert_eq!(
+            DocFormat::from_path(Path::new("a.toml")),
+            Some(DocFormat::Toml)
+        );
+        assert_eq!(
+            DocFormat::from_path(Path::new("a.yaml")),
+            Some(DocFormat::Yaml)
+        );
+        assert_eq!(
+            DocFormat::from_path(Path::new("a.YML")),
+            Some(DocFormat::Yaml)
+        );
         assert_eq!(DocFormat::from_path(Path::new("a.txt")), None);
         assert_eq!(DocFormat::from_path(Path::new("noext")), None);
     }
@@ -322,5 +379,157 @@ mod tests {
         let merged = merge_three_way(&live, Some(&previous), &next);
 
         assert_eq!(merged["section"]["nested"], json!(2));
+    }
+}
+
+#[cfg(test)]
+mod safety_net_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// 跑一次合并，断言结果**解析回来**与值级基准一致。
+    ///
+    /// 这是本模块最重要的契约：保真路径可以丢注释（格式优化），但**绝不能**
+    /// 改语义或产出无法解析的文件。下面每个用例都对应一个实测踩到过的坑。
+    fn assert_semantics(format: DocFormat, live: &str, previous: Option<&Value>, next: &Value) {
+        let live_value = parse(format, live).expect("live 应可解析");
+        let expected = merge_three_way(&live_value, previous, next);
+
+        let out = merge_document(format, live, previous, next)
+            .unwrap_or_else(|e| panic!("{format:?} 合并失败：{e:#}"));
+
+        let actual = parse(format, &out)
+            .unwrap_or_else(|e| panic!("{format:?} 产出无法解析：{e}\n---\n{out}"));
+
+        assert_eq!(actual, expected, "{format:?} 语义不符\n--- 输出 ---\n{out}");
+    }
+
+    /// 回归：YAML 新建嵌套映射时，子键曾被**提到顶层**（`model:` 变 null），
+    /// 且切换报告成功——静默损坏用户配置。
+    #[test]
+    fn yaml_new_nested_mapping_stays_nested() {
+        assert_semantics(
+            DocFormat::Yaml,
+            "user_setting: keep\n",
+            None,
+            &json!({ "model": { "default": "m", "provider": "custom:x" } }),
+        );
+    }
+
+    /// 回归：YAML 序列长度变化时曾产出**非法 YAML**（第 2 项起顶格）。
+    #[test]
+    fn yaml_sequence_length_change_is_valid() {
+        assert_semantics(
+            DocFormat::Yaml,
+            "list:\n  - a\n  - b\n",
+            None,
+            &json!({ "list": [{ "n": 1 }] }),
+        );
+        assert_semantics(
+            DocFormat::Yaml,
+            "list:\n  - a\n",
+            None,
+            &json!({ "list": [{ "n": 1 }, { "n": 2 }] }),
+        );
+    }
+
+    /// 回归：YAML 序列元素是数组时曾被**字符串化**（`[1,2,3]` → `'[1,2,3]'`）。
+    #[test]
+    fn yaml_nested_array_is_not_stringified() {
+        assert_semantics(
+            DocFormat::Yaml,
+            "l:\n- a\n- b\n",
+            None,
+            &json!({ "l": [[1, 2, 3], "b"] }),
+        );
+    }
+
+    /// 回归：YAML 曾**从不摘除**陈旧受管键（TOML 会摘），导致配置无限累积。
+    #[test]
+    fn yaml_removes_stale_managed_keys() {
+        assert_semantics(
+            DocFormat::Yaml,
+            "a: 1\nkeep: 1\n",
+            Some(&json!({ "a": 1 })),
+            &json!({}),
+        );
+    }
+
+    /// 回归：TOML 遇到用户的 `[[array-of-tables]]` 曾**直接报错**，
+    /// 使原本可切换的配置无法切换（旧实现能处理）。
+    #[test]
+    fn toml_array_of_tables_does_not_abort() {
+        assert_semantics(
+            DocFormat::Toml,
+            "[m]\nn = \"x\"\n\n[[pl]]\nname = \"p1\"\n",
+            None,
+            &json!({ "m": { "n": "y" }, "pl": [{ "name": "p1" }] }),
+        );
+    }
+
+    /// 回归：TOML 顶层赋表值时曾**连带删除兄弟子表**。
+    #[test]
+    fn toml_table_update_keeps_sibling_subtables() {
+        assert_semantics(
+            DocFormat::Toml,
+            "[mcp.fs]\ncommand = \"npx\"\n\n[mcp.other]\ncommand = \"uvx\"\n",
+            None,
+            &json!({ "mcp": { "fs": { "command": "npx2" }, "other": { "command": "uvx" } } }),
+        );
+    }
+
+    /// 回归：TOML 的嵌套摘除曾误删用户手写子表。
+    #[test]
+    fn toml_nested_removal_keeps_user_subtables() {
+        assert_semantics(
+            DocFormat::Toml,
+            "[mp.custom]\nbase_url = \"https://old\"\n\n[mp.myown]\nbase_url = \"https://mine\"\n",
+            Some(&json!({ "mp": { "custom": { "base_url": "https://old" } } })),
+            &json!({ "model": "gpt-5" }),
+        );
+    }
+}
+
+#[cfg(test)]
+mod key_order_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// 回归：启用 `preserve_order` 后，`Map::remove` 是 `swap_remove`——会把
+    /// 最后一个元素搬到被删位置，打乱剩余键序。本模块承诺保留键序，故必须
+    /// 用 `shift_remove`。
+    #[test]
+    fn removing_managed_keys_keeps_remaining_order() {
+        let live = json!({
+            "a": 1, "m1": "x", "b": 2, "m2": "x", "c": 3
+        });
+        let previous = json!({ "m1": "x", "m2": "x" });
+        let next = json!({});
+
+        let merged = merge_three_way(&live, Some(&previous), &next);
+
+        let keys: Vec<&String> = merged.as_object().unwrap().keys().collect();
+        assert_eq!(
+            keys,
+            vec!["a", "b", "c"],
+            "剩余键序应保持 a,b,c；被打乱说明用了 swap_remove"
+        );
+    }
+
+    /// JSON 渲染路径同样要保序（走的是同一个 `merge_three_way`）。
+    #[test]
+    fn json_rendering_keeps_order_after_removal() {
+        let live = r#"{"z":1,"m":2,"a":3}"#;
+        let out = merge_document(
+            DocFormat::Json,
+            live,
+            Some(&json!({ "m": 2 })),
+            &json!({ "z": 1, "a": 3 }),
+        )
+        .unwrap();
+
+        let z = out.find("\"z\"").unwrap();
+        let a = out.find("\"a\"").unwrap();
+        assert!(z < a, "键序应保留 z 在 a 前:\n{out}");
     }
 }
