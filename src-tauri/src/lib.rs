@@ -62,7 +62,7 @@ pub fn run() {
             commands::main_cmds::switch_profile,
             commands::main_cmds::failover_profile_keys,
             commands::main_cmds::probe_active_profiles,
-            commands::main_cmds::copy_text,
+            commands::clipboard::copy_text,
             commands::main_cmds::list_config_backups,
             commands::main_cmds::restore_config_backup,
             commands::main_cmds::get_status,

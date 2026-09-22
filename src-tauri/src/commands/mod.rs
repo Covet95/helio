@@ -4,6 +4,7 @@
 //! （`pub use` 不会带上 `__cmd__*` 宏生成项）。
 
 pub mod cc_switch;
+pub mod clipboard;
 pub(crate) mod helpers;
 pub mod main_cmds;
 
