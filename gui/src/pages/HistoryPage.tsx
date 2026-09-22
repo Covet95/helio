@@ -1,10 +1,10 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { Alert } from '@/components/common/Alert';
 import { PageHeader } from '../components/common/PageHeader';
 import { Button } from '../components/common/Button';
 import { Spinner } from '../components/common/Spinner';
 import { ConfirmDialog, Modal, Field } from '../components/common/Modal';
-import { RefreshCw, Trash2, Search, Eye } from 'lucide-react';
+import { RefreshCw, Trash2, Search, Eye, X } from 'lucide-react';
 import { tauriApi } from '../lib/tauri';
 import { formatBytes, humanizeError } from '../lib/utils';
 import { SUPPORTED_TOOLS } from '../types';
@@ -36,6 +36,18 @@ export default function HistoryPage() {
   }>(null);
   const [cleanupDays, setCleanupDays] = useState('30');
   const [showCleanup, setShowCleanup] = useState(false);
+  const previewPanelRef = useRef<HTMLDivElement>(null);
+
+  // 预览打开时把焦点移进去（读屏才会念出对话框内容），Esc 关闭。
+  useEffect(() => {
+    if (!preview) return;
+    previewPanelRef.current?.focus();
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setPreview(null);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [preview]);
 
   const key = (m: SessionMeta) => `${m.tool}:${m.id}`;
 
@@ -151,6 +163,7 @@ export default function HistoryPage() {
           <div className="flex max-w-full shrink-0 flex-wrap rounded-md border border-line bg-surface p-0.5">
             {TOOLS.map((t) => (
               <button key={t.id || 'all'} type="button" onClick={() => setTool(t.id)}
+                aria-pressed={tool === t.id}
                 className={`rounded px-3 py-1 text-[12px] font-medium ${tool === t.id ? 'bg-elevated text-ink' : 'text-ink-dim'}`}>
                 {t.label}
               </button>
@@ -159,6 +172,7 @@ export default function HistoryPage() {
           <div className="relative min-w-[140px] flex-1">
             <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-faint" />
             <input value={search} onChange={(e) => setSearch(e.target.value)}
+              aria-label="搜索会话"
               placeholder="搜索 cwd 或标题…"
               className="w-full rounded-md border border-line bg-surface py-1.5 pl-8 pr-3 text-[13px] text-ink outline-none focus:border-accent" />
           </div>
@@ -172,7 +186,13 @@ export default function HistoryPage() {
           <div className="overflow-hidden rounded-lg border border-line bg-card">
             {list.map((m) => (
               <div key={key(m)} className="flex items-center gap-3 border-b border-line px-3.5 py-2.5 last:border-b-0 hover:bg-elevated/45">
-                <input type="checkbox" className="shrink-0" checked={selected.has(key(m))} onChange={() => toggle(m)} />
+                <input
+                  type="checkbox"
+                  className="shrink-0"
+                  checked={selected.has(key(m))}
+                  onChange={() => toggle(m)}
+                  aria-label={`选择 ${m.title ?? m.cwd ?? m.id}`}
+                />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
                     <span className="shrink-0 font-mono text-[10px] text-accent">{m.tool}</span>
@@ -197,12 +217,37 @@ export default function HistoryPage() {
         )}
       </div>
 
+      {/*
+        预览是手写抽屉而非 Modal 组件（要贴右侧、不是居中），所以这里得自己
+        补上 Modal 有的东西：role/aria-modal 让读屏知道这是对话框，Esc 能关，
+        以及打开时把焦点移进来。少了这些，键盘用户打开后按 Esc 没反应、
+        也不知道自己还在不在主页面里。
+      */}
       {preview && (
-        <div className="fixed inset-0 z-50 flex justify-end bg-black/30" onClick={() => setPreview(null)}>
-          <div className="h-full w-full max-w-[480px] overflow-y-auto bg-card p-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <div
+          className="fixed inset-0 z-50 flex justify-end bg-black/30"
+          onClick={() => setPreview(null)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={`会话预览：${preview.meta.title ?? preview.meta.cwd ?? preview.meta.id}`}
+            tabIndex={-1}
+            ref={previewPanelRef}
+            className="h-full w-full max-w-[480px] overflow-y-auto bg-card p-4 shadow-xl outline-none"
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className="mb-3 flex items-center justify-between">
               <div className="text-[13px] font-semibold text-ink">{preview.meta.title ?? preview.meta.cwd}</div>
-              <button type="button" onClick={() => setPreview(null)} className="text-ink-faint hover:text-ink">✕</button>
+              <button
+                type="button"
+                onClick={() => setPreview(null)}
+                aria-label="关闭预览"
+                title="关闭预览（Esc）"
+                className="icon-button"
+              >
+                <X size={16} />
+              </button>
             </div>
             <div className="space-y-3">
               {preview.msgs.length === 0 && <div className="text-[12px] text-ink-faint">无可预览内容</div>}

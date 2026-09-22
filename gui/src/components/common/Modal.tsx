@@ -41,6 +41,54 @@ export function Modal({
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
   }, [onClose, busy]);
+
+  /**
+   * 焦点陷阱：Tab 在对话框内循环，不逃到背后的页面。
+   *
+   * 不这么做的话：模态框在 DOM 里位于页面内容之后，Tab 越过页脚就回到
+   * 侧栏导航——回车切路由 → 页面卸载 → 对话框连同未保存内容一起消失，
+   * 连未保存守卫都来不及触发。这是键盘用户实际会踩到的数据丢失路径。
+   *
+   * 只拦 Tab（不拦其它键），且只有最上层响应，与 Esc 的判断口径一致。
+   */
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Tab') return;
+      const panel = panelRef.current;
+      if (!panel) return;
+      const panels = document.querySelectorAll('[data-modal-panel]');
+      if (panels.length > 0 && panels[panels.length - 1] !== panel) return;
+
+      // 不加可见性过滤：`offsetParent` 在 jsdom 里恒为 null（无布局引擎），
+      // 用它会把所有元素都滤掉、让陷阱静默失效；而且固定定位元素在生产里
+      // 的 offsetParent 也是 null。这里只按「可聚焦」筛选。
+      const focusable = Array.from(
+        panel.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      );
+      if (focusable.length === 0) return;
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement as HTMLElement | null;
+      // 焦点已经在外面（例如刚打开还没进来）→ 拉回第一个。
+      if (!active || !panel.contains(active)) {
+        event.preventDefault();
+        first.focus();
+        return;
+      }
+      if (event.shiftKey && active === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, []);
   useEffect(() => {
     const trigger = document.activeElement as HTMLElement | null;
     return () => {

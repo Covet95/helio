@@ -214,3 +214,87 @@ describe('ConfirmDialog', () => {
     expect(onConfirm).not.toHaveBeenCalled();
   });
 });
+
+describe('Modal — 焦点陷阱', () => {
+  /** 渲染一个带两个可聚焦元素的对话框。 */
+  function renderWithFooter() {
+    render(
+      modal({
+        title: 't',
+        onClose: () => {},
+        footer: React.createElement('button', null, '确定'),
+      }),
+    );
+  }
+
+  it('Tab 从最后一个元素回到第一个（不逃到背后的页面）', () => {
+    renderWithFooter();
+    const buttons = Array.from(document.querySelectorAll('[data-modal-panel] button')) as HTMLElement[];
+    const first = buttons[0];
+    const last = buttons[buttons.length - 1];
+
+    last.focus();
+    expect(document.activeElement).toBe(last);
+    fireEvent.keyDown(document, { key: 'Tab' });
+
+    expect(document.activeElement).toBe(first);
+  });
+
+  it('Shift+Tab 从第一个回到最后一个', () => {
+    renderWithFooter();
+    const buttons = Array.from(document.querySelectorAll('[data-modal-panel] button')) as HTMLElement[];
+    const first = buttons[0];
+    const last = buttons[buttons.length - 1];
+
+    first.focus();
+    fireEvent.keyDown(document, { key: 'Tab', shiftKey: true });
+
+    expect(document.activeElement).toBe(last);
+  });
+
+  it('焦点在面板外时 Tab 拉回面板内', () => {
+    renderWithFooter();
+    const outside = document.createElement('button');
+    document.body.appendChild(outside);
+    outside.focus();
+
+    fireEvent.keyDown(document, { key: 'Tab' });
+
+    const panel = document.querySelector('[data-modal-panel]')!;
+    expect(panel.contains(document.activeElement)).toBe(true);
+    outside.remove();
+  });
+
+  it('嵌套时焦点始终留在内层', () => {
+    // 两层都放**两个以上**可聚焦元素：只有单个元素时 first === last，
+    // 循环是空操作，测不出任何东西。
+    const withFooter = (title: string) =>
+      modal({
+        title,
+        onClose: () => {},
+        footer: React.createElement('button', null, `${title}-确定`),
+      });
+    render(withFooter('outer'));
+    render(withFooter('inner'));
+
+    const panels = document.querySelectorAll('[data-modal-panel]');
+    const outer = panels[0] as HTMLElement;
+    const inner = panels[1] as HTMLElement;
+    const innerButtons = Array.from(inner.querySelectorAll('button')) as HTMLElement[];
+    expect(innerButtons.length).toBeGreaterThanOrEqual(2);
+
+    // 从内层最后一个 Tab：焦点必须还在内层。
+    //
+    // 说明：把「只有最上层响应」那道守卫去掉，这条用例**仍然通过**——
+    // 因为外层的处理器先跑、把焦点绕回外层首元素，内层的处理器随后又把
+    // 它拉回内层首元素，最终落点相同。守卫在这里是纵深防御（避免中间的
+    // 焦点抖动、以及未来某个处理器不再无条件兜底时暴露问题），
+    // 不是这条断言能证伪的。真要钉住它得观测中间态，不值得为此把实现
+    // 拆开——保留断言，但别误以为它在验证那道守卫。
+    innerButtons[innerButtons.length - 1].focus();
+    fireEvent.keyDown(document, { key: 'Tab' });
+
+    expect(inner.contains(document.activeElement)).toBe(true);
+    expect(outer.contains(document.activeElement)).toBe(false);
+  });
+});
