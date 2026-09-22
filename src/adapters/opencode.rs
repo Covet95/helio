@@ -22,60 +22,6 @@ impl OpenCodeAdapter {
         self.config_dir.join("opencode.json")
     }
 
-    /// 去除 JSONC 注释（// 行注释和 /* */ 块注释），简单实现；正确处理字符串内的注释符。
-    /// 可处理转义与块注释边界。
-    fn strip_jsonc_comments(input: &str) -> String {
-        let mut out = String::with_capacity(input.len());
-        let mut chars = input.chars().peekable();
-        let mut in_string = false;
-        let mut escaped = false;
-
-        while let Some(c) = chars.next() {
-            if in_string {
-                out.push(c);
-                if escaped {
-                    escaped = false;
-                } else if c == '\\' {
-                    escaped = true;
-                } else if c == '"' {
-                    in_string = false;
-                }
-                continue;
-            }
-
-            match c {
-                '"' => {
-                    in_string = true;
-                    out.push(c);
-                }
-                '/' if chars.peek() == Some(&'/') => {
-                    // 行注释：跳到行尾
-                    chars.next();
-                    for nc in chars.by_ref() {
-                        if nc == '\n' {
-                            out.push('\n');
-                            break;
-                        }
-                    }
-                }
-                '/' if chars.peek() == Some(&'*') => {
-                    // 块注释：跳到 */
-                    chars.next();
-                    let mut prev = '\0';
-                    for nc in chars.by_ref() {
-                        if prev == '*' && nc == '/' {
-                            break;
-                        }
-                        prev = nc;
-                    }
-                }
-                _ => out.push(c),
-            }
-        }
-
-        out
-    }
-
     /// 从 profile.provider 推导 OpenCode provider id（小写）
     fn provider_id(api_profile: &ApiProfile) -> String {
         Self::normalize_provider_id(&api_profile.provider)
@@ -382,8 +328,8 @@ impl ConfigAdapter for OpenCodeAdapter {
         }
 
         let content = fs::read_to_string(&path).context("Failed to read OpenCode config")?;
-        let stripped = Self::strip_jsonc_comments(&content);
-        serde_json::from_str(&stripped).context("Failed to parse OpenCode config")
+        // JSONC 容错（注释 + 尾随逗号）统一走 `doc` 层，不再各自实现一份。
+        crate::doc::json::parse(&content).context("Failed to parse OpenCode config")
     }
 
     fn validate_profile(&self, api_profile: &ApiProfile) -> Result<()> {
@@ -901,18 +847,30 @@ mod tests {
         );
     }
 
+    /// JSONC 容错的实现已上提到 `doc::json`（覆盖范围更广：注释 + 尾随逗号），
+    /// 这里只验证 OpenCode 的读取路径确实用上了它。
     #[test]
-    fn test_strip_jsonc_comments() {
-        let input = r#"{
+    fn test_read_config_accepts_jsonc() {
+        let (_dir, adapter) = temp_adapter();
+        let path = adapter.config_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{
   // line comment
   "model": "x", /* block */
-  "url": "http://a//b"
-}"#;
-        let out = OpenCodeAdapter::strip_jsonc_comments(input);
-        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+  "url": "http://a//b",
+  "list": [1, 2,],
+}"#,
+        )
+        .unwrap();
+
+        let parsed = adapter.read_config().unwrap();
         assert_eq!(parsed["model"], "x");
         // 字符串内的 // 被保留
         assert_eq!(parsed["url"], "http://a//b");
+        // 尾随逗号也被容忍
+        assert_eq!(parsed["list"], serde_json::json!([1, 2]));
     }
 
     #[test]

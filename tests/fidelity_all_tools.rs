@@ -488,3 +488,91 @@ fn legacy_keys_are_actually_removed_from_disk() {
     })()
     .expect("遗留键清理契约失败");
 }
+
+/// 回归：`~/.claude.json` 是 JSONC 且含 Claude Code 运行时状态，
+/// 早期实现会把它整体替换成 `{"mcpServers": ...}`。
+///
+/// 根因：解析失败就从 `{}` 起步 + 全量写回。`serde_json` 严格解析必然
+/// 拒绝 JSONC，于是用户的键与运行时状态全丢。
+#[test]
+fn claude_aux_jsonc_keeps_runtime_state() {
+    let home = HomeGuard::new();
+
+    (|| -> anyhow::Result<()> {
+        let adapter = get_adapter(TargetApp::ClaudeCode);
+
+        let claude_json = home.path().join(".claude.json");
+        std::fs::write(
+            &claude_json,
+            r#"{
+  // Claude Code 的运行时状态
+  "numStartups": 42,
+  "user_own_key": "keep-me",
+  "projects": { "/my/proj": { "history": [] } }
+}"#,
+        )?;
+
+        let settings = adapter.config_path();
+        std::fs::create_dir_all(settings.parent().context("config dir")?)?;
+        std::fs::write(&settings, "{}")?;
+
+        let shared = serde_json::json!({ "mcpServers": { "fs": { "command": "npx" } } });
+        adapter.apply_auxiliary_config(&shared)?;
+
+        let after = std::fs::read_to_string(&claude_json)?;
+
+        ensure!(after.contains("numStartups"), "运行时状态丢失:\n{after}");
+        ensure!(after.contains("keep-me"), "用户键丢失:\n{after}");
+        ensure!(after.contains("my/proj"), "项目历史丢失:\n{after}");
+        ensure!(after.contains("mcpServers"), "MCP 未写入:\n{after}");
+        ensure!(after.contains("npx"), "MCP 内容未写入:\n{after}");
+
+        Ok(())
+    })()
+    .expect("claude.json 保真契约失败");
+}
+
+/// 回归：`opencode.json` 常是 JSONC，早期实现因解析失败走 fallback，
+/// 导致保真合并在该文件上完全失效。
+#[test]
+fn opencode_jsonc_still_merges() {
+    let _home = HomeGuard::new();
+
+    (|| -> anyhow::Result<()> {
+        let adapter = get_adapter(TargetApp::OpenCode);
+        let path = adapter.config_path();
+        std::fs::create_dir_all(path.parent().context("config dir")?)?;
+        std::fs::write(
+            &path,
+            r#"{
+  // 我的 opencode 配置
+  "$schema": "https://opencode.ai/config.json",
+  "theme": "my-theme",
+  "provider": {}
+}"#,
+        )?;
+
+        let api_profile = profile(TargetApp::OpenCode, "cpa", "https://new.example/v1", "m");
+        let live = adapter.read_config()?;
+        let shared = adapter.extract_shared_config(&live);
+
+        switch_api::adapters::apply_profile_transaction_with_previous(
+            adapter.as_ref(),
+            &api_profile,
+            &shared,
+            None,
+        )?;
+
+        let after = std::fs::read_to_string(&path)?;
+
+        ensure!(after.contains("my-theme"), "用户 theme 丢失:\n{after}");
+        ensure!(after.contains("$schema"), "用户 $schema 丢失:\n{after}");
+        ensure!(
+            after.contains("https://new.example/v1"),
+            "受管 provider 未写入:\n{after}"
+        );
+
+        Ok(())
+    })()
+    .expect("opencode JSONC 合并契约失败");
+}
