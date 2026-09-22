@@ -175,12 +175,33 @@ impl Database {
         Ok(())
     }
 
+    /// 加列；列已存在则视为已完成（迁移必须可重入）。
+    ///
+    /// 不用「执行失败后匹配 `duplicate column name` 文案」的写法：SQLite 对
+    /// 重复列只报通用的 `SQLITE_ERROR`，没有独立的错误码，只能靠措辞判断——
+    /// 而措辞随版本/本地化变化，匹配不上就会把「已存在」误判成真错误，
+    /// 让整个迁移失败。改为先查 `PRAGMA table_info` 再决定，判断依据是结构
+    /// 而不是文案（与 `migrate_drop_model_effort_level` 的做法一致）。
     fn try_add_column(&self, ddl: &str) -> Result<()> {
-        match self.conn.execute(ddl, []) {
-            Ok(_) => Ok(()),
-            Err(e) if e.to_string().contains("duplicate column name") => Ok(()),
-            Err(e) => Err(e.into()),
+        let column = ddl
+            .rsplit(" ADD COLUMN ")
+            .next()
+            .and_then(|rest| rest.split_whitespace().next())
+            .ok_or_else(|| anyhow::anyhow!("无法从 DDL 解析列名：{ddl}"))?;
+        if self.api_profiles_has_column(column)? {
+            return Ok(());
         }
+        self.conn.execute(ddl, [])?;
+        Ok(())
+    }
+
+    /// `api_profiles` 是否已有该列。
+    fn api_profiles_has_column(&self, column: &str) -> Result<bool> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(api_profiles)")?;
+        let found: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(found.iter().any(|name| name == column))
     }
 
     pub(crate) fn migrate_drop_model_effort_level(&self) -> Result<()> {
