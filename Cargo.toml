@@ -49,6 +49,17 @@ tar = "0.4"
 flate2 = "1.0"
 sha2 = "0.10"
 
+# Windows 权限收紧（POSIX mode 在 Windows 上不存在，改用 ACL）。
+# 仅在 Windows 目标下参与编译。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 tempfile = "3.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

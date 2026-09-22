@@ -26,6 +26,42 @@ fn parent_dir(path: &Path) -> PathBuf {
     }
 }
 
+/// 重建 `api_profiles` 整表前**必须**先做的备份。
+///
+/// 这张表装着全部明文 API key。`DROP TABLE` + `RENAME` 的重建流程虽有事务
+/// 保护，但「DROP 成功、COMMIT 前崩溃」会留下无兜底的半状态——所以备份不是
+/// 可选项：**备份失败必须中止迁移**，宁可迁移不做，也不能让旧数据失去退路。
+///
+/// `:memory:` 库没有路径，跳过（本就无持久化数据可丢）。
+///
+/// 备份文件名形如 `db.sqlite.premigrate.<时间戳>.sqlite`，含明文 key，
+/// 因此与常规备份一样按 [`DB_BACKUP_KEEP`] 轮转，避免无限累积。
+fn backup_before_table_rebuild(conn: &rusqlite::Connection) -> Result<()> {
+    let Some(db_path) = conn.path() else {
+        return Ok(());
+    };
+    if db_path == ":memory:" || db_path.is_empty() {
+        return Ok(());
+    }
+
+    let ts = chrono::Local::now().format("%Y%m%d_%H%M%S_%f");
+    let backup = format!("{db_path}.premigrate.{ts}.sqlite");
+    copy_private(Path::new(db_path), Path::new(&backup))
+        .with_context(|| format!("Failed to back up database before migration: {backup}"))?;
+
+    let path = Path::new(db_path);
+    if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+        crate::adapters::backup::cleanup_prefix(
+            &parent_dir(path),
+            &format!("{file_name}.premigrate."),
+            DB_BACKUP_KEEP,
+        )
+        .with_context(|| "Failed to rotate pre-migration backups")?;
+    }
+
+    Ok(())
+}
+
 /// 「导入替换失败，且补偿回滚也失败」的统一构造。
 ///
 /// 必须返回 `RollbackFailed` 这个**标记类型**，而不是 `anyhow::anyhow!` 拼出的
@@ -275,6 +311,8 @@ impl Database {
         if !cols.iter().any(|c| c == "model_effort_level") {
             return Ok(());
         }
+        // 重建整表前备份：这张表装着全部明文 key，备份失败必须中止迁移。
+        backup_before_table_rebuild(&self.conn)?;
         // guard 负责失败时回滚残留事务并恢复 foreign_keys=ON。
         let _guard = ForeignKeysGuard::off(&self.conn)?;
         self.conn.execute_batch(r#"
@@ -344,6 +382,8 @@ impl Database {
             return Ok(());
         }
 
+        // 重建整表前备份：这张表装着全部明文 key，备份失败必须中止迁移。
+        backup_before_table_rebuild(&self.conn)?;
         let _guard = ForeignKeysGuard::off(&self.conn)?;
         self.conn.execute_batch(
             r#"
@@ -431,27 +471,8 @@ impl Database {
             return Ok(());
         }
 
-        // 备份库文件(若是文件库)。:memory: 没有路径，跳过备份。
-        if let Some(db_path) = self.conn.path() {
-            if db_path != ":memory:" && !db_path.is_empty() {
-                let ts = chrono::Local::now().format("%Y%m%d_%H%M%S_%f");
-                let backup = format!("{db_path}.premigrate.{ts}.sqlite");
-                // 迁移会重建整表,备份失败必须中止迁移,否则旧数据无兜底。
-                copy_private(Path::new(db_path), Path::new(&backup)).with_context(|| {
-                    format!("Failed to back up database before migration: {}", backup)
-                })?;
-                // 备份含明文 key，必须轮转；文件名形如 `db.sqlite.premigrate.*`。
-                let path = Path::new(db_path);
-                if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-                    crate::adapters::backup::cleanup_prefix(
-                        &parent_dir(path),
-                        &format!("{file_name}.premigrate."),
-                        DB_BACKUP_KEEP,
-                    )
-                    .with_context(|| "Failed to rotate pre-migration backups")?;
-                }
-            }
-        }
+        // 重建整表前备份：备份失败必须中止迁移，否则旧数据无兜底。
+        backup_before_table_rebuild(&self.conn)?;
 
         // 重建表:新表用复合唯一。注意去 -cc 后缀(仅 target_app 非空、去后缀后同工具不冲突)。
         // 整个重建流程包在单个事务中以保证原子性(防止 DROP 与 RENAME 之间进程被杀留下孤表)。
@@ -1293,10 +1314,19 @@ impl Database {
                 )?;
             }
             None => {
-                // 无 id：按 name 定位，不改名
+                // 无 id：按 (name, target_app) 定位，不改名。
+                //
+                // `target_app` 是必须的谓词：表的唯一约束是
+                // `UNIQUE(name, target_app)`，**不同工具下同名是被允许的**。
+                // 只按 name 更新会把所有同名档案一起改掉（跨工具误写）。
+                let Some(target_app) = profile.target_app.as_ref() else {
+                    return Err(AppError::invalid_input(
+                        "更新 Profile 时若未提供 id，必须同时提供 target_app 以唯一定位",
+                    ));
+                };
                 self.conn.execute(
                     "UPDATE api_profiles SET provider = ?1, api_url = ?2, api_key = ?3,
-                     model_mapping = ?4, model = ?5, reasoning_effort = ?6, context_1m = ?7, target_app = ?8, models = ?9, wire_api = ?10, env_key = ?11, requires_openai_auth = ?12, service_tier = ?13, experimental_bearer_token = ?14, supports_standalone_web_search = ?15, aws_profile = ?16, aws_region = ?17, reasoning_summary = ?18, verbosity = ?19, auth_command = ?20, auth_args = ?21, auth_timeout_ms = ?22, auth_refresh_interval_ms = ?23, auth_cwd = ?24, api_mode = ?25, max_tokens = ?26, api_keys_json = ?27, catalog_models = ?28, opencode_api_mode = ?29, opencode_model_configs = ?30, updated_at = ?31 WHERE name = ?32",
+                     model_mapping = ?4, model = ?5, reasoning_effort = ?6, context_1m = ?7, target_app = ?8, models = ?9, wire_api = ?10, env_key = ?11, requires_openai_auth = ?12, service_tier = ?13, experimental_bearer_token = ?14, supports_standalone_web_search = ?15, aws_profile = ?16, aws_region = ?17, reasoning_summary = ?18, verbosity = ?19, auth_command = ?20, auth_args = ?21, auth_timeout_ms = ?22, auth_refresh_interval_ms = ?23, auth_cwd = ?24, api_mode = ?25, max_tokens = ?26, api_keys_json = ?27, catalog_models = ?28, opencode_api_mode = ?29, opencode_model_configs = ?30, updated_at = ?31 WHERE name = ?32 AND target_app = ?33",
                     params![
                         &profile.provider,
                         &profile.api_url,
@@ -1305,7 +1335,7 @@ impl Database {
                         &profile.model,
                         &profile.codex.reasoning_effort,
                         profile.context_1m.map(|b| b as i64),
-                        profile.target_app.as_ref().map(|t| t.as_str()),
+                        target_app.as_str(),
                         models_json,
                         &profile.codex.wire_api,
                         &profile.codex.env_key,
@@ -1329,7 +1359,8 @@ impl Database {
                         opencode_api_mode,
                         opencode_model_configs_json,
                         now,
-                        &profile.name
+                        &profile.name,
+                        target_app.as_str()
                     ],
                 )?;
             }
@@ -2139,6 +2170,78 @@ mod tests {
         Ok(())
     }
 
+    /// 回归：**每一个**重建整表的迁移都必须先备份。
+    ///
+    /// `migrate_drop_model_effort_level` / `migrate_drop_model_thinking_enabled`
+    /// 与 `migrate_composite_unique` 一样会 `DROP TABLE api_profiles`（这张表
+    /// 装着全部明文 API key），早期只有后者做了备份。同文件另一处迁移的注释
+    /// 写着「迁移会重建整表，备份失败必须中止迁移，否则旧数据无兜底」——
+    /// 这条理由对三者同等适用。
+    ///
+    /// 两个迁移是**依次执行**的，所以「总数 ≥1」会被其中一个掩盖。这里逐个
+    /// 单独触发，断言各自都产出备份。
+    #[test]
+    fn every_table_rebuild_migration_creates_a_backup() -> Result<()> {
+        for (label, extra_column) in [
+            ("model_effort_level", "model_effort_level TEXT"),
+            ("model_thinking_enabled", "model_thinking_enabled INTEGER"),
+        ] {
+            let dir = tempfile::tempdir()?;
+            let db_path = dir.path().join("live.sqlite");
+
+            {
+                let conn = Connection::open(&db_path)?;
+                conn.execute_batch(&format!(
+                    r#"
+                    CREATE TABLE api_profiles (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT NOT NULL, provider TEXT NOT NULL,
+                        api_url TEXT NOT NULL, api_key TEXT NOT NULL,
+                        model_mapping TEXT, model TEXT, reasoning_effort TEXT,
+                        context_1m INTEGER, target_app TEXT, models TEXT,
+                        wire_api TEXT, env_key TEXT, requires_openai_auth INTEGER,
+                        {extra_column},
+                        service_tier TEXT, experimental_bearer_token TEXT,
+                        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+                        UNIQUE(name, target_app)
+                    );
+                    INSERT INTO api_profiles
+                        (name, provider, api_url, api_key, created_at, updated_at)
+                    VALUES ('legacy','openai','https://legacy.example','legacy-key',1,1);
+                    "#
+                ))?;
+            }
+
+            // 打开即触发该迁移。
+            drop(Database::open(&db_path)?);
+
+            let backups = fs::read_dir(dir.path())?
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.file_name()
+                        .to_string_lossy()
+                        .starts_with("live.sqlite.premigrate.")
+                })
+                .count();
+
+            assert!(
+                backups > 0,
+                "含 {label} 列的库触发重建整表迁移时，必须先产出 premigrate 备份"
+            );
+
+            // 数据本身也要还在。
+            let db = Database::open(&db_path)?;
+            let profile = db
+                .list_profiles()?
+                .into_iter()
+                .find(|p| p.name == "legacy")
+                .expect("迁移后旧数据应保留");
+            assert_eq!(profile.api_key, "legacy-key", "迁移不应丢数据（{label}）");
+        }
+
+        Ok(())
+    }
+
     #[test]
     fn test_premigrate_backups_are_rotated() -> Result<()> {
         let dir = tempfile::tempdir()?;
@@ -2543,6 +2646,67 @@ mod tests {
         let active = db.get_active_profile(TargetApp::ClaudeCode)?;
         assert!(active.is_some());
         assert_eq!(active.unwrap().profile_id, id);
+
+        Ok(())
+    }
+
+    /// 回归：无 id 时按 name 定位，**必须同时匹配 target_app**。
+    ///
+    /// 表的唯一约束是 `UNIQUE(name, target_app)`——不同工具下同名是被允许的。
+    /// 早期实现只写 `WHERE name = ?`，会把所有同名档案一起改掉（跨工具误写）。
+    #[test]
+    fn update_profile_without_id_does_not_cross_tools() -> Result<()> {
+        let db = Database::open(":memory:")?;
+
+        // 两个工具下各有一个同名档案，但 key 不同。
+        let make = |tool: TargetApp, key: &str| ApiProfile {
+            name: "shared-name".to_string(),
+            provider: "anthropic".to_string(),
+            api_url: "https://api.example.com/v1".to_string(),
+            api_key: key.to_string(),
+            target_app: Some(tool),
+            ..Default::default()
+        };
+        db.add_profile(&make(TargetApp::ClaudeCode, "sk-claude"))?;
+        db.add_profile(&make(TargetApp::Codex, "sk-codex"))?;
+
+        // 无 id 更新 Codex 那条：只有它该变。
+        db.update_profile(&ApiProfile {
+            id: None,
+            api_key: "sk-codex-updated".to_string(),
+            ..make(TargetApp::Codex, "sk-codex")
+        })?;
+
+        let claude = db.get_profile_by_name_and_target("shared-name", TargetApp::ClaudeCode)?;
+        let codex = db.get_profile_by_name_and_target("shared-name", TargetApp::Codex)?;
+
+        assert_eq!(
+            claude.api_key, "sk-claude",
+            "同名但不同工具的档案不应被改动（跨工具误写）"
+        );
+        assert_eq!(codex.api_key, "sk-codex-updated", "目标档案应已更新");
+
+        Ok(())
+    }
+
+    /// 回归：无 id 且无 target_app 时无法唯一定位，必须报错而不是猜。
+    #[test]
+    fn update_profile_without_id_or_target_app_is_rejected() -> Result<()> {
+        let db = Database::open(":memory:")?;
+
+        let err = db
+            .update_profile(&ApiProfile {
+                id: None,
+                name: "who-knows".to_string(),
+                provider: "anthropic".to_string(),
+                api_url: "https://api.example.com/v1".to_string(),
+                api_key: "sk-x".to_string(),
+                target_app: None,
+                ..Default::default()
+            })
+            .expect_err("缺少定位信息应报错");
+
+        assert_eq!(err.kind, crate::error::ErrorKind::InvalidInput);
 
         Ok(())
     }
