@@ -57,6 +57,12 @@ export function normalizeSubmit(
     };
   }
 
+  // 仅 Codex 使用的字段。非 Codex 工具必须清空——后端只有 codex 适配器读它们，
+  // 而 DB 里所有工具共用同一批列：留着就是脏数据（例如 Claude 档案里躺着
+  // 一个对它毫无作用的 env_key）。UI 层已按工具隐藏这些输入，但这里是
+  // 「提交前的最后一道」——表单状态、扫描结果、未来新增入口都汇到这一处。
+  const codexOnly = <T,>(v: T): T | undefined => (isCodex ? v : undefined);
+
   const value: NormalizedSubmit = {
     ...normalized,
     // Bedrock 走 AWS 凭据链，不写 URL/Key/Key 池。
@@ -64,21 +70,25 @@ export function normalizeSubmit(
     api_key: usesBedrock ? '' : normalized.api_key,
     api_keys: usesBedrock ? undefined : normalized.api_keys,
     wire_api: normalizeWireApi(normalized.wire_api, tool),
-    env_key: usesBedrock || usesAuthCmd ? undefined : normalized.env_key,
-    experimental_bearer_token: usesAuthCmd ? undefined : normalized.experimental_bearer_token,
-    requires_openai_auth: usesAuthCmd ? undefined : normalized.requires_openai_auth,
-    auth_command: usesAuthCmd ? normalized.auth_command?.trim() || undefined : undefined,
-    auth_args: usesAuthCmd ? normalizeAuthArgs(normalized.auth_args) : undefined,
-    auth_timeout_ms: usesAuthCmd
-      ? positiveIntOrUndefined(normalized.auth_timeout_ms)
-      : undefined,
-    auth_refresh_interval_ms: usesAuthCmd
-      ? positiveIntOrUndefined(normalized.auth_refresh_interval_ms)
-      : undefined,
-    auth_cwd: usesAuthCmd ? normalized.auth_cwd?.trim() || undefined : undefined,
-    supports_standalone_web_search: usesBedrock
-      ? undefined
-      : normalized.supports_standalone_web_search || undefined,
+    env_key: codexOnly(usesBedrock || usesAuthCmd ? undefined : normalized.env_key),
+    experimental_bearer_token: codexOnly(
+      usesAuthCmd ? undefined : normalized.experimental_bearer_token,
+    ),
+    requires_openai_auth: codexOnly(
+      usesAuthCmd ? undefined : normalized.requires_openai_auth,
+    ),
+    auth_command: codexOnly(usesAuthCmd ? normalized.auth_command?.trim() || undefined : undefined),
+    auth_args: codexOnly(usesAuthCmd ? normalizeAuthArgs(normalized.auth_args) : undefined),
+    auth_timeout_ms: codexOnly(
+      usesAuthCmd ? positiveIntOrUndefined(normalized.auth_timeout_ms) : undefined,
+    ),
+    auth_refresh_interval_ms: codexOnly(
+      usesAuthCmd ? positiveIntOrUndefined(normalized.auth_refresh_interval_ms) : undefined,
+    ),
+    auth_cwd: codexOnly(usesAuthCmd ? normalized.auth_cwd?.trim() || undefined : undefined),
+    supports_standalone_web_search: codexOnly(
+      usesBedrock ? undefined : normalized.supports_standalone_web_search || undefined,
+    ),
     target_app: tool,
     catalog_models: normalizeCatalog(normalized.catalog_models, tool),
     model_configs:

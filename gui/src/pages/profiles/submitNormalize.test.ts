@@ -143,21 +143,43 @@ describe('normalizeSubmit — 按 tool 清理字段', () => {
     }
   });
 
-  it('非 Codex 工具会透传 env_key（**已知不一致**，行为已被钉住）', () => {
-    // 这里记录一处**预先存在**的行为不一致，重构只是如实保留、未改变它：
-    //
-    //   - 本表单：非 codex 工具的 env_key 原样提交；
-    //   - ImportPage：`env_key: tool === 'codex' ? ... : undefined`，做了门控；
-    //   - 后端：只有 codex 适配器读 env_key，但 DB 里所有工具共用同一列。
-    //
-    // 后果：从表单保存一个 Claude 档案时，填过的 env_key 会存进 codex 专属列，
-    // 而它对该工具毫无作用——属于脏数据。
-    //
-    // 修它需要改行为（前端门控或后端忽略），超出本次「纯提取」的范围，
-    // 因此先钉住现状。若将来决定统一，把下面的断言改成 toBeUndefined 即可。
+  it('非 Codex 工具一律清空 Codex 专属字段', () => {
+    // 这些字段后端只有 codex 适配器读，而 DB 里所有工具共用同一批列——
+    // 留给非 Codex 工具就是脏数据。ImportPage 早已做门控，本表单此前没有，
+    // 两处行为不一致；现在统一在 `submitNormalize` 收口。
     for (const tool of TOOLS.filter((t) => t !== 'codex')) {
-      const value = ok(normalizeSubmit(form({ env_key: 'ENV' }), tool));
-      expect(value.env_key, `${tool} 当前会透传 env_key`).toBe('ENV');
+      const value = ok(
+        normalizeSubmit(
+          form({
+            env_key: 'ENV',
+            experimental_bearer_token: 'tok',
+            requires_openai_auth: true,
+            auth_command: 'cmd',
+            auth_args: ['a'],
+            auth_timeout_ms: 5000,
+            auth_refresh_interval_ms: 1000,
+            auth_cwd: '/tmp',
+            supports_standalone_web_search: true,
+            catalog_models: [{ slug: 'm' }],
+          }),
+          tool,
+        ),
+      );
+
+      for (const [field, actual] of Object.entries({
+        env_key: value.env_key,
+        experimental_bearer_token: value.experimental_bearer_token,
+        requires_openai_auth: value.requires_openai_auth,
+        auth_command: value.auth_command,
+        auth_args: value.auth_args,
+        auth_timeout_ms: value.auth_timeout_ms,
+        auth_refresh_interval_ms: value.auth_refresh_interval_ms,
+        auth_cwd: value.auth_cwd,
+        supports_standalone_web_search: value.supports_standalone_web_search,
+        catalog_models: value.catalog_models,
+      })) {
+        expect(actual, `${tool} 的 ${field} 应为 undefined`).toBeUndefined();
+      }
     }
   });
 
