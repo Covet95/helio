@@ -114,16 +114,31 @@ export default function ProfilesPage() {
 
   const runDedup = async () => {
     setFeedback(null);
+    const keepNote = `保留：${dupPlan.keep.map((p) => p.name).join('、') || '—'}`;
+    // 逐个删并记下失败的——原实现遇到第一个失败就抛出，只报「去重失败」，
+    // 而前面几个**已经删掉了**，用户无从知道现在剩什么。批量删除同理。
+    const failures: string[] = [];
+    let deleted = 0;
     try {
       for (const p of dupPlan.remove) {
-        await tauriApi.deleteProfile(p.target_app ?? targetApp, p.name);
+        try {
+          await tauriApi.deleteProfile(p.target_app ?? targetApp, p.name);
+          deleted += 1;
+        } catch (e) {
+          failures.push(`${p.name}（${humanizeError(e)}）`);
+        }
       }
-      setFeedback({
-        kind: 'success',
-        text: `已清理 ${dupPlan.remove.length} 个重复档案（保留：${dupPlan.keep.map((p) => p.name).join('、') || '—'}）`,
-      });
-    } catch (e) {
-      setFeedback({ kind: 'error', text: `去重失败：${humanizeError(e)}` });
+      if (failures.length === 0) {
+        setFeedback({
+          kind: 'success',
+          text: `已清理 ${deleted} 个重复档案（${keepNote}）`,
+        });
+      } else {
+        setFeedback({
+          kind: 'error',
+          text: `已清理 ${deleted} 个，${failures.length} 个失败：${failures.join('；')}（${keepNote}）`,
+        });
+      }
     } finally {
       await useStore.getState().refresh();
       setDedupConfirm(false);
