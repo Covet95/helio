@@ -10,6 +10,7 @@ pub(crate) mod helpers;
 pub mod import_export;
 pub mod main_cmds;
 pub mod scan;
+pub mod status;
 
 pub use main_cmds::AppState;
 /// 错误类型定义在核心 crate（`switch_api::error`），因为错误语义是在那一层
