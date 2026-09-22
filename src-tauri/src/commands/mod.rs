@@ -7,6 +7,7 @@ pub mod cc_switch;
 pub mod clipboard;
 pub mod codex_raw;
 pub(crate) mod helpers;
+pub mod import_export;
 pub mod main_cmds;
 pub mod scan;
 

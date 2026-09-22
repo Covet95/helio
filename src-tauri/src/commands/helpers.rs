@@ -118,3 +118,9 @@ pub(crate) fn default_provider(target: TargetApp) -> String {
     }
     .to_string()
 }
+
+/// Helio 数据库的默认位置。多个模块（导入导出、状态查询）都要用它，
+/// 放在 helpers 避免各自拼路径。
+pub(crate) fn default_db_path() -> Result<std::path::PathBuf, AppError> {
+    Ok(home_dir()?.join(".switch-api").join("db.sqlite"))
+}
