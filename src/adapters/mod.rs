@@ -124,6 +124,11 @@ pub trait ConfigAdapter {
             }
         };
 
+        // 把「live 有、merged 无」的顶层键作为删除意图并入 previous_managed。
+        // 这里才能拿到 live 文档——`shared_config` 已剥离凭据，算不出遗留键。
+        let previous_managed = merge_removal_intent(&live_value, next_managed, previous_managed);
+        let previous_managed = previous_managed.as_ref();
+
         // TOML 与 YAML 都有注释，走文本级合并才能保住它们——这条路径自行
         // 序列化并写盘。JSON 无注释概念，值级合并后委托给适配器自己的
         // `write_config`，以保留它各自的缩进/排版约定。
@@ -261,6 +266,55 @@ pub fn apply_profile_transaction_with_previous(
         return Err(error);
     }
     Ok(())
+}
+
+/// 把「live 里有、merged 里没有」的**顶层键**并入 `previous_managed`，
+/// 让三路合并摘掉它们。
+///
+/// ## 为什么需要这一步
+///
+/// `merge_config` 会**无条件删除**某些键（清理历史遗留）：Codex 删顶层
+/// `api_key`/`aws_profile`/`aws_region`，Claude 删 `settings.json` 里的旧
+/// `mcpServers`。
+///
+/// 这类删除无法被三路合并表达：`previous_managed` 由 `merge_config` 推导，
+/// 它同样不含这些键，于是 `remove_covered` 找不到可摘路径，遗留键**永久残留**。
+/// （实测：旧实现会清掉 `api_key`，保真路径把它留下——真回归。）
+///
+/// 差集必须拿 **live 文档**算，不能用 `shared_config`：后者经
+/// `extract_shared_config` 已剥离凭据，`api_key` 之类的键在它里面根本不存在，
+/// 算不出来。
+///
+/// 只在**顶层**做差集：嵌套结构里「live 有而 merged 无」通常意味着用户手写的
+/// 内容，删掉会误伤；而遗留键清理都是顶层场景。
+pub fn merge_removal_intent(
+    live_doc: &serde_json::Value,
+    merged: &serde_json::Value,
+    previous_managed: Option<&serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let (Some(live_map), Some(merged_map)) = (live_doc.as_object(), merged.as_object()) else {
+        return previous_managed.cloned();
+    };
+
+    let removed: serde_json::Map<String, serde_json::Value> = live_map
+        .iter()
+        .filter(|(key, _)| !merged_map.contains_key(*key))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+
+    if removed.is_empty() {
+        return previous_managed.cloned();
+    }
+
+    let mut merged_previous = previous_managed
+        .cloned()
+        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+    if let Some(map) = merged_previous.as_object_mut() {
+        for (key, value) in removed {
+            map.insert(key, value);
+        }
+    }
+    Some(merged_previous)
 }
 
 /// 解析切换时应写入的共享配置（API 凭据除外）。
@@ -1072,5 +1126,88 @@ mod tests {
         assert_eq!(resolved["db_only"], 1);
         assert_eq!(resolved["mcp_servers"]["old"]["command"], "x");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod removal_intent_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// live 里有、merged 里没有的顶层键 → 必须并入 previous_managed，
+    /// 使三路合并摘掉它们。
+    ///
+    /// 回归：`merge_config` 会无条件删除历史遗留键（Codex 的顶层
+    /// `api_key`/`aws_profile`）。这类删除原先无法被三路合并表达——
+    /// `previous_managed` 由 merge_config 推导，同样不含这些键，于是遗留键
+    /// **永久残留**（旧实现会清掉，属真回归）。
+    #[test]
+    fn live_only_keys_become_removal_intent() {
+        let live = json!({ "model": "seed", "api_key": "legacy", "aws_profile": "legacy" });
+        let merged = json!({ "model": "new" });
+
+        let intent = merge_removal_intent(&live, &merged, None).expect("应有删除意图");
+
+        assert!(intent.get("api_key").is_some(), "api_key 应进入删除意图");
+        assert!(
+            intent.get("aws_profile").is_some(),
+            "aws_profile 应进入删除意图"
+        );
+        assert!(
+            intent.get("model").is_none(),
+            "merged 仍有的键不应进删除意图"
+        );
+
+        // 走一遍合并，确认遗留键确实被摘掉。
+        let out = crate::doc::merge_document(
+            crate::doc::DocFormat::Json,
+            &live.to_string(),
+            Some(&intent),
+            &merged,
+        )
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(
+            parsed.get("api_key").is_none(),
+            "遗留 api_key 应被清理：{out}"
+        );
+        assert!(
+            parsed.get("aws_profile").is_none(),
+            "遗留 aws_profile 应被清理：{out}"
+        );
+        assert_eq!(parsed["model"], json!("new"));
+    }
+
+    /// 无遗留键时不应凭空造出删除意图（避免误删用户内容）。
+    #[test]
+    fn no_intent_when_nothing_removed() {
+        let live = json!({ "model": "a", "user_key": "keep" });
+        let merged = json!({ "model": "b", "user_key": "keep" });
+
+        assert!(merge_removal_intent(&live, &merged, None).is_none());
+    }
+
+    /// 已有 previous_managed 时，删除意图应**并入**而非覆盖。
+    #[test]
+    fn intent_merges_with_existing_previous() {
+        let live = json!({ "api_key": "legacy", "model": "seed" });
+        let merged = json!({ "model": "new" });
+        let previous = json!({ "service_tier": "fast" });
+
+        let intent = merge_removal_intent(&live, &merged, Some(&previous)).unwrap();
+
+        assert!(intent.get("service_tier").is_some(), "原有受管片段应保留");
+        assert!(intent.get("api_key").is_some(), "删除意图应并入");
+    }
+
+    /// 嵌套结构不做差集——「live 有而 merged 无」在嵌套层通常意味着用户
+    /// 手写内容，删掉会误伤。
+    #[test]
+    fn nested_differences_are_not_treated_as_removals() {
+        let live = json!({ "provider": { "user_extra": "keep", "managed": "old" } });
+        let merged = json!({ "provider": { "managed": "new" } });
+
+        let intent = merge_removal_intent(&live, &merged, None);
+        assert!(intent.is_none(), "嵌套差异不应产生删除意图");
     }
 }

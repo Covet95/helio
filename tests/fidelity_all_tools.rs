@@ -440,3 +440,51 @@ fn non_object_live_file_is_replaced_not_crashed() {
     })()
     .expect("非对象 live 文件处理失败");
 }
+
+/// 回归：`merge_config` 的无条件删除必须真的落到文件上。
+///
+/// Codex 的 `merge_config` 会清掉历史遗留的顶层 `api_key`/`aws_profile`。
+/// 这类删除无法被三路合并表达（`previous_managed` 由同一个函数推导，同样
+/// 不含这些键），必须靠 `merge_removal_intent` 注入删除意图。
+///
+/// 这条走**真实事务路径**——单测 helper 通过不代表接线正确（踩过）。
+#[test]
+fn legacy_keys_are_actually_removed_from_disk() {
+    let _home = HomeGuard::new();
+
+    (|| -> anyhow::Result<()> {
+        let adapter = get_adapter(TargetApp::Codex);
+        let path = adapter.config_path();
+        std::fs::create_dir_all(path.parent().context("config dir")?)?;
+
+        // 用户文件里有历史版本误写入的遗留键。
+        std::fs::write(
+            &path,
+            "model = \"seed\"\napi_key = \"legacy-key\"\naws_profile = \"legacy\"\naws_region = \"us-east-1\"\n",
+        )?;
+
+        let api_profile = profile(TargetApp::Codex, "custom", "https://new.example/v1", "m");
+        let live = adapter.read_config()?;
+        let shared = adapter.extract_shared_config(&live);
+
+        switch_api::adapters::apply_profile_transaction_with_previous(
+            adapter.as_ref(),
+            &api_profile,
+            &shared,
+            None,
+        )?;
+
+        let after = std::fs::read_to_string(&path)?;
+
+        ensure!(!after.contains("legacy-key"), "遗留 api_key 未被清理:\n{after}");
+        ensure!(!after.contains("aws_profile"), "遗留 aws_profile 未被清理:\n{after}");
+        ensure!(!after.contains("aws_region"), "遗留 aws_region 未被清理:\n{after}");
+        ensure!(
+            after.contains("https://new.example/v1"),
+            "受管字段应写入:\n{after}"
+        );
+
+        Ok(())
+    })()
+    .expect("遗留键清理契约失败");
+}
