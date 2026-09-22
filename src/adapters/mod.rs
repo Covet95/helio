@@ -124,25 +124,28 @@ pub trait ConfigAdapter {
             }
         };
 
-        // TOML 走文本级合并以保住注释；其余格式委托给适配器自己的写盘逻辑。
-        if format == crate::doc::DocFormat::Toml {
-            if let Some(parent) = path.parent() {
-                crate::utils::secure_fs::ensure_private_dir(parent)
-                    .context("Failed to create config directory")?;
+        // TOML 与 YAML 都有注释，走文本级合并才能保住它们——这条路径自行
+        // 序列化并写盘。JSON 无注释概念，值级合并后委托给适配器自己的
+        // `write_config`，以保留它各自的缩进/排版约定。
+        match format {
+            crate::doc::DocFormat::Toml | crate::doc::DocFormat::Yaml => {
+                if let Some(parent) = path.parent() {
+                    crate::utils::secure_fs::ensure_private_dir(parent)
+                        .context("Failed to create config directory")?;
+                }
+                let content =
+                    crate::doc::merge_document(format, &live_text, previous_managed, next_managed)
+                        .with_context(|| format!("Failed to merge {}", path.display()))?;
+                crate::utils::secure_fs::atomic_write_private(&path, content.as_bytes())
+                    .with_context(|| format!("Failed to write {}", path.display()))?;
+                Ok(())
             }
-            let content = crate::doc::toml::merge_json_into_toml(
-                &live_text,
-                previous_managed,
-                next_managed,
-            )
-            .with_context(|| format!("Failed to merge {}", path.display()))?;
-            crate::utils::secure_fs::atomic_write_private(&path, content.as_bytes())
-                .with_context(|| format!("Failed to write {}", path.display()))?;
-            return Ok(());
+            crate::doc::DocFormat::Json => {
+                let merged =
+                    crate::doc::merge_three_way(&live_value, previous_managed, next_managed);
+                self.write_config(&merged)
+            }
         }
-
-        let merged = crate::doc::merge_three_way(&live_value, previous_managed, next_managed);
-        self.write_config(&merged)
     }
 
     /// 主配置文件的格式。决定保真合并走哪条路径。

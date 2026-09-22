@@ -230,11 +230,11 @@ fn every_tool_keeps_user_content_on_switch() {
             &profile(TargetApp::ZCode, "custom", "https://new.example/v1", "m"),
         )?;
 
-        // ---------------- Hermes：YAML（值级合并，注释不保真） ----------------
+        // ---------------- Hermes：YAML（保格式合并，注释也保真） ----------------
         check_tool(
             TargetApp::Hermes,
-            "user_setting: keep-me\nproviders: {}\n",
-            &["user_setting", "keep-me"],
+            "# 手写注释\nuser_setting: keep-me\nproviders: {}\n",
+            &["# 手写注释", "user_setting", "keep-me"],
             &profile(TargetApp::Hermes, "custom", "https://new.example/v1", "m"),
         )?;
 

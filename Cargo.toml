@@ -23,6 +23,9 @@ serde_json = { version = "1.0", features = ["preserve_order"] }
 toml = "0.8"
 # 格式保真的 TOML 编辑（保留注释/键序）；`toml` 仅用于值级读写。
 toml_edit = "0.22"
+# 格式保真的 YAML 编辑（保留注释）。serde_yaml 已 deprecated，仅保留作
+# 值级回退，新代码走 yaml_edit。
+yaml-edit = "0.3"
 serde_yaml = "0.9"
 
 # Time

@@ -33,6 +33,7 @@ use serde_json::Value;
 
 pub mod json;
 pub mod toml;
+pub mod yaml;
 
 /// 文档格式。新增工具时在此登记，并在 [`parse`] / [`render`] 中分派。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,16 +126,10 @@ pub fn merge_document(
 ) -> Result<String> {
     match format {
         DocFormat::Toml => toml::merge_json_into_toml(live_text, previous_managed, next_managed),
+        DocFormat::Yaml => yaml::merge_documents(live_text, previous_managed, next_managed),
         DocFormat::Json => {
             let live = parse(DocFormat::Json, live_text)?;
             json::render(&merge_three_way(&live, previous_managed, next_managed))
-        }
-        DocFormat::Yaml => {
-            let live = parse(DocFormat::Yaml, live_text)?;
-            render(
-                DocFormat::Yaml,
-                &merge_three_way(&live, previous_managed, next_managed),
-            )
         }
     }
 }
