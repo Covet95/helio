@@ -1090,6 +1090,53 @@ impl ConfigAdapter for CodexAdapter {
         Ok(())
     }
 
+    fn supports_fidelity_write(&self) -> bool {
+        true
+    }
+
+    /// 保真写入：以 live `config.toml` 为基底做三路合并，保留用户手写的
+    /// 注释、键序与未受管字段。
+    ///
+    /// 与 [`Self::write_config`] 的区别只在「基底」：旧实现把整份 config 重新
+    /// 序列化（用户的注释、空行、键序全丢），这里只动受管片段覆盖到的键。
+    ///
+    /// `previous_managed` 为 `None` 表示首次切换：此时只叠加、不摘除，
+    /// 避免在尚无历史快照时误删用户配置。
+    fn write_config_merged(
+        &self,
+        next_managed: &serde_json::Value,
+        previous_managed: Option<&serde_json::Value>,
+    ) -> Result<()> {
+        let path = self.config_path();
+
+        if let Some(parent) = path.parent() {
+            ensure_private_dir(parent).context("Failed to create Codex config directory")?;
+        }
+
+        let live_text = if path.exists() {
+            fs::read_to_string(&path).context("Failed to read Codex config")?
+        } else {
+            String::new()
+        };
+
+        let content = if live_text.trim().is_empty() {
+            // 无 live 文件：直接落盘受管内容，无需合并。
+            let toml_value = Self::json_to_toml(next_managed)?;
+            toml::to_string_pretty(&toml_value).context("Failed to serialize Codex TOML")?
+        } else {
+            crate::doc::toml::merge_json_into_toml(
+                &live_text,
+                previous_managed,
+                next_managed,
+            )
+            .context("Failed to merge Codex config.toml")?
+        };
+
+        atomic_write_private(&path, content.as_bytes()).context("Failed to write Codex config")?;
+
+        Ok(())
+    }
+
     fn backup_config(&self) -> Result<PathBuf> {
         let path = self.config_path();
 

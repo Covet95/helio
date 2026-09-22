@@ -69,6 +69,28 @@ pub trait ConfigAdapter {
     /// 原子写入配置
     fn write_config(&self, config: &serde_json::Value) -> Result<()>;
 
+    /// 三路合并写入：以 live 文件为基底，摘掉 `previous_managed` 的覆盖，
+    /// 再叠加 `next_managed`。**保留用户手写的注释、键序与未受管字段。**
+    ///
+    /// 默认实现退化为「直接整体写入 `next_managed`」，即旧行为——尚未迁移的
+    /// 适配器无需改动即可继续工作。迁移完成的适配器应覆盖本方法，让写入走
+    /// [`crate::doc`] 的保真路径。
+    ///
+    /// `previous_managed` 为 `None` 表示首次切换（无可摘除的历史）。
+    fn write_config_merged(
+        &self,
+        next_managed: &serde_json::Value,
+        _previous_managed: Option<&serde_json::Value>,
+    ) -> Result<()> {
+        self.write_config(next_managed)
+    }
+
+    /// 本适配器是否已迁移到保真写入路径。用于事务层决定是否需要
+    /// 额外的语义校验分支；未迁移者行为与旧版完全一致。
+    fn supports_fidelity_write(&self) -> bool {
+        false
+    }
+
     /// 备份配置
     fn backup_config(&self) -> Result<PathBuf>;
 
@@ -140,12 +162,28 @@ pub fn apply_profile_transaction(
     api_profile: &ApiProfile,
     shared_config: &serde_json::Value,
 ) -> Result<()> {
+    apply_profile_transaction_with_previous(adapter, api_profile, shared_config, None)
+}
+
+/// 带 `previous_managed` 的事务入口。
+///
+/// `previous_managed` 是**上次切换时写入的受管片段**，用于在保真写入路径上
+/// 摘除「上次受管、本次不再受管」的字段。为 `None` 时等价于首次切换：
+/// 只叠加、不摘除。
+///
+/// 未迁移到保真路径的适配器会忽略该参数（默认实现退化为整体写入）。
+pub fn apply_profile_transaction_with_previous(
+    adapter: &dyn ConfigAdapter,
+    api_profile: &ApiProfile,
+    shared_config: &serde_json::Value,
+    previous_managed: Option<&serde_json::Value>,
+) -> Result<()> {
     let snapshots = adapter.snapshot_files()?;
     let merged = adapter.merge_config(api_profile, shared_config);
     // 写盘前语义校验：不通过则直接走快照回滚，避免残缺配置落地。
     adapter.verify_merged_config(&merged, api_profile)?;
     if let Err(error) = adapter
-        .write_config(&merged)
+        .write_config_merged(&merged, previous_managed)
         .and_then(|_| adapter.apply_api_credentials(api_profile))
         .and_then(|_| adapter.apply_auxiliary_config(shared_config))
     {
@@ -223,6 +261,7 @@ pub fn apply_profile_configuration(
     api_profile: &ApiProfile,
     shared_config: &serde_json::Value,
     create_backup: bool,
+    previous_managed: Option<&serde_json::Value>,
 ) -> Result<ProfileApplicationResult> {
     let adapter = get_adapter(target_app);
     adapter.validate_profile(api_profile)?;
@@ -231,11 +270,40 @@ pub fn apply_profile_configuration(
     } else {
         None
     };
-    apply_profile_transaction(adapter.as_ref(), api_profile, shared_config)?;
+    apply_profile_transaction_with_previous(
+        adapter.as_ref(),
+        api_profile,
+        shared_config,
+        previous_managed,
+    )?;
     Ok(ProfileApplicationResult {
         backup_path,
         config_path: adapter.config_path(),
     })
+}
+
+/// 推导「上次写入的受管片段」，供保真写入路径摘除陈旧字段。
+///
+/// 做法：把**上一个 active Profile** 对当前共享配置跑一遍 `merge_config`，
+/// 结果就是「若它此刻被应用，Helio 会写入的内容」。因为两侧共用同一份
+/// `shared_config`，两份合并结果的共享部分完全相同，差集恰好是受管字段。
+///
+/// 上一个 Profile 不存在（首次切换）或已被删除时返回 `None`——此时保真路径
+/// 退化为纯叠加，不会摘除 live 中的任何内容。
+///
+/// 已知取舍：按**路径**摘除、不比对值。若用户手改过某个受管字段，切换时它
+/// 仍会被摘除（受管字段归 Helio 所有）。这样做的收益是陈旧字段不会无限累积。
+pub fn derive_previous_managed(
+    target_app: TargetApp,
+    previous_active: Option<&ApiProfile>,
+    shared_config: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let adapter = get_adapter(target_app);
+    if !adapter.supports_fidelity_write() {
+        return None;
+    }
+    let previous = previous_active?;
+    Some(adapter.merge_config(previous, shared_config))
 }
 
 /// 一次完整的配置切换（GUI / 托盘共用入口）：
@@ -258,6 +326,9 @@ pub fn apply_profile_switch(
         .id
         .ok_or_else(|| anyhow::anyhow!("Profile '{}' has no id", api_profile.name))?;
     let adapter = get_adapter(target_app);
+    // 切换前的 active Profile：既用于「制造 active != target 窗口」的判定，
+    // 也用于推导上次写入的受管片段。必须在任何写操作之前取。
+    let previous_active_profile = db.get_active_profile_full(target_app)?;
     let previous_opencode_state = if target_app == TargetApp::OpenCode {
         Some(db.get_opencode_managed_models()?)
     } else {
@@ -311,19 +382,27 @@ pub fn apply_profile_switch(
 
         // 制造 `active != target` 窗口：仅当当前 active 已是目标时需要。
         // 不同 profile 之间切换时 active 本来就不是目标，无需动。
-        let already_active = db
-            .get_active_profile(target_app)?
-            .map(|a| a.profile_id == profile_id)
-            .unwrap_or(false);
+        let already_active = previous_active_profile
+            .as_ref()
+            .and_then(|profile| profile.id)
+            .is_some_and(|id| id == profile_id);
         if already_active {
             db.clear_active_profile(target_app)?;
         }
         db.save_shared_config(target_app, effective_shared_config.clone())?;
+        // 上一个 active Profile 必须在写盘前取——切换成功后 active 已指向新档案。
+        // 它的 merge 结果即「上次写入的受管片段」，供保真路径摘除陈旧字段。
+        let previous_managed = derive_previous_managed(
+            target_app,
+            previous_active_profile.as_ref(),
+            &effective_shared_config,
+        );
         let applied = apply_profile_configuration(
             target_app,
             api_profile,
             &effective_shared_config,
             create_backup,
+            previous_managed.as_ref(),
         )?;
         if let Some(state) = next_opencode_state {
             db.replace_opencode_managed_models(&state)?;

@@ -38,17 +38,125 @@ pub fn merge_documents(
     previous_managed_text: Option<&str>,
     next_managed_text: &str,
 ) -> Result<String> {
+    let previous_value = match previous_managed_text {
+        Some(text) if !text.trim().is_empty() => Some(parse(text)?),
+        _ => None,
+    };
+    let next_value = if next_managed_text.trim().is_empty() {
+        Value::Object(serde_json::Map::new())
+    } else {
+        parse(next_managed_text)?
+    };
+
+    merge_json_into_toml(live_text, previous_value.as_ref(), &next_value)
+}
+
+/// 三路合并的 TOML 实现：`live` 文本 + JSON 表达的前后受管片段。
+///
+/// 受管片段用 **JSON 值**而非 TOML 文本表达，原因是删除语义：
+/// 「上次写了 `model_context_window`、这次不写」必须能表达为「删掉它」。
+/// TOML 文本里没有「删除」这个写法，而 JSON 里「键不存在」天然就是该语义——
+/// 因此 `previous_managed` 有、`next_managed` 无的键会被摘除。
+///
+/// 合并规则：
+/// - `previous` 有、`next` 无 → 摘除（上次受管、本次不再管）；
+/// - `next` 有 → 就地覆盖（保留原有装饰/注释）；
+/// - 只在 `live` 里有的键 → 原样保留（用户手写内容）。
+pub fn merge_json_into_toml(
+    live_text: &str,
+    previous_managed: Option<&Value>,
+    next_managed: &Value,
+) -> Result<String> {
     let mut live = parse_document(live_text, "live config")?;
-    let next_managed = parse_document(next_managed_text, "managed config")?;
 
-    if let Some(previous_text) = previous_managed_text {
-        let previous = parse_document(previous_text, "previous managed config")?;
-        remove_covered_table(live.as_table_mut(), previous.as_table());
-    }
+    let empty = Value::Object(serde_json::Map::new());
+    let previous = previous_managed.unwrap_or(&empty);
 
-    overlay_table(live.as_table_mut(), next_managed.as_table());
+    merge_value_tables(live.as_table_mut(), previous, next_managed)?;
 
     Ok(live.to_string())
+}
+
+/// 三路合并的核心：以 `base` 为基底，摘掉「上次受管、本次不再管」的键，
+/// 再把「本次受管」的键就地覆盖上去。
+///
+/// 与「先整体删除、再整体叠加」的朴素做法相比，这里**只删除 next 不管的键**，
+/// 两边都管的键走就地覆盖。差别在于装饰（行尾注释、缩进）：整体删除会连注释
+/// 一起丢掉，就地覆盖可以把它保留下来。注释是用户手写的，Helio 无权删除。
+fn merge_value_tables(base: &mut Table, previous: &Value, next: &Value) -> Result<()> {
+    let empty = serde_json::Map::new();
+    let previous_map = previous.as_object().unwrap_or(&empty);
+    let next_map = next.as_object().unwrap_or(&empty);
+
+    // 1) 摘除：上次受管、本次不再受管的键。
+    let mut stale = Vec::new();
+    let mut recurse = Vec::new();
+    for (key, previous_value) in previous_map {
+        match next_map.get(key) {
+            Some(next_value) => {
+                // 两边都管：三方都是表才继续下探，否则交给第 2 步就地覆盖。
+                let all_tables = matches!(base.get(key), Some(Item::Table(_)))
+                    && previous_value.is_object()
+                    && next_value.is_object();
+                if all_tables {
+                    recurse.push(key.clone());
+                }
+            }
+            None => stale.push(key.clone()),
+        }
+    }
+    for key in stale {
+        base.remove(&key);
+    }
+    for key in recurse {
+        let (Some(Item::Table(base_child)), Some(previous_value), Some(next_value)) = (
+            base.get_mut(&key),
+            previous_map.get(&key),
+            next_map.get(&key),
+        ) else {
+            continue;
+        };
+        merge_value_tables(base_child, previous_value, next_value)?;
+    }
+
+    // 2) 叠加：本次受管的键就地覆盖，保留原有装饰。
+    for (key, next_value) in next_map {
+        match base.get_mut(key) {
+            Some(base_item) => apply_value(base_item, next_value)?,
+            None => {
+                base.insert(key, json_to_toml_item(next_value)?);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// 把 `patch` 写到 `base` 上，尽量保留 `base` 已有的装饰。
+fn apply_value(base: &mut Item, patch: &Value) -> Result<()> {
+    if let (Item::Table(base_table), Some(patch_map)) = (&mut *base, patch.as_object()) {
+        for (key, patch_value) in patch_map {
+            match base_table.get_mut(key) {
+                Some(base_child) => apply_value(base_child, patch_value)?,
+                None => {
+                    base_table.insert(key, json_to_toml_item(patch_value)?);
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    // 值级覆盖：搬运原装饰，否则行尾注释会随旧值一起消失。
+    let decor = match &*base {
+        Item::Value(existing) => Some(existing.decor().clone()),
+        _ => None,
+    };
+    let mut item = json_to_toml_item(patch)?;
+    if let (Item::Value(new_value), Some(decor)) = (&mut item, decor) {
+        *new_value.decor_mut() = decor;
+    }
+    *base = item;
+    Ok(())
 }
 
 /// 解析为保留格式的文档树。空文本 → 空文档。
@@ -60,52 +168,6 @@ pub fn parse_document(text: &str, label: &str) -> Result<DocumentMut> {
         .with_context(|| format!("Failed to parse {label} as TOML"))
 }
 
-/// 从 `base` 摘除 `covered` 覆盖的路径。递归语义见 [`super::remove_covered`]。
-fn remove_covered_table(base: &mut Table, covered: &Table) {
-    let mut emptied = Vec::new();
-
-    for (key, covered_item) in covered.iter() {
-        let Some(base_item) = base.get_mut(key) else {
-            continue;
-        };
-
-        let should_remove = match (base_item, covered_item) {
-            (Item::Table(base_child), Item::Table(covered_child)) => {
-                remove_covered_table(base_child, covered_child);
-                base_child.is_empty()
-            }
-            // 类型不匹配：受管片段拥有该键，直接摘除（与值级实现一致）。
-            _ => true,
-        };
-
-        if should_remove {
-            emptied.push(key.to_string());
-        }
-    }
-
-    for key in emptied {
-        base.remove(&key);
-    }
-}
-
-/// 把 `overlay` 合并进 `base`。表递归，其余覆盖。
-fn overlay_table(base: &mut Table, overlay: &Table) {
-    for (key, overlay_item) in overlay.iter() {
-        match base.get_mut(key) {
-            Some(base_item) => match (base_item, overlay_item) {
-                (Item::Table(base_child), Item::Table(overlay_child)) => {
-                    overlay_table(base_child, overlay_child);
-                }
-                (base_item, overlay_item) => {
-                    *base_item = overlay_item.clone();
-                }
-            },
-            None => {
-                base.insert(key, overlay_item.clone());
-            }
-        }
-    }
-}
 
 /// 在保留格式的前提下，对顶层键做「设置 / 删除」。
 ///
@@ -347,6 +409,49 @@ base_url = \"https://old.example\"
             "摘空后的表应整体移除:\n{merged}"
         );
         assert!(merged.contains("[other]"), "无关表应保留:\n{merged}");
+    }
+
+    /// 受管字段被**重新赋值**时，其上的行尾注释必须存活。
+    ///
+    /// 这是「先整体删除、再整体叠加」与「只删 stale、就地覆盖」的分水岭：
+    /// 前者会把注释连同旧值一起丢掉。
+    #[test]
+    fn merge_keeps_inline_comment_on_reassigned_field() {
+        let live = "\
+model = \"old\"    # 用户说明：这是我选的中转模型
+";
+        let previous = "model = \"old\"\n";
+        let next = "model = \"new\"\n";
+
+        let merged = merge_documents(live, Some(previous), next).unwrap();
+
+        assert!(merged.contains("model = \"new\""), "值应更新:\n{merged}");
+        assert!(
+            merged.contains("# 用户说明：这是我选的中转模型"),
+            "重新赋值不应丢失行尾注释:\n{merged}"
+        );
+    }
+
+    /// 受管子表内的字段被重新赋值时，注释同样存活。
+    #[test]
+    fn merge_keeps_inline_comment_inside_managed_subtable() {
+        let live = "\
+[model_providers.custom]
+base_url = \"https://old.example\"   # 我搭的中转
+";
+        let previous = "\
+[model_providers.custom]
+base_url = \"https://old.example\"
+";
+        let next = "\
+[model_providers.custom]
+base_url = \"https://new.example\"
+";
+
+        let merged = merge_documents(live, Some(previous), next).unwrap();
+
+        assert!(merged.contains("https://new.example"), "值应更新:\n{merged}");
+        assert!(merged.contains("# 我搭的中转"), "子表内注释应存活:\n{merged}");
     }
 
     // ---- 值级读写 ----
