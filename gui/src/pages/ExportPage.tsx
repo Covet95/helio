@@ -6,9 +6,21 @@ import { Download, Upload, FolderCog } from 'lucide-react';
 import { ConfirmDialog } from '../components/common/Modal';
 import { tauriApi } from '../lib/tauri';
 import { useStore } from '../store';
-import { humanizeError } from '../lib/utils';
+import { tauriTransferDeps } from './exportDialog';
+import { runTransfer, type TransferSpec } from './exportFlow';
+import {
+  databaseExportMessage,
+  databaseImportMessage,
+  portableExportMessage,
+  portableImportMessage,
+  skillsExportMessage,
+  skillsImportMessage,
+  type Feedback,
+} from './exportMessages';
 
-type Feedback = { text: string; kind: 'success' | 'error' | 'info' };
+const DB_FILTER = { filterName: 'Database', extensions: ['db', 'sqlite'] };
+const ARCHIVE_FILTER = { filterName: 'Helio 便携备份', extensions: ['tar.gz', 'tgz'] };
+const SKILLS_FILTER = { filterName: 'Skills 备份', extensions: ['tar.gz', 'tgz'] };
 
 export default function ExportPage() {
   const [portableImporting, setPortableImporting] = useState(false);
@@ -22,25 +34,6 @@ export default function ExportPage() {
   const [confirmImport, setConfirmImport] = useState(false);
   const [confirmSkillsImport, setConfirmSkillsImport] = useState(false);
 
-  const handleExport = async () => {
-    try {
-      setExporting(true);
-      setFeedback(null);
-      const { save } = await import('@tauri-apps/plugin-dialog');
-      const filePath = await save({
-        defaultPath: `helio-backup-${Date.now()}.db`,
-        filters: [{ name: 'Database', extensions: ['db', 'sqlite'] }],
-      });
-      if (!filePath) { setFeedback({ text: '导出已取消', kind: 'info' }); return; }
-      await tauriApi.exportDatabase(filePath);
-      setFeedback({ text: '数据库导出成功', kind: 'success' });
-    } catch (err) {
-      setFeedback({ text: `导出失败: ${humanizeError(err)}`, kind: 'error' });
-    } finally {
-      setExporting(false);
-    }
-  };
-
   const refreshAppData = async () => {
     try {
       await useStore.getState().fetchProfiles();
@@ -50,126 +43,115 @@ export default function ExportPage() {
     }
   };
 
-  const handlePortableExport = async () => {
+  /**
+   * 统一走 `runTransfer`：置忙 → 清反馈 → 执行 → 写反馈 → 复位。
+   *
+   * `afterSuccess` 在反馈**之后**跑——导入的提示语是「正在刷新…」，
+   * 得先让它显示出来再刷新。
+   */
+  const transfer = async (
+    spec: TransferSpec,
+    setBusy: (v: boolean) => void,
+    afterSuccess?: () => Promise<void>,
+  ) => {
+    setBusy(true);
+    setFeedback(null);
     try {
-      setPortableExporting(true);
-      setFeedback(null);
-      const { save } = await import('@tauri-apps/plugin-dialog');
-      const filePath = await save({
-        defaultPath: `helio-portable-${Date.now()}.tar.gz`,
-        filters: [{ name: 'Helio 便携备份', extensions: ['tar.gz', 'tgz'] }],
-      });
-      if (!filePath) { setFeedback({ text: '导出已取消', kind: 'info' }); return; }
-      const result = await tauriApi.exportPortableBackup(filePath);
-      setFeedback({
-        text: `便携备份导出成功：Skills ${result.skills.total} 个`,
-        kind: 'success',
-      });
-    } catch (err) {
-      setFeedback({ text: `便携备份导出失败: ${humanizeError(err)}`, kind: 'error' });
+      const outcome = await runTransfer(tauriTransferDeps(), spec);
+      setFeedback(outcome);
+      if (outcome.kind === 'success' && afterSuccess) await afterSuccess();
     } finally {
-      setPortableExporting(false);
+      setBusy(false);
     }
   };
 
-  const handlePortableImport = async () => {
-    try {
-      setPortableImporting(true);
-      setConfirmPortableImport(false);
-      setFeedback(null);
-      const { open } = await import('@tauri-apps/plugin-dialog');
-      const filePath = await open({
-        multiple: false,
-        filters: [{ name: 'Helio 便携备份', extensions: ['tar.gz', 'tgz'] }],
-      });
-      if (!filePath) { setFeedback({ text: '导入已取消', kind: 'info' }); return; }
-      const result = await tauriApi.importPortableBackup(filePath as string);
-      const targets = result.restored_targets.length > 0
-        ? `，已恢复 ${result.restored_targets.length} 个工具配置`
-        : '';
-      const skipped = result.skills.skipped > 0 ? `，跳过同名 Skills ${result.skills.skipped} 个` : '';
-      setFeedback({
-        text: `便携备份恢复完成：Skills ${result.skills.restored} 个${skipped}${targets}`,
-        kind: 'success',
-      });
-      await refreshAppData();
-    } catch (err) {
-      setFeedback({ text: `便携备份恢复失败: ${humanizeError(err)}`, kind: 'error' });
-    } finally {
-      setPortableImporting(false);
-    }
+  const handleExport = () =>
+    transfer(
+      {
+        mode: 'export',
+        action: '导出',
+        request: { ...DB_FILTER, defaultPath: `helio-backup-${Date.now()}.db` },
+        execute: async (path) => {
+          await tauriApi.exportDatabase(path);
+          return { text: databaseExportMessage(), kind: 'success' };
+        },
+      },
+      setExporting,
+    );
+
+  const handlePortableExport = () =>
+    transfer(
+      {
+        mode: 'export',
+        action: '便携备份导出',
+        request: { ...ARCHIVE_FILTER, defaultPath: `helio-portable-${Date.now()}.tar.gz` },
+        execute: async (path) => {
+          const result = await tauriApi.exportPortableBackup(path);
+          return { text: portableExportMessage(result.skills.total), kind: 'success' };
+        },
+      },
+      setPortableExporting,
+    );
+
+  const handlePortableImport = () => {
+    setConfirmPortableImport(false);
+    return transfer(
+      {
+        mode: 'import',
+        action: '便携备份恢复',
+        request: ARCHIVE_FILTER,
+        execute: async (path) => {
+          const result = await tauriApi.importPortableBackup(path);
+          return { text: portableImportMessage(result), kind: 'success' };
+        },
+      },
+      setPortableImporting,
+      refreshAppData,
+    );
   };
 
-  const handleImport = async () => {
-    try {
-      setImporting(true);
-      setConfirmImport(false);
-      setFeedback(null);
-      const { open } = await import('@tauri-apps/plugin-dialog');
-      const filePath = await open({
-        multiple: false,
-        filters: [{ name: 'Database', extensions: ['db', 'sqlite'] }],
-      });
-      if (!filePath) { setFeedback({ text: '导入已取消', kind: 'info' }); return; }
-      await tauriApi.importDatabase(filePath as string);
-      setFeedback({ text: '数据库导入成功，正在刷新…', kind: 'success' });
-      await refreshAppData();
-    } catch (err) {
-      setFeedback({ text: `导入失败: ${humanizeError(err)}`, kind: 'error' });
-    } finally {
-      setImporting(false);
-    }
+  const handleImport = () => {
+    setConfirmImport(false);
+    return transfer(
+      {
+        mode: 'import',
+        action: '导入',
+        request: DB_FILTER,
+        execute: async (path) => {
+          await tauriApi.importDatabase(path);
+          return { text: databaseImportMessage(), kind: 'success' };
+        },
+      },
+      setImporting,
+      refreshAppData,
+    );
   };
 
-  const handleSkillsExport = async () => {
-    try {
-      setSkillsExporting(true);
-      setFeedback(null);
-      const { save } = await import('@tauri-apps/plugin-dialog');
-      const filePath = await save({
-        defaultPath: `helio-skills-${Date.now()}.tar.gz`,
-        filters: [{ name: 'Skills 备份', extensions: ['tar.gz', 'tgz'] }],
-      });
-      if (!filePath) { setFeedback({ text: '导出已取消', kind: 'info' }); return; }
-      const result = await tauriApi.exportSkills(filePath);
-      setFeedback({
-        text: result.total > 0
-          ? `Skills 导出成功：共 ${result.total} 个（${result.apps.map(a => `${a.app} ${a.count}`).join('、')}）`
-          : '未发现任何 Skills',
-        kind: result.total > 0 ? 'success' : 'info',
-      });
-    } catch (err) {
-      setFeedback({ text: `Skills 导出失败: ${humanizeError(err)}`, kind: 'error' });
-    } finally {
-      setSkillsExporting(false);
-    }
-  };
+  const handleSkillsExport = () =>
+    transfer(
+      {
+        mode: 'export',
+        action: 'Skills 导出',
+        request: { ...SKILLS_FILTER, defaultPath: `helio-skills-${Date.now()}.tar.gz` },
+        execute: async (path) => skillsExportMessage(await tauriApi.exportSkills(path)),
+      },
+      setSkillsExporting,
+    );
 
-  const handleSkillsImport = async () => {
-    try {
-      setSkillsImporting(true);
-      setConfirmSkillsImport(false);
-      setFeedback(null);
-      const { open } = await import('@tauri-apps/plugin-dialog');
-      const filePath = await open({
-        multiple: false,
-        filters: [{ name: 'Skills 备份', extensions: ['tar.gz', 'tgz'] }],
-      });
-      if (!filePath) { setFeedback({ text: '导入已取消', kind: 'info' }); return; }
-      const result = await tauriApi.importSkills(filePath as string);
-      if (result.skipped > 0) {
-        setFeedback({
-          text: `Skills 导入完成：恢复 ${result.restored} 个，跳过同名 ${result.skipped} 个（${result.skipped_names.join('、')}）`,
-          kind: 'success',
-        });
-      } else {
-        setFeedback({ text: `Skills 导入完成：恢复 ${result.restored} 个`, kind: 'success' });
-      }
-    } catch (err) {
-      setFeedback({ text: `Skills 导入失败: ${humanizeError(err)}`, kind: 'error' });
-    } finally {
-      setSkillsImporting(false);
-    }
+  const handleSkillsImport = () => {
+    setConfirmSkillsImport(false);
+    return transfer(
+      {
+        mode: 'import',
+        action: 'Skills 导入',
+        request: SKILLS_FILTER,
+        execute: async (path) => {
+          const result = await tauriApi.importSkills(path);
+          return { text: skillsImportMessage(result), kind: 'success' };
+        },
+      },
+      setSkillsImporting,
+    );
   };
 
   return (

@@ -9,6 +9,7 @@ import { tauriApi } from '../lib/tauri';
 import { formatBytes, humanizeError } from '../lib/utils';
 import { SUPPORTED_TOOLS } from '../types';
 import type { SessionMeta, PreviewMessage } from '../types';
+import { singleDeleteFailure, summarizeFailures, validateCleanupDays } from './historyMessages';
 
 const TOOLS = [
   { id: '', label: '全部' },
@@ -38,6 +39,8 @@ export default function HistoryPage() {
 
   const key = (m: SessionMeta) => `${m.tool}:${m.id}`;
 
+  // 注意：`load()` 会清空 error（刷新即清旧提示）。所以调用方若要报告
+  // 操作失败，必须**在 load 之后**写 error——反序会被这里擦掉。
   const load = useCallback(async () => {
     setLoading(true);
     setError('');
@@ -73,8 +76,8 @@ export default function HistoryPage() {
       message: `删除 ${m.tool} · ${m.cwd || m.id}？将移到系统垃圾桶（可恢复）。`,
       onConfirm: async () => {
         const r = await tauriApi.deleteSession(m.tool, m.id);
-        if (!r.ok) setError(`删除失败：${r.error || '未知错误'}`);
         await load();
+        if (!r.ok) setError(singleDeleteFailure(r.error));
       },
     });
   };
@@ -87,32 +90,29 @@ export default function HistoryPage() {
       message: `批量删除 ${items.length} 个会话？将移到系统垃圾桶（可恢复）。`,
       onConfirm: async () => {
         const results = await tauriApi.deleteSessions(items);
-        const failed = results.filter((r) => !r.ok);
-        if (failed.length) {
-          setError(`批量删除失败 ${failed.length}/${results.length} 个：${failed.map((f) => f.error || '未知错误').join('；')}`);
-        }
         await load();
+        const summary = summarizeFailures(results, '批量删除');
+        if (summary) setError(summary);
       },
     });
   };
 
   const runCleanup = () => {
-    const days = Number(cleanupDays);
-    if (!days || days <= 0) {
-      setError('请输入有效的天数');
+    const invalid = validateCleanupDays(cleanupDays);
+    if (invalid) {
+      setError(invalid);
       return;
     }
+    const days = Number(cleanupDays);
     setShowCleanup(false);
     setConfirm({
       title: '快捷清理',
       message: `清理 ${days} 天前的会话？将移到系统垃圾桶（可恢复）。`,
       onConfirm: async () => {
         const results = await tauriApi.cleanupSessions(tool || undefined, days);
-        const failed = results.filter((r) => !r.ok);
-        if (failed.length) {
-          setError(`清理失败 ${failed.length}/${results.length} 个：${failed.map((f) => f.error || '未知错误').join('；')}`);
-        }
         await load();
+        const summary = summarizeFailures(results, '清理');
+        if (summary) setError(summary);
       },
     });
   };

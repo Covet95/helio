@@ -10,6 +10,7 @@ import { formatBytes, humanizeError } from '../lib/utils';
 import { contextBadgeLabel, statusKeyFor } from '../lib/contextWindow';
 import { tauriApi } from '../lib/tauri';
 import { describeLocalDrift, type LocalApiSnapshot } from '../lib/localDrift';
+import { toolBadge } from './statusBadge';
 import { SUPPORTED_TOOLS } from '../types';
 import type { StatusInfo, TargetApp, TargetStatus, ToolInfo, ToolProbeResult } from '../types';
 
@@ -143,29 +144,7 @@ function ToolCard({
   scan?: LocalApiSnapshot;
 }) {
   const configured = !!(status?.profile || status?.connected);
-  let badge = configured ? '已配置' : '未设置';
-  let badgeClass = configured ? 'text-ok' : 'text-ink-faint';
-  let dotClass = configured ? 'bg-ok' : 'bg-ink-faint/40';
-  if (probe) {
-    const ms = probe.latency_ms != null ? ` ${probe.latency_ms}ms` : '';
-    if (probe.managed) {
-      badge = '工具托管';
-      badgeClass = 'text-ok';
-      dotClass = 'bg-ok';
-    } else if (probe.ok && probe.status === 'degraded') {
-      badge = `较慢${ms}`;
-      badgeClass = 'text-warn';
-      dotClass = 'bg-warn';
-    } else if (probe.ok) {
-      badge = `可达${ms}`;
-      badgeClass = 'text-ok';
-      dotClass = 'bg-ok';
-    } else if (probe.configured) {
-      badge = '不可达';
-      badgeClass = 'text-danger';
-      dotClass = 'bg-danger';
-    }
-  }
+  const { text: badge, textClass: badgeClass, dotClass } = toolBadge(configured, probe);
   const p = status?.profile;
   const ctx = p ? contextBadgeLabel(p.context_1m, p.model, { tool: tool.id as TargetApp }) : null;
   const drift = p ? describeLocalDrift(p, scan) : null;
