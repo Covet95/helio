@@ -10,7 +10,7 @@
  * 最上层——否则按 Esc 会「关掉确认框 + 关掉整个表单」，等于没防。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import React from 'react';
 import type { ApiProfile } from '../../types';
 
@@ -114,6 +114,95 @@ describe('未保存修改守卫', () => {
     fireEvent.click(screen.getByRole('button', { name: '取消' }));
 
     expect(await screen.findByRole('alertdialog')).toBeTruthy();
+  });
+});
+
+describe('切换目标工具前的守卫（仅新建时）', () => {
+  /** 渲染新建表单（工具可选）。 */
+  async function renderNew(onClose = vi.fn()) {
+    const { ProfileModal } = await import('./ProfileFormModal');
+    render(
+      React.createElement(ProfileModal, {
+        profile: null,
+        initialTool: 'codex' as never,
+        onClose,
+        onSave: vi.fn(),
+      }),
+    );
+    return onClose;
+  }
+
+  /** 新建表单里切到另一个工具。 */
+  function switchTo(label: string) {
+    fireEvent.click(screen.getByRole('button', { name: label }));
+  }
+
+  it('没填过东西时直接切换，不打扰', async () => {
+    await renderNew();
+    switchTo('Claude Code');
+
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    // 切过去了：Claude Code 的表单字段出现
+    expect(screen.getByText('目标工具')).toBeTruthy();
+  });
+
+  it('已填内容时切换先问一句（否则输入无声消失）', async () => {
+    await renderNew();
+    fireEvent.change(screen.getByLabelText('API URL'), {
+      target: { value: 'https://typed.example/v1' },
+    });
+    switchTo('Claude Code');
+
+    const dialog = await screen.findByRole('alertdialog');
+    expect(dialog.textContent).toContain('清空');
+    // 还在原表单，输入还在
+    expect((screen.getByLabelText('API URL') as HTMLInputElement).value).toBe('https://typed.example/v1');
+  });
+
+  it('确认切换后表单重置为目标工具的字段', async () => {
+    await renderNew();
+    fireEvent.change(screen.getByLabelText('API URL'), {
+      target: { value: 'https://typed.example/v1' },
+    });
+    switchTo('Claude Code');
+    const dialog = await screen.findByRole('alertdialog');
+    const confirm = Array.from(dialog.querySelectorAll('button')).find((b) =>
+      b.textContent?.includes('切换并清空'),
+    )!;
+    fireEvent.click(confirm);
+
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
+    // 原输入被清掉，换成目标工具的默认值（Claude Code 预置官方 endpoint）
+    expect((screen.getByLabelText('API URL') as HTMLInputElement).value).not.toBe(
+      'https://typed.example/v1',
+    );
+  });
+
+  it('选择留在当前工具则不切换、不清空', async () => {
+    await renderNew();
+    fireEvent.change(screen.getByLabelText('API URL'), {
+      target: { value: 'https://typed.example/v1' },
+    });
+    switchTo('Claude Code');
+    const dialog = await screen.findByRole('alertdialog');
+    const keep = Array.from(dialog.querySelectorAll('button')).find((b) =>
+      b.textContent?.includes('留在当前工具'),
+    )!;
+    fireEvent.click(keep);
+
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect((screen.getByLabelText('API URL') as HTMLInputElement).value).toBe('https://typed.example/v1');
+  });
+
+  it('点当前已选工具不弹确认（不是切换）', async () => {
+    await renderNew();
+    fireEvent.change(screen.getByLabelText('API URL'), {
+      target: { value: 'https://typed.example/v1' },
+    });
+    switchTo('Codex');
+
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect((screen.getByLabelText('API URL') as HTMLInputElement).value).toBe('https://typed.example/v1');
   });
 });
 

@@ -68,6 +68,8 @@ export function ProfileModal({
   const [optionsDrafts, setOptionsDrafts] = useState<Record<string, string>>({});
   const [optionsErrors, setOptionsErrors] = useState<Record<string, string>>({});
   const [confirmDiscard, setConfirmDiscard] = useState(false);
+  /** 待切换的目标工具（有未保存内容时需先确认）。 */
+  const [pendingTool, setPendingTool] = useState<TargetApp | null>(null);
 
   const keys = form.api_keys && form.api_keys.length > 0 ? form.api_keys : ensureKeyPool(form);
   const activeKey =
@@ -349,6 +351,31 @@ export function ProfileModal({
     setConfirmDiscard(true);
   };
 
+  /** 切到另一个目标工具（仅新建时可选）。 */
+  const applyToolChange = (next: TargetApp) => {
+    setTool(next);
+    const base = emptyProfileForTool(next, seedFrom);
+    setForm(withActiveKey(base, ensureKeyPool(base)));
+    setModels([]);
+    setModelErr('');
+    setApiHealth(null);
+    setMultiKeyMode(false);
+  };
+
+  /**
+   * 切换目标工具会**整体重置表单**（各工具字段集不同，没法保留）。
+   * 已经填过东西时先问一句——否则用户填完 URL/Key/模型后点错工具，
+   * 输入无声消失。
+   */
+  const requestToolChange = (next: TargetApp) => {
+    if (next === tool) return;
+    if (!isDirty) {
+      applyToolChange(next);
+      return;
+    }
+    setPendingTool(next);
+  };
+
   const submit = async () => {
     if (savingRef.current) return;
 
@@ -403,17 +430,7 @@ export function ProfileModal({
                     key={t.id}
                     type="button"
                     disabled={loadingModels || checkingApi}
-                    onClick={() => {
-                      setTool(t.id);
-                      if (!initialProfile) {
-                        const base = emptyProfileForTool(t.id, seedFrom);
-                        setForm(withActiveKey(base, ensureKeyPool(base)));
-                        setModels([]);
-                        setModelErr('');
-                        setApiHealth(null);
-                        setMultiKeyMode(false);
-                      }
-                    }}
+                    onClick={() => requestToolChange(t.id)}
                     className={`whitespace-nowrap rounded-md px-3 py-1.5 text-[12.5px] font-medium border transition-all ${
                       tool === t.id ? 'border-accent text-accent bg-accent/8' : 'border-line text-ink-dim hover:border-line-strong'
                     }`}
@@ -1551,6 +1568,24 @@ export function ProfileModal({
           )}
         </fieldset>
       </form>
+
+      {pendingTool && (
+        <ConfirmDialog
+          title="切换目标工具？"
+          message={
+            `各工具需要的字段不同，切到 ${SUPPORTED_TOOLS.find((t) => t.id === pendingTool)?.displayName ?? pendingTool} 会清空当前已填的内容。`
+          }
+          confirmText="切换并清空"
+          cancelText="留在当前工具"
+          danger
+          onCancel={() => setPendingTool(null)}
+          onConfirm={() => {
+            const next = pendingTool;
+            setPendingTool(null);
+            if (next) applyToolChange(next);
+          }}
+        />
+      )}
 
       {confirmDiscard && (
         <ConfirmDialog

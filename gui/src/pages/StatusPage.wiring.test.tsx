@@ -19,16 +19,35 @@ vi.mock('../lib/tauri', () => ({ tauriApi: api }));
 const store = vi.hoisted(() => ({
   fetchStatus: vi.fn(),
   status: null as unknown,
+  statusError: null as string | null,
   loadingStatus: false,
+  /** 订阅者：让改 store 能触发重渲染（对象桩默认做不到）。 */
+  listeners: new Set<() => void>(),
 }));
+/** 改 store 并通知订阅者。 */
+function setStore(patch: Record<string, unknown>) {
+  Object.assign(store, patch);
+  for (const notify of store.listeners) notify();
+}
 vi.mock('../store', () => ({
-  useStore: (selector: (s: unknown) => unknown) => selector(store),
+  // 极简的 zustand 替身：支持 selector 订阅 + 外部变更触发重渲染。
+  useStore: (selector: (s: unknown) => unknown) => {
+    const [, force] = React.useReducer((n: number) => n + 1, 0);
+    React.useEffect(() => {
+      store.listeners.add(force);
+      return () => { store.listeners.delete(force); };
+    }, []);
+    return selector(store);
+  },
 }));
 vi.mock('zustand/react/shallow', () => ({ useShallow: (f: unknown) => f }));
 
 beforeEach(() => {
   vi.resetAllMocks();
-  store.status = null;
+  // 默认给一个「加载成功但没有工具配置」的状态：status 为 null 现在是
+  // 「读取失败」分支（不再渲染推测数据），探测类用例需要正常渲染的页面。
+  store.status = { database: { size: 0, profile_count: 0, path: '' } };
+  store.statusError = null;
   store.loadingStatus = false;
   store.fetchStatus.mockResolvedValue(undefined);
   api.probeActiveProfiles.mockResolvedValue([]);
@@ -130,5 +149,58 @@ describe('StatusPage — 数据库信息', () => {
     await renderPage();
 
     expect(await screen.findByText('未初始化')).toBeTruthy();
+  });
+});
+
+describe('StatusPage — 读取失败不得伪装成空数据', () => {
+  it('status 为 null 时显示失败与原因，不显示「未设置」「档案 0」', async () => {
+    store.status = null;
+    store.statusError = '加载状态失败：连接中断';
+    await renderPage();
+
+    // 关键：不能出现任何「推测出来的正常值」
+    expect(screen.queryByText('档案')).toBeNull();
+    expect(screen.queryByText('未初始化')).toBeNull();
+    expect(screen.queryByText('未设置')).toBeNull();
+    // 应当明确告知失败
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('读取状态失败');
+    expect(alert.textContent).toContain('连接中断');
+  });
+
+  it('失败态提供重试入口', async () => {
+    store.status = null;
+    store.statusError = 'boom';
+    await renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: /重试/ }));
+    expect(store.fetchStatus).toHaveBeenCalledWith(true);
+  });
+});
+
+describe('StatusPage — 探活结果不得跨档案残留', () => {
+  it('档案变化后清空旧探活结果（否则新档案会配旧 HTTP 状态）', async () => {
+    setStore({
+      status: {
+        codex: { connected: true, profile: { name: 'A', provider: 'x', api_url: 'u', model: 'm' } },
+        database: { size: 0, profile_count: 1, path: '' },
+      },
+    });
+    api.probeActiveProfiles.mockResolvedValue([
+      { target_app: 'codex', configured: true, ok: true, latency_ms: 42, probed_at: 1 },
+    ]);
+    await renderPage();
+    fireEvent.click(screen.getByRole('button', { name: /检测连通性/ }));
+    expect(await screen.findByText('可达 42ms')).toBeTruthy();
+
+    // 档案换成 B —— 旧探活结果必须消失
+    setStore({
+      status: {
+        codex: { connected: true, profile: { name: 'B', provider: 'x', api_url: 'u', model: 'm' } },
+        database: { size: 0, profile_count: 1, path: '' },
+      },
+    });
+
+    await waitFor(() => expect(screen.queryByText('可达 42ms')).toBeNull());
   });
 });
