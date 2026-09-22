@@ -28,11 +28,12 @@ const ProfileModal = lazy(() => import('./profiles/ProfileFormModal').then((modu
 
 export default function ProfilesPage() {
   const {
-    profiles, status, loadingProfiles,
+    profiles, status, loadingProfiles, profilesError,
     fetchProfiles, fetchStatus, addProfile, updateProfile, deleteProfile, switchProfile,
     sharedTool, setSelectedTool,
   } = useStore(useShallow((state) => ({
     profiles: state.profiles, status: state.status, loadingProfiles: state.loadingProfiles,
+    profilesError: state.profilesError,
     fetchProfiles: state.fetchProfiles, fetchStatus: state.fetchStatus,
     addProfile: state.addProfile, updateProfile: state.updateProfile,
     deleteProfile: state.deleteProfile, switchProfile: state.switchProfile,
@@ -205,19 +206,30 @@ export default function ProfilesPage() {
 
   const claimAllLegacy = async () => {
     setFeedback(null);
-    try {
-      let n = 0;
-      for (const p of legacyProfiles) {
-        if (p.id == null) continue;
+    // 逐个认领并记账：原实现遇错即停、只报「认领失败」，而前面几个**已经
+    // 改了归属**——用户以为无事发生。与 runDedup 的批量语义对齐。
+    const failures: string[] = [];
+    let claimed = 0;
+    for (const p of legacyProfiles) {
+      if (p.id == null) continue;
+      try {
         await tauriApi.assignLegacyProfile(p.id, legacyTool[p.id] ?? targetApp);
-        n += 1;
+        claimed += 1;
+      } catch (e) {
+        failures.push(`${p.name}（${humanizeError(e)}）`);
       }
-      setFeedback({ kind: 'success', text: `已认领 ${n} 个档案到 ${toolById(targetApp)?.displayName ?? targetApp}（可在各行下拉框里单独改目标）` });
-      await fetchProfiles();
-      await fetchStatus();
-    } catch (e) {
-      setFeedback({ kind: 'error', text: `认领失败：${humanizeError(e)}` });
     }
+    const target = toolById(targetApp)?.displayName ?? targetApp;
+    if (failures.length === 0) {
+      setFeedback({ kind: 'success', text: `已认领 ${claimed} 个档案到 ${target}（可在各行下拉框里单独改目标）` });
+    } else {
+      setFeedback({
+        kind: 'error',
+        text: `已认领 ${claimed} 个，${failures.length} 个失败：${failures.join('；')}`,
+      });
+    }
+    await fetchProfiles();
+    await fetchStatus();
   };
 
   const dropLegacy = async () => {
@@ -361,6 +373,22 @@ export default function ProfilesPage() {
 
         {loadingProfiles && profiles.length === 0 ? (
           <div className="grid place-items-center py-32"><Spinner size="lg" /></div>
+        ) : profiles.length === 0 && profilesError ? (
+          /*
+            读失败与「真的没有档案」是两件事：都落到 EmptyState 会让用户以为
+            数据没了（同时顶部还有一条红条，两句话互相矛盾）。
+          */
+          <div className="grid place-items-center py-20">
+            <div className="max-w-md text-center">
+              <Alert tone="error" className="text-left">
+                <div className="font-medium">加载档案失败</div>
+                <div className="mt-1 text-[12px] opacity-90">{profilesError}</div>
+              </Alert>
+              <Button variant="secondary" className="mt-4" disabled={loadingProfiles} onClick={() => fetchProfiles(true)}>
+                重试
+              </Button>
+            </div>
+          </div>
         ) : profiles.length === 0 ? (
           <EmptyState />
         ) : toolProfiles.length === 0 ? (

@@ -33,7 +33,7 @@ const profiles = [
 const api = vi.hoisted(() => ({
   listProfiles: vi.fn(), getStatus: vi.fn(), addProfile: vi.fn(),
   updateProfile: vi.fn(), deleteProfile: vi.fn(), switchProfile: vi.fn(),
-  scanLocalApi: vi.fn(),
+  scanLocalApi: vi.fn(), assignLegacyProfile: vi.fn(),
 }));
 vi.mock('../lib/tauri', () => ({ tauriApi: api }));
 
@@ -124,5 +124,50 @@ describe('runDedup', () => {
     await confirmDedup();
 
     await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
+  });
+});
+
+describe('批量认领未归属档案', () => {
+  /** 两个未归属档案。 */
+  const legacy = [
+    { id: 10, name: 'legacy-a', provider: 'openai', api_url: 'https://a/v1', api_key: 'k1', target_app: null, created_at: 1, updated_at: 1 },
+    { id: 11, name: 'legacy-b', provider: 'openai', api_url: 'https://b/v1', api_key: 'k2', target_app: null, created_at: 1, updated_at: 1 },
+  ] as unknown as ApiProfile[];
+
+  /** 渲染带未归属档案的档案页。 */
+  async function renderWithLegacy() {
+    api.listProfiles.mockResolvedValue(legacy);
+    api.getStatus.mockResolvedValue({ database: { size: 1, profile_count: 2, path: '/tmp/x' } });
+    const { default: ProfilesPage } = await import('./ProfilesPage');
+    const { useStore } = await import('../store');
+    useStore.setState({ selectedTool: 'codex' as never });
+    await useStore.getState().fetchProfiles(true);
+    await useStore.getState().fetchStatus(true);
+    render(React.createElement(MemoryRouter, null, React.createElement(ProfilesPage)));
+    await waitFor(() => expect(screen.getByText('legacy-a')).toBeTruthy());
+  }
+
+  it('全部成功时报认领数量', async () => {
+    api.assignLegacyProfile = vi.fn().mockResolvedValue(undefined);
+    await renderWithLegacy();
+    fireEvent.click(screen.getByRole('button', { name: /全部认领到/ }));
+
+    expect(await screen.findByText(/已认领 2 个档案到/)).toBeTruthy();
+  });
+
+  it('中途失败时不谎报「认领失败」——已认领的要如实计入', async () => {
+    // 第二个失败；第一个已经改过归属了。
+    api.assignLegacyProfile = vi.fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('档案不存在'));
+    await renderWithLegacy();
+    fireEvent.click(screen.getByRole('button', { name: /全部认领到/ }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('已认领 1 个');
+    expect(alert.textContent).toContain('1 个失败');
+    expect(alert.textContent).toContain('档案不存在');
+    // 失败项要点名
+    expect(alert.textContent).toContain('legacy-b');
   });
 });
