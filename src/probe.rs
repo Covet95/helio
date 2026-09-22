@@ -596,9 +596,28 @@ impl Default for ReachabilityConfig {
     }
 }
 
-fn should_retry_reachability(msg: &str) -> bool {
-    let lower = msg.to_lowercase();
-    lower.contains("timeout") || lower.contains("abort") || lower.contains("timed out")
+/// 错误归类。
+///
+/// 重试判断必须看**类型**而不是消息文本——这是 `error.rs` 定下的契约
+/// （类别来自类型，不来自措辞），而且按文本匹配会随措辞变化静默失效：
+/// 原先 `should_retry_reachability` 匹配 "timeout" 子串，只是因为
+/// `map_reachability_error` 恰好把超时写成 "Request timeout" 才成立；
+/// 改一个字（例如写成中文）重试逻辑就会悄悄失效。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReachabilityFailure {
+    /// 超时 / 主动中止——值得重试。
+    Transient,
+    /// 连接失败、DNS、TLS 等——重试无意义。
+    Permanent,
+}
+
+fn classify_reachability_error(e: &reqwest::Error) -> ReachabilityFailure {
+    if e.is_timeout() {
+        ReachabilityFailure::Transient
+    } else {
+        // 注：reqwest 的 `is_connect()` 覆盖 DNS/TCP/TLS 建连失败，不重试。
+        ReachabilityFailure::Permanent
+    }
 }
 
 fn map_reachability_error(e: reqwest::Error) -> String {
@@ -680,18 +699,19 @@ pub async fn probe_reachability(api_url: &str, config: &ReachabilityConfig) -> R
                 };
             }
             Err(e) => {
+                let retryable = classify_reachability_error(&e) == ReachabilityFailure::Transient;
                 let msg = map_reachability_error(e);
                 let r = ReachabilityResult {
                     status: ReachabilityStatus::Failed,
                     success: false,
-                    message: msg.clone(),
+                    message: msg,
                     response_time_ms: Some(response_time),
                     http_status: None,
                     tested_at,
                     retry_count: attempt,
                     endpoint: endpoint.clone(),
                 };
-                if should_retry_reachability(&msg) && attempt < config.max_retries {
+                if retryable && attempt < config.max_retries {
                     last = Some(r);
                     continue;
                 }
@@ -1019,13 +1039,63 @@ mod tests {
         assert_eq!(c.degraded_threshold_ms, 6000);
     }
 
+    /// 同步跑一个 future，供分类测试使用。
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(f)
+    }
+
     #[test]
-    fn reachability_should_retry_only_timeouts() {
-        assert!(should_retry_reachability("Request timeout"));
-        assert!(should_retry_reachability("request timed out"));
-        assert!(should_retry_reachability("connection abort"));
-        assert!(!should_retry_reachability("Connection failed: dns error"));
-        assert!(!should_retry_reachability("Reachable"));
+    fn reachability_classifies_timeout_as_transient() {
+        // 重试只看类型：超时（含主动 abort，reqwest 归入 is_timeout）才重试。
+        // 不再依赖消息文本——原先按 "timeout" 子串匹配，改一个字就静默失效。
+        //
+        // 必须用「连得上但不回话」的服务端：若对未监听的端口发请求，
+        // 建连失败与超时会赛跑（实测同一份代码两种结果都出现过），
+        // 那种测试是 flaky 的。
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            // 接受连接后什么都不发，让客户端等到超时。
+            let _conn = listener.accept();
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        });
+
+        let err = block_on(async {
+            reqwest::Client::new()
+                .get(format!("http://{addr}/"))
+                .timeout(std::time::Duration::from_millis(50))
+                .send()
+                .await
+        })
+        .unwrap_err();
+        assert!(err.is_timeout(), "预期超时错误，实际：{err}");
+        assert_eq!(
+            classify_reachability_error(&err),
+            ReachabilityFailure::Transient,
+            "超时应判为可重试：{err}"
+        );
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn reachability_classifies_connect_failure_as_permanent() {
+        // 127.0.0.1:1 上没有监听者，建连必然失败——重试无意义。
+        let err = block_on(async {
+            reqwest::Client::new()
+                .get("http://127.0.0.1:1/")
+                .send()
+                .await
+        })
+        .unwrap_err();
+        assert_eq!(
+            classify_reachability_error(&err),
+            ReachabilityFailure::Permanent,
+            "建连失败不应重试：{err}"
+        );
     }
 
     #[test]
