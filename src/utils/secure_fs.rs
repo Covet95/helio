@@ -72,19 +72,23 @@ mod windows_acl {
     use std::os::windows::ffi::OsStrExt;
     use std::path::Path;
     use windows_sys::Win32::Security::Authorization::{
-        SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W, SE_FILE_OBJECT, TRUSTEE_IS_SID,
-        TRUSTEE_IS_USER, TRUSTEE_W,
+        SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W, GRANT_ACCESS, SE_FILE_OBJECT,
+        TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
     };
     use windows_sys::Win32::Security::{
         GetTokenInformation, TokenUser, ACL, DACL_SECURITY_INFORMATION,
-        PROTECTED_DACL_SECURITY_INFORMATION, TOKEN_QUERY, TOKEN_USER,
+        PROTECTED_DACL_SECURITY_INFORMATION, SUB_CONTAINERS_AND_OBJECTS_INHERIT, TOKEN_QUERY,
+        TOKEN_USER,
     };
+    use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
-    const FILE_ALL_ACCESS: u32 = 0x001F_01FF;
-    const GRANT_ACCESS: i32 = 0;
-    /// 目录：让 ACE 被容器与对象继承（OBJECT_INHERIT | CONTAINER_INHERIT）。
-    const SUB_CONTAINERS_AND_OBJECTS_INHERIT: u32 = 0x3;
+    // 全部取自 windows-sys 的具名常量，**不手抄数值**。
+    //
+    // 教训：这里原先手写了 `const GRANT_ACCESS: i32 = 0;`，而真值是 1
+    // （0 是 `NOT_USED_ACCESS`）。`SetEntriesInAclW` 收到非法模式直接失败，
+    // 于是 Windows 上**所有写盘路径全部瘫痪**——而 CI 的 Windows job 才是
+    // 唯一能发现它的地方。手抄常量等于把 SDK 的取值背错一次就全线崩溃。
 
     /// 把 `path` 的 DACL 换成「仅当前用户完全控制」。
     ///
@@ -196,17 +200,49 @@ pub fn copy_private(source: &Path, destination: &Path) -> Result<u64> {
     Ok(bytes)
 }
 
-// 权限测试仅 Unix 有意义（Windows 无 POSIX mode），整体在 Windows 上不编译。
-#[cfg(all(test, unix))]
+// 测试在**所有平台**编译：Windows 的 ACL 分支必须被真正执行过。
+//
+// 事故背景：这些测试原先整体 `#[cfg(all(test, unix))]`，于是 Windows 的 ACL
+// 实现从未被任何测试碰过——把 GRANT_ACCESS 抄成 0 这种错误一路绿灯到用户手里。
+// 平台特有的断言各自加 `#[cfg(unix)]`，模块本身不再按平台排除。
+#[cfg(test)]
 mod tests {
-    use super::{
-        atomic_write_private, copy_private, ensure_private_dir, ensure_private_file,
-        secure_export_file,
-    };
+    use super::{ensure_private_dir, restrict_to_owner};
+    #[cfg(unix)]
+    use super::{atomic_write_private, copy_private, ensure_private_file, secure_export_file};
     use anyhow::Result;
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    /// 收紧权限的**跨平台**冒烟测试。
+    ///
+    /// 这条存在的理由是一次真实事故：Windows 的 ACL 实现把 `GRANT_ACCESS`
+    /// 手抄成了 0（真值 1），`SetEntriesInAclW` 收到非法模式直接失败，
+    /// 于是 Windows 上所有写盘路径全部瘫痪——而当时 `secure_fs` 的测试
+    /// **全是 `#[cfg(unix)]`**，本地与 macOS CI 一路绿灯。
+    ///
+    /// 本测试不加 cfg，在哪个平台就跑哪个平台的分支，确保 ACL 代码
+    /// 至少被真正执行过一次。
+    #[test]
+    fn restrict_to_owner_works_on_this_platform() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let file = dir.path().join("secret.txt");
+        fs::write(&file, b"x")?;
+
+        restrict_to_owner(&file, 0o600, false)
+            .map_err(|e| anyhow::anyhow!("文件权限收紧失败（{e:#}）"))?;
+
+        let sub = dir.path().join("subdir");
+        fs::create_dir_all(&sub)?;
+        restrict_to_owner(&sub, 0o700, true)
+            .map_err(|e| anyhow::anyhow!("目录权限收紧失败（{e:#}）"))?;
+
+        // 收紧后仍可正常读写——权限设置不该把文件锁死。
+        fs::write(&file, b"y")?;
+        assert_eq!(fs::read(&file)?, b"y");
+        Ok(())
+    }
 
     #[cfg(unix)]
     #[test]
