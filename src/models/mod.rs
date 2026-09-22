@@ -354,23 +354,6 @@ impl ApiProfile {
         }
         true
     }
-
-    /// 按 label（大小写不敏感）或 id 设活跃
-    pub fn set_active_key_ref(&mut self, id_or_label: &str) -> bool {
-        self.normalize_keys();
-        let needle = id_or_label.trim();
-        let Some(keys) = self.api_keys.as_ref() else {
-            return false;
-        };
-        let id = keys
-            .iter()
-            .find(|e| e.id == needle || e.label.eq_ignore_ascii_case(needle))
-            .map(|e| e.id.clone());
-        match id {
-            Some(id) => self.set_active_key_id(&id),
-            None => false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -478,19 +461,6 @@ impl ApiProfile {
             opencode: OpenCodeProfileFields::default(),
             hermes: HermesProfileFields::default(),
             openclaw: OpenClawProfileFields::default(),
-        }
-    }
-
-    pub fn masked_key(&self) -> String {
-        let key = &self.api_key;
-        // 按字符切片（key 可能是多字节 UTF-8），字节切片会越界 panic
-        let chars: Vec<char> = key.chars().collect();
-        if chars.len() > 15 {
-            let head: String = chars[..10].iter().collect();
-            let tail: String = chars[chars.len() - 5..].iter().collect();
-            format!("{head}...{tail}")
-        } else {
-            "***".to_string()
         }
     }
 }

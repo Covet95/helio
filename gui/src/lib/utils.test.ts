@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { errorDetail, formatBackupTime, humanizeError, isAppError } from './utils';
+import { errorDetail, formatBackupTime, humanizeError, isAppError, maskApiKey } from './utils';
 
 describe('isAppError', () => {
   it('recognizes structured backend errors', () => {
@@ -112,5 +112,30 @@ describe('formatBackupTime', () => {
   it('格式意外时原样返回（展示层不该因它整页报错）', () => {
     expect(formatBackupTime('weird-name')).toBe('weird-name');
     expect(formatBackupTime('')).toBe('');
+  });
+});
+
+describe('maskApiKey', () => {
+  it('短 key 整个遮掉（不留任何字符）', () => {
+    expect(maskApiKey('sk-short')).toBe('***');
+    expect(maskApiKey('')).toBe('***');
+  });
+
+  it('长 key 保留前后片段', () => {
+    expect(maskApiKey('sk-1234567890abcdefghij')).toBe('sk-1234567...fghij');
+  });
+
+  it('多字节字符不从中间切开（否则会留下孤立代理项显示成 �）', () => {
+    // emoji 占两个 UTF-16 码元，按 slice 切会切出半个
+    const key = 'sk-' + '🔑'.repeat(8) + '-abcdefghij';
+    const masked = maskApiKey(key);
+    expect(masked).not.toContain('\uFFFD');
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(masked)).toBe(false);
+  });
+
+  it('按码点计数：15 个 emoji 不算「短」', () => {
+    // 15 个 emoji = 30 个 UTF-16 码元，按码点算正好是阈值
+    expect(maskApiKey('🔑'.repeat(15))).toBe('***');
+    expect(maskApiKey('🔑'.repeat(16))).not.toBe('***');
   });
 });

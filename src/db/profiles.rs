@@ -554,3 +554,134 @@ impl Database {
         Ok(rows > 0)
     }
 }
+
+/// 宽表字段同步守卫。
+///
+/// `api_profiles` 有 33 列，加一个工具字段要同时改**五处**：结构体、CREATE TABLE、
+/// ALTER 迁移列表、INSERT/UPDATE 的列与占位符、`row_to_profile` 的读取。漏掉任何
+/// 一处都是**静默**的——编译通过、大多数测试也通过，只是那个字段存不进去或读不出来。
+///
+/// 这里把三处能自动比对的钉在一起：
+/// - INSERT 的列名集合 == `row_to_profile` 实际读取的列名集合；
+/// - 两者都 == 建表后真实的列集合（减去已知的「非 profile 字段」）。
+///
+/// 新增字段时若只改了结构体没改 SQL，这个测试会失败并指出差在哪一列。
+#[cfg(test)]
+mod schema_sync_tests {
+    use super::Database;
+    use std::collections::BTreeSet;
+
+    /// INSERT 语句里的列名（从源码常量解析，避免复制一份清单再手工同步）。
+    fn insert_columns() -> BTreeSet<String> {
+        const SQL: &str = include_str!("profiles.rs");
+        let start = SQL
+            .find("INSERT INTO api_profiles (")
+            .expect("找不到 INSERT 语句——若已重构请同步更新本测试");
+        let rest = &SQL[start + "INSERT INTO api_profiles (".len()..];
+        let end = rest.find(')').expect("INSERT 列清单没有右括号");
+        rest[..end]
+            .split(',')
+            .map(|c| c.trim().to_string())
+            .collect()
+    }
+
+    /// `row_to_profile` 实际读取的列名。
+    fn mapped_columns() -> BTreeSet<String> {
+        const SQL: &str = include_str!("profiles.rs");
+        let start = SQL
+            .find("fn row_to_profile")
+            .expect("找不到 row_to_profile");
+        // 函数体到下一个顶层 `}` 为止（粗略但够用：函数内没有裸 `\n    }`）
+        let body_end = SQL[start..]
+            .find("\n    }\n")
+            .map(|i| start + i)
+            .unwrap_or(SQL.len());
+        let body = &SQL[start..body_end];
+
+        let mut cols = BTreeSet::new();
+        let mut rest = body;
+        while let Some(i) = rest.find("row.get(\"") {
+            let after = &rest[i + "row.get(\"".len()..];
+            let Some(j) = after.find('"') else { break };
+            cols.insert(after[..j].to_string());
+            rest = &after[j..];
+        }
+        cols
+    }
+
+    /// 建表后的真实列集合。
+    fn table_columns() -> BTreeSet<String> {
+        let db = Database::open(":memory:").expect("开内存库");
+        let mut stmt = db
+            .conn
+            .prepare("PRAGMA table_info(api_profiles)")
+            .expect("PRAGMA");
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect");
+        cols.into_iter().collect()
+    }
+
+    /// 不在 INSERT 清单里、也不算 profile 字段的列。
+    ///
+    /// `id` 由 SQLite 自增分配；其余是内部/派生列，不该出现在 INSERT 里。
+    const NON_PROFILE_COLUMNS: &[&str] = &[
+        "id",
+        "api_keys_json",
+        "catalog_models",
+        "models",
+        "model_mapping",
+    ];
+
+    #[test]
+    fn insert_columns_match_row_mapping() {
+        let inserted = insert_columns();
+        // `id` 由 SQLite 自增分配，只在读取侧出现——不算不一致。
+        let mapped: BTreeSet<String> = mapped_columns()
+            .difference(&BTreeSet::from(["id".to_string()]))
+            .cloned()
+            .collect();
+
+        let only_insert = inserted.difference(&mapped).cloned().collect::<Vec<_>>();
+        let only_mapped = mapped.difference(&inserted).cloned().collect::<Vec<_>>();
+
+        assert!(
+            only_insert.is_empty() && only_mapped.is_empty(),
+            "INSERT 与 row_to_profile 的列不一致——存进去的读不出来，或反之。\n\
+             只在 INSERT 里: {only_insert:?}\n\
+             只在读取里: {only_mapped:?}"
+        );
+    }
+
+    #[test]
+    fn every_table_column_is_accounted_for() {
+        let table = table_columns();
+        let known: BTreeSet<String> = insert_columns()
+            .union(&mapped_columns())
+            .cloned()
+            .chain(NON_PROFILE_COLUMNS.iter().map(|s| s.to_string()))
+            .collect();
+
+        let unaccounted = table.difference(&known).cloned().collect::<Vec<_>>();
+        assert!(
+            unaccounted.is_empty(),
+            "表里有列既不在 INSERT 也不在 row_to_profile 中，也不在已知例外清单里：\n\
+             {unaccounted:?}\n\
+             新增字段时请同步 INSERT 与 row_to_profile（或加进 NON_PROFILE_COLUMNS 并说明原因）。"
+        );
+    }
+
+    #[test]
+    fn guard_actually_sees_the_columns() {
+        // 守卫自身不能是空转的：确认解析确实拿到了内容。
+        let inserted = insert_columns();
+        assert!(
+            inserted.len() > 25,
+            "解析出的 INSERT 列太少，守卫可能已失效: {inserted:?}"
+        );
+        assert!(inserted.contains("name"), "应包含 name");
+        assert!(mapped_columns().contains("provider"), "映射应包含 provider");
+    }
+}

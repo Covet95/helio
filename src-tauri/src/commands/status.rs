@@ -313,7 +313,12 @@ pub(crate) async fn run_failover(
 
     let success = winner.is_some();
     if let Some((id, _)) = &winner {
-        let _ = profile.set_active_key_id(id);
+        // `set_active_key_id` 在 key 不存在时返回 false。这里的 id 取自同一份
+        // key 列表，正常路径下不会失败；真失败了说明状态已不一致，
+        // 静默吞掉会让 `api_key` 停在旧值上、而 DB 里记的是新 active key。
+        if !profile.set_active_key_id(id) {
+            tracing::warn!("[Helio] failover: key {id} 不在档案的 key 池中，active key 未切换");
+        }
     }
 
     let persisted_shared_config = {
