@@ -19,51 +19,17 @@ import {
   contextPreviewLine,
   type ContextMode,
 } from '../../lib/contextWindow';
+import { emptyProfileForTool } from './helpers';
 import {
-  emptyProfileForTool,
-  normalizeCodexCatalogModels,
-  normalizeOpenCodeModelConfigs,
-} from './helpers';
+  ensureKeyPool,
+  newKeyId,
+  normalizeSubmit,
+  withActiveKey,
+} from './submitNormalize';
 
 // OpenCode 推理强度档位：variant 快捷添加与 reasoningEffort 下拉共用同一组官方档位。
 const OPENCODE_EFFORT_LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
-function newKeyId(): string {
-  return `k${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
-}
-
-function ensureKeyPool(p: ApiProfile): ApiKeyEntry[] {
-  if (p.api_keys && p.api_keys.length > 0) {
-    return p.api_keys.map((e) => ({ ...e }));
-  }
-  if (p.api_key?.trim()) {
-    return [
-      {
-        id: newKeyId(),
-        label: 'default',
-        key: p.api_key,
-        is_active: true,
-      },
-    ];
-  }
-  return [
-    {
-      id: newKeyId(),
-      label: 'default',
-      key: '',
-      is_active: true,
-    },
-  ];
-}
-
-function withActiveKey(p: ApiProfile, keys: ApiKeyEntry[]): ApiProfile {
-  const active = keys.find((k) => k.is_active) || keys[0];
-  return {
-    ...p,
-    api_keys: keys,
-    api_key: active?.key ?? p.api_key,
-  };
-}
 
 export function ProfileModal({
   profile, initialTool, seedFrom, onClose, onSave,
@@ -357,73 +323,20 @@ export function ProfileModal({
 
   const submit = async () => {
     if (savingRef.current) return;
-    const normalized = withActiveKey(form, ensureKeyPool(form));
-    const usesCodexEnv = tool === 'codex' && Boolean(normalized.env_key?.trim());
-    const usesAuthCmd = tool === 'codex' && Boolean(normalized.auth_command?.trim());
-    const usesBearer = tool === 'codex' && Boolean(normalized.experimental_bearer_token?.trim());
-    const usesBedrock = tool === 'codex' && normalized.provider.trim().toLowerCase() === 'amazon-bedrock';
-    if (!normalized.name.trim() || !normalized.provider.trim() || (!usesBedrock && (!normalized.api_url.trim() || (!usesCodexEnv && !usesAuthCmd && !usesBearer && !normalized.api_key.trim())))) {
-      setFormErr('请填写名称、Provider、API URL，并提供 API Key、环境变量名、Bearer Token 或 Auth 命令');
-      return;
-    }
-    if (usesCodexEnv && usesBearer) {
-      setFormErr('Codex 环境变量与 Bearer Token 请只保留一个（与 Auth 命令也互斥）');
+
+    // 字段归一与互斥清洗已抽到 `submitNormalize`（纯函数、有表驱动单测）——
+    // 这段逻辑此前埋在这里，是全应用最难测也最容易出错的部分。
+    const result = normalizeSubmit(form, tool);
+    if (!result.ok) {
+      setFormErr(result.error);
       return;
     }
     setFormErr('');
-    let catalog_models = normalized.catalog_models;
-    if (tool === 'codex' && catalog_models) {
-      catalog_models = normalizeCodexCatalogModels(catalog_models);
-    } else if (tool !== 'codex') {
-      catalog_models = undefined;
-    }
-    const model_configs = tool === 'opencode'
-      ? normalizeOpenCodeModelConfigs(normalized.model_configs)
-      : undefined;
-    // Codex wire 归一：responses 别名与 chat 系历史值 → responses，未知值 → 不保存（后端默认 responses）。
-    let wire_api = normalized.wire_api;
-    if (tool === 'codex' && wire_api?.trim()) {
-      const w = wire_api.trim().toLowerCase();
-      wire_api = [
-        'responses', 'openai-responses', 'openai_responses', 'codex_responses',
-        'chat', 'chat_completions', 'openai-chat',
-      ].includes(w) ? 'responses' : undefined;
-    } else if (tool !== 'codex') {
-      wire_api = undefined;
-    }
-    // auth 命令与静态凭据互斥：以 auth 命令为准，清掉冲突字段。
-    const auth_args = usesAuthCmd
-      ? (normalized.auth_args || []).map((a) => a.trim()).filter(Boolean)
-      : undefined;
-    const positiveOrUndefined = (n: unknown) =>
-      typeof n === 'number' && Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
+
     savingRef.current = true;
     setSaving(true);
     try {
-      await onSave({
-      ...normalized,
-      api_url: usesBedrock ? '' : normalized.api_url,
-      api_key: usesBedrock ? '' : normalized.api_key,
-      api_keys: usesBedrock ? undefined : normalized.api_keys,
-      wire_api,
-      env_key: (usesBedrock || usesAuthCmd) ? undefined : normalized.env_key,
-      experimental_bearer_token: usesAuthCmd ? undefined : normalized.experimental_bearer_token,
-      requires_openai_auth: usesAuthCmd ? undefined : normalized.requires_openai_auth,
-      auth_command: usesAuthCmd ? normalized.auth_command?.trim() || undefined : undefined,
-      auth_args: auth_args?.length ? auth_args : undefined,
-      auth_timeout_ms: usesAuthCmd ? positiveOrUndefined(normalized.auth_timeout_ms) : undefined,
-      auth_refresh_interval_ms: usesAuthCmd ? positiveOrUndefined(normalized.auth_refresh_interval_ms) : undefined,
-      auth_cwd: usesAuthCmd ? normalized.auth_cwd?.trim() || undefined : undefined,
-      supports_standalone_web_search: usesBedrock
-        ? undefined
-        : normalized.supports_standalone_web_search || undefined,
-      target_app: tool,
-      catalog_models,
-      model_configs,
-      opencode_api_mode: tool === "opencode"
-        ? normalized.opencode_api_mode?.trim() || undefined
-        : undefined,
-      });
+      await onSave(result.value);
     } catch (error) {
       setFormErr(humanizeError(error));
     } finally {
