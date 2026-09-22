@@ -22,12 +22,21 @@ export function Modal({
   descriptionId?: string;
 }) {
   const titleId = useId();
+  const panelRef = useRef<HTMLDivElement>(null);
   // Esc 关闭。注意：这里刻意不用原生 <dialog>——旧版 WebKit 里顶层 dialog
   // 按 fit-content 收缩，纵向 flex 的内容区会被压到只剩一行；普通 overlay
   // div + 定高面板在所有引擎表现一致。
+  //
+  // **只有最上层的对话框响应 Esc**：监听挂在 document 上，嵌套时（例如表单
+  // 上再叠一个「放弃修改？」确认框）两个监听器都会收到事件——外层先注册、
+  // 先执行，会把确认框关掉的同时触发它自己的 onClose。用「DOM 里有没有更晚
+  // 出现的同级面板」判断谁在最上层，只让最上层处理。
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !busy) onClose();
+      if (event.key !== 'Escape' || busy) return;
+      const panels = document.querySelectorAll('[data-modal-panel]');
+      if (panels.length > 0 && panels[panels.length - 1] !== panelRef.current) return;
+      onClose();
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
@@ -42,6 +51,8 @@ export function Modal({
   return (
     <div className="fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-black/40 p-4">
       <div
+        ref={panelRef}
+        data-modal-panel=""
         role={role}
         aria-modal="true"
         aria-labelledby={titleId}

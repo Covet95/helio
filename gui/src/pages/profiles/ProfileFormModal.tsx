@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { Alert } from '@/components/common/Alert';
 import type {
   ApiKeyEntry,
@@ -10,7 +10,7 @@ import type {
 } from '../../types';
 import { SUPPORTED_TOOLS } from '../../types';
 import { Button } from '../../components/common/Button';
-import { Modal, Field } from '../../components/common/Modal';
+import { Modal, Field, ConfirmDialog } from '../../components/common/Modal';
 import { PROVIDER_PRESETS, REASONING_LEVELS, SERVICE_TIERS, REASONING_SUMMARIES, VERBOSITY_LEVELS, CODEX_CATALOG_LEVELS } from '../../lib/presets';
 import { cn, maskApiKey, humanizeError } from '../../lib/utils';
 import { tauriApi } from '../../lib/tauri';
@@ -44,10 +44,14 @@ export function ProfileModal({
   const initialProfile = profile;
   const initialModalTool = initialProfile?.target_app ?? initialTool;
   const [tool, setTool] = useState<TargetApp>(initialModalTool);
-  const [form, setForm] = useState<ApiProfile>(() => {
+  // 初始值只算一次，同时留作「未保存修改」的比对基准。不能每次渲染重算：
+  // `ensureKeyPool` 里的 `newKeyId()` 用 `Math.random()`，重算必然不同，
+  // 于是表单会永远被判定为「有改动」——守卫就成了每次都弹的噪音。
+  const [initialForm] = useState<ApiProfile>(() => {
     const base = initialProfile || emptyProfileForTool(initialModalTool, seedFrom);
     return withActiveKey(base, ensureKeyPool(base));
   });
+  const [form, setForm] = useState<ApiProfile>(initialForm);
   const [models, setModels] = useState<FetchedModel[]>([]);
   const [loadingModels, setLoadingModels] = useState(false);
   const [checkingApi, setCheckingApi] = useState(false);
@@ -63,6 +67,7 @@ export function ProfileModal({
   const [variantNameDrafts, setVariantNameDrafts] = useState<Record<string, string>>({});
   const [optionsDrafts, setOptionsDrafts] = useState<Record<string, string>>({});
   const [optionsErrors, setOptionsErrors] = useState<Record<string, string>>({});
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
 
   const keys = form.api_keys && form.api_keys.length > 0 ? form.api_keys : ensureKeyPool(form);
   const activeKey =
@@ -322,6 +327,28 @@ export function ProfileModal({
     }));
   };
 
+  /**
+   * 表单是否偏离了初始值。
+   *
+   * 用 `JSON.stringify` 逐字段比对而不是逐个 `!==`：`ApiProfile` 有 30+ 字段，
+   * 漏掉一个就会让「改了那个字段却没提示」——而这种遗漏不会有任何报错。
+   * 表单值都是 JSON 可序列化的普通数据，顺序由对象字面量决定、稳定可比。
+   */
+  const isDirty = useMemo(
+    () => JSON.stringify(form) !== JSON.stringify(initialForm),
+    [form, initialForm],
+  );
+
+  /** 关闭前的守卫：有未保存修改时先问一句。 */
+  const requestClose = () => {
+    if (saving) return;
+    if (!isDirty) {
+      onClose();
+      return;
+    }
+    setConfirmDiscard(true);
+  };
+
   const submit = async () => {
     if (savingRef.current) return;
 
@@ -349,12 +376,12 @@ export function ProfileModal({
   return (
     <Modal
       title={profile ? '编辑配置档案' : '新建配置档案'}
-      onClose={onClose}
+      onClose={requestClose}
       busy={saving}
       size="xl"
       footer={
         <>
-          <Button type="button" variant="ghost" disabled={saving} onClick={onClose}>取消</Button>
+          <Button type="button" variant="ghost" disabled={saving} onClick={requestClose}>取消</Button>
           <Button type="button" disabled={saving} className="min-w-20" onClick={submit}>{saving ? '保存中…' : profile ? '保存' : '创建'}</Button>
         </>
       }
@@ -1524,6 +1551,25 @@ export function ProfileModal({
           )}
         </fieldset>
       </form>
+
+      {confirmDiscard && (
+        <ConfirmDialog
+          title="放弃未保存的修改？"
+          message={
+            profile
+              ? `「${profile.name}」的修改尚未保存，关闭后会丢失。`
+              : '新建的档案尚未保存，关闭后会丢失。'
+          }
+          confirmText="放弃修改"
+          cancelText="继续编辑"
+          danger
+          onCancel={() => setConfirmDiscard(false)}
+          onConfirm={() => {
+            setConfirmDiscard(false);
+            onClose();
+          }}
+        />
+      )}
     </Modal>
   );
 }
