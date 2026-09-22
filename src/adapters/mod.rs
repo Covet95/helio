@@ -70,25 +70,86 @@ pub trait ConfigAdapter {
     fn write_config(&self, config: &serde_json::Value) -> Result<()>;
 
     /// 三路合并写入：以 live 文件为基底，摘掉 `previous_managed` 的覆盖，
-    /// 再叠加 `next_managed`。**保留用户手写的注释、键序与未受管字段。**
+    /// 再叠加 `next_managed`。**保留用户手写的未受管字段与键序。**
     ///
-    /// 默认实现退化为「直接整体写入 `next_managed`」，即旧行为——尚未迁移的
-    /// 适配器无需改动即可继续工作。迁移完成的适配器应覆盖本方法，让写入走
-    /// [`crate::doc`] 的保真路径。
+    /// 默认实现对**所有适配器**生效，且**复用各适配器自己的 `write_config`**
+    /// 做序列化——不另立一套写盘约定。策略按格式分派：
     ///
-    /// `previous_managed` 为 `None` 表示首次切换（无可摘除的历史）。
+    /// - **TOML**：文本级合并（`toml_edit`）。TOML 有注释，只有文本级合并
+    ///   才能保住它们，因此这条路径自行序列化并写盘。
+    /// - **JSON / YAML**：值级合并后交给 [`Self::write_config`]。JSON 无注释，
+    ///   值级合并已能保住全部用户内容与键序，而委托给适配器可以保留它自己的
+    ///   缩进/排版约定。
+    ///
+    /// 解析失败时退回整体写入受管内容——「切换必须能完成」是硬需求，
+    /// 保真只是优化，不能因用户手改坏了文件就让切换卡死。
+    ///
+    /// `previous_managed` 为 `None` 表示首次切换（无可摘除的历史），此时
+    /// 只叠加、不摘除，不会删除 live 中的任何用户内容。
     fn write_config_merged(
         &self,
         next_managed: &serde_json::Value,
-        _previous_managed: Option<&serde_json::Value>,
+        previous_managed: Option<&serde_json::Value>,
     ) -> Result<()> {
-        self.write_config(next_managed)
+        let path = self.config_path();
+        let format = self.config_format();
+
+        let live_text = if path.exists() {
+            match fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(error) => {
+                    // 读不出来（权限/编码）——退回整体写入，不让切换卡死。
+                    tracing::warn!("读取 {} 失败，整体写入受管配置：{error:#}", path.display());
+                    return self.write_config(next_managed);
+                }
+            }
+        } else {
+            String::new()
+        };
+
+        if live_text.trim().is_empty() {
+            // 无 live 文件：直接落盘受管内容，无需合并。
+            return self.write_config(next_managed);
+        }
+
+        let live_value = match crate::doc::parse(format, &live_text) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(
+                    "{} 无法解析为 {}，本次切换将整体写入受管配置：{error:#}",
+                    path.display(),
+                    format!("{format:?}"),
+                );
+                return self.write_config(next_managed);
+            }
+        };
+
+        // TOML 走文本级合并以保住注释；其余格式委托给适配器自己的写盘逻辑。
+        if format == crate::doc::DocFormat::Toml {
+            if let Some(parent) = path.parent() {
+                crate::utils::secure_fs::ensure_private_dir(parent)
+                    .context("Failed to create config directory")?;
+            }
+            let content = crate::doc::toml::merge_json_into_toml(
+                &live_text,
+                previous_managed,
+                next_managed,
+            )
+            .with_context(|| format!("Failed to merge {}", path.display()))?;
+            crate::utils::secure_fs::atomic_write_private(&path, content.as_bytes())
+                .with_context(|| format!("Failed to write {}", path.display()))?;
+            return Ok(());
+        }
+
+        let merged = crate::doc::merge_three_way(&live_value, previous_managed, next_managed);
+        self.write_config(&merged)
     }
 
-    /// 本适配器是否已迁移到保真写入路径。用于事务层决定是否需要
-    /// 额外的语义校验分支；未迁移者行为与旧版完全一致。
-    fn supports_fidelity_write(&self) -> bool {
-        false
+    /// 主配置文件的格式。决定保真合并走哪条路径。
+    ///
+    /// 默认按扩展名推断；扩展名不标准时覆盖本方法。
+    fn config_format(&self) -> crate::doc::DocFormat {
+        crate::doc::DocFormat::from_path(&self.config_path()).unwrap_or(crate::doc::DocFormat::Json)
     }
 
     /// 备份配置
@@ -298,12 +359,8 @@ pub fn derive_previous_managed(
     previous_active: Option<&ApiProfile>,
     shared_config: &serde_json::Value,
 ) -> Option<serde_json::Value> {
-    let adapter = get_adapter(target_app);
-    if !adapter.supports_fidelity_write() {
-        return None;
-    }
     let previous = previous_active?;
-    Some(adapter.merge_config(previous, shared_config))
+    Some(get_adapter(target_app).merge_config(previous, shared_config))
 }
 
 /// 一次完整的配置切换（GUI / 托盘共用入口）：

@@ -113,6 +113,32 @@ pub fn merge_three_way(
     base
 }
 
+/// 按格式做三路合并，返回渲染好的文本。
+///
+/// 各适配器的统一入口：TOML 走保格式路径（`toml_edit`），其余格式走
+/// 值级合并后重新渲染。语义完全一致，差别只在格式保真能力。
+pub fn merge_document(
+    format: DocFormat,
+    live_text: &str,
+    previous_managed: Option<&Value>,
+    next_managed: &Value,
+) -> Result<String> {
+    match format {
+        DocFormat::Toml => toml::merge_json_into_toml(live_text, previous_managed, next_managed),
+        DocFormat::Json => {
+            let live = parse(DocFormat::Json, live_text)?;
+            json::render(&merge_three_way(&live, previous_managed, next_managed))
+        }
+        DocFormat::Yaml => {
+            let live = parse(DocFormat::Yaml, live_text)?;
+            render(
+                DocFormat::Yaml,
+                &merge_three_way(&live, previous_managed, next_managed),
+            )
+        }
+    }
+}
+
 /// 非对象文档归一为空对象——顶层必须是 map 才有「按路径摘除」的语义。
 fn normalize_document(value: &Value) -> Value {
     if value.is_object() {
