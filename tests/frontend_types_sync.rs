@@ -37,6 +37,8 @@ const MIRRORED_TYPES: &[&str] = &[
     "PreviewMessage",
     "DeleteResult",
     "AppError",
+    "LocalConfigInfo",
+    "McpServerConfig",
 ];
 
 /// 必须与 `gui/src/types/index.ts` 字符串联合类型一致的 Rust 枚举。
