@@ -283,8 +283,12 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         // mtime 故意设成与文件名时间戳相反：按文件名时间戳排序保留，不受 mtime 影响。
         let base = std::time::Duration::from_secs(1_700_000_000);
+        // 时间戳的差值必须**大于 SystemTime 的精度**：Windows 的 SystemTime
+        // 内部是 100ns 单位，而这里原先用 6 位数字（差 1ns），三个文件名解析后
+        // 被截断成同一个值，排序退化成任意——于是「保留最新的两个」变成
+        // 「保留随机的两个」。真实备份的时间戳是 9 位纳秒，差 100ns 以上。
         for i in 0..3 {
-            let name = format!("config.backup.20260101_000000_00000{i}.toml");
+            let name = format!("config.backup.20260101_000000_{:09}.toml", i * 1000);
             fs::write(dir.join(&name), b"x").unwrap();
             {
                 let f = fs::File::options()
@@ -312,15 +316,15 @@ mod tests {
         assert_eq!(remaining.len(), 2, "应只保留最近 2 个 config 备份");
         // 文件名时间戳最旧（i=0）的最先被清掉（尽管它的 mtime 最新）
         assert!(
-            !remaining.contains(&"config.backup.20260101_000000_000000.toml".to_string()),
+            !remaining.contains(&"config.backup.20260101_000000_000000000.toml".to_string()),
             "保留了错误的一份。\n             剩余: {remaining:?}\n             各文件的解析结果与 mtime: {:?}",
             (0..3)
                 .map(|i| {
-                    let n = format!("config.backup.20260101_000000_00000{i}.toml");
+                    let n = format!("config.backup.20260101_000000_{:09}.toml", i * 1000);
                     let p = dir.join(&n);
                     (
                         n,
-                        backup_time(&format!("config.backup.20260101_000000_00000{i}.toml"), &p),
+                        backup_time(&format!("config.backup.20260101_000000_{:09}.toml", i * 1000), &p),
                         fs::metadata(&p).and_then(|m| m.modified()).ok(),
                     )
                 })
