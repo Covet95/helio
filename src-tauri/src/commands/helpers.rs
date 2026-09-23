@@ -136,9 +136,19 @@ pub(crate) fn default_db_path() -> Result<std::path::PathBuf, AppError> {
 /// 等价路径必须也能挡住。目标不存在时 canonicalize 会失败，退化为
 /// 逐段规范化后再比。
 pub(crate) fn reject_export_onto_live_db(output_path: &str) -> Result<(), AppError> {
+    reject_export_onto(output_path, &default_db_path()?)
+}
+
+/// 比对逻辑本体，`live` 由调用方给出。
+///
+/// 拆出来是为了可测：命令层用 `default_db_path()`（依赖 `dirs::home_dir()`），
+/// 而**那个函数在 Windows 上不读 `HOME`**——它走 `SHGetKnownFolderPath`。
+/// 于是原先「改 HOME 再断言」的测试在 Windows 上根本没生效（实测：
+/// 守卫返回 Ok，测试失败）。把 live 路径作为参数传入，测试就能直接
+/// 构造两侧路径，不依赖任何环境变量。
+fn reject_export_onto(output_path: &str, live: &std::path::Path) -> Result<(), AppError> {
     let target = std::path::Path::new(output_path);
-    let live = default_db_path()?;
-    let live = std::fs::canonicalize(&live).unwrap_or(live);
+    let live = std::fs::canonicalize(live).unwrap_or_else(|_| live.to_path_buf());
 
     // 目标可能还不存在（新建导出文件）：规范化其父目录再拼回文件名。
     let normalized = std::fs::canonicalize(target)
@@ -161,80 +171,78 @@ pub(crate) fn reject_export_onto_live_db(output_path: &str) -> Result<(), AppErr
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::reject_export_onto;
     use std::fs;
 
-    /// 在临时 HOME 下造出 `<home>/.switch-api/db.sqlite`，返回 (临时目录, live 路径)。
+    /// 造出 `<dir>/.switch-api/db.sqlite`，返回 (临时目录, live 路径)。
     ///
-    /// `default_db_path()` 依赖 `home_dir()`，而后者读进程级 `HOME`——
-    /// 多个测试并行改它会互相打架，所以本模块内串行（见 `HOME_LOCK`）。
-    fn with_fake_home<T>(f: impl FnOnce(&std::path::Path) -> T) -> T {
-        static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    /// **不依赖 `HOME` 环境变量**：`dirs::home_dir()` 在 Windows 上走
+    /// `SHGetKnownFolderPath`，压根不读 `HOME`——原先「改 HOME 再断言」的
+    /// 写法在 Windows 上测试形同虚设（守卫返回 Ok 却无人察觉）。
+    /// 这里把 live 路径直接传给被测函数。
+    fn live_db() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
-        let home = dir.path();
-        let api_dir = home.join(".switch-api");
+        let api_dir = dir.path().join(".switch-api");
         fs::create_dir_all(&api_dir).unwrap();
         let live = api_dir.join("db.sqlite");
         fs::write(&live, b"db").unwrap();
-
-        let previous = std::env::var_os("HOME");
-        std::env::set_var("HOME", home);
-        let out = f(&live);
-        match previous {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-        out
+        (dir, live)
     }
 
     #[test]
     fn rejects_export_onto_live_db() {
-        with_fake_home(|live| {
-            let err = reject_export_onto_live_db(&live.to_string_lossy())
-                .expect_err("导出到 live 库必须被拒绝");
-            assert!(
-                err.to_string().contains("不能是 Helio 数据库本身"),
-                "错误信息应说明原因：{err}"
-            );
-        });
+        let (_dir, live) = live_db();
+        let err = reject_export_onto(&live.to_string_lossy(), &live)
+            .expect_err("导出到 live 库必须被拒绝");
+        assert!(
+            err.to_string().contains("不能是 Helio 数据库本身"),
+            "错误信息应说明原因：{err}"
+        );
     }
 
     #[test]
     fn rejects_equivalent_path_with_dot_segments() {
-        with_fake_home(|live| {
-            // `~/.switch-api/../.switch-api/db.sqlite` 指向同一个文件，
-            // 只做字符串比较会漏掉它。
-            let sneaky = live
-                .parent()
-                .unwrap()
-                .join("..")
-                .join(".switch-api")
-                .join("db.sqlite");
-            assert!(
-                reject_export_onto_live_db(&sneaky.to_string_lossy()).is_err(),
-                "等价路径也必须挡住：{}",
-                sneaky.display()
-            );
-        });
+        let (_dir, live) = live_db();
+        // `<...>/.switch-api/../.switch-api/db.sqlite` 指向同一个文件，
+        // 只做字符串比较会漏掉它。
+        let sneaky = live
+            .parent()
+            .unwrap()
+            .join("..")
+            .join(".switch-api")
+            .join("db.sqlite");
+        assert!(
+            reject_export_onto(&sneaky.to_string_lossy(), &live).is_err(),
+            "等价路径也必须挡住：{}",
+            sneaky.display()
+        );
     }
 
     #[test]
     fn allows_export_next_to_live_db() {
-        with_fake_home(|live| {
-            // 同目录下换个文件名是正常的导出操作，不能误伤。
-            let sibling = live.with_file_name("helio-backup.db");
-            reject_export_onto_live_db(&sibling.to_string_lossy()).expect("导出到库旁边应当允许");
-        });
+        let (_dir, live) = live_db();
+        // 同目录下换个文件名是正常的导出操作，不能误伤。
+        let sibling = live.with_file_name("helio-backup.db");
+        reject_export_onto(&sibling.to_string_lossy(), &live).expect("导出到库旁边应当允许");
     }
 
     #[test]
     fn allows_export_to_nonexistent_path() {
-        with_fake_home(|live| {
-            let target = live.with_file_name("brand-new-backup.tar.gz");
-            assert!(!target.exists());
-            reject_export_onto_live_db(&target.to_string_lossy())
-                .expect("导出到尚不存在的文件应当允许");
-        });
+        let (_dir, live) = live_db();
+        let target = live.with_file_name("brand-new-backup.tar.gz");
+        assert!(!target.exists());
+        reject_export_onto(&target.to_string_lossy(), &live).expect("导出到尚不存在的文件应当允许");
+    }
+
+    #[test]
+    fn live_path_matches_itself_through_a_symlinked_dir() {
+        // 经父目录的等价写法仍须命中：`<dir>/.switch-api/./db.sqlite`
+        let (_dir, live) = live_db();
+        let dotted = live.parent().unwrap().join(".").join("db.sqlite");
+        assert!(
+            reject_export_onto(&dotted.to_string_lossy(), &live).is_err(),
+            "带 `.` 段的等价路径也必须挡住：{}",
+            dotted.display()
+        );
     }
 }
