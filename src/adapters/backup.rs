@@ -311,7 +311,21 @@ mod tests {
             .collect();
         assert_eq!(remaining.len(), 2, "应只保留最近 2 个 config 备份");
         // 文件名时间戳最旧（i=0）的最先被清掉（尽管它的 mtime 最新）
-        assert!(!remaining.contains(&"config.backup.20260101_000000_000000.toml".to_string()));
+        assert!(
+            !remaining.contains(&"config.backup.20260101_000000_000000.toml".to_string()),
+            "保留了错误的一份。\n             剩余: {remaining:?}\n             各文件的解析结果与 mtime: {:?}",
+            (0..3)
+                .map(|i| {
+                    let n = format!("config.backup.20260101_000000_00000{i}.toml");
+                    let p = dir.join(&n);
+                    (
+                        n,
+                        backup_time(&format!("config.backup.20260101_000000_00000{i}.toml"), &p),
+                        fs::metadata(&p).and_then(|m| m.modified()).ok(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        );
         // auth 前缀不受影响
         assert!(dir.join("auth.backup.20260101_000000_000000.json").exists());
         let _ = fs::remove_dir_all(&dir);
